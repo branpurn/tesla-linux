@@ -9,7 +9,7 @@ vs `1cb7c04`. Ubuntu Server + XFCE, Raspberry Pi **4 8 GB only**. No AOSP. No Pi
    - SSID: **TeslaLinux** (TeslaAndroid-like). Do not invent a second SSID.
    - WPA2-PSK factory default password: **teslalinux**
    - AP LAN: **10.42.0.1/24** (DHCP `10.42.0.10`–`10.42.0.200`)
-3. Web GUI on that AP: existing `/var/www/tl/desktop.html` and `probe.html`, reachable by **other devices** on the Pi WLAN.
+3. Web GUI on that AP: `/var/www/tl/index.html` at `http://10.42.0.1/` (pick/save station WLAN). Stream remains `/var/www/tl/desktop.html`. `probe.html` unchanged. Reachable by **other devices** on the Pi WLAN.
    - Not loopback-only. Not `0.0.0.0` to the world.
    - Bind HTTP to the AP LAN address and, when associated, to the WLAN station address.
    - FLAG-TLS (WAVE 0): do not invent a new TLS policy. HTTP on the AP LAN is acceptable so a Tesla browser can open the GUI without a cert maze.
@@ -36,15 +36,16 @@ First-boot still creates the NM infra profile (`connection.autoconnect yes`). `t
 | `tesla-linux-wlan.service` | `After=NetworkManager.service`; oneshot `boot` |
 | hostapd + dnsmasq | AP + DHCP (stock `hostapd.service` / `dnsmasq.service` stay disabled) |
 
-Connect a client to **TeslaLinux** / **teslalinux**, then open `http://10.42.0.1/` (desktop) or `http://10.42.0.1/probe.html`.
+Connect a client to **TeslaLinux** / **teslalinux**, then open `http://10.42.0.1/` (pick/save station WLAN). Stream page stays `http://10.42.0.1/desktop.html`. Probe: `http://10.42.0.1/probe.html`.
 
-## FRONTEND-HOLE (this SHA)
+## Frontend picker (this SHA)
 
-Pick/save WLAN UI lands here. **Do not invent a settings maze** in this tree.
+`tl-src/index.html` → `/var/www/tl/index.html` (nginx `index`). Operator on the AP LAN saves a **station** SSID+PSK.
 
-- Serve the existing pages. Frontend owns the WAVE 1 Wi-Fi picker GUI on **this SHA**.
-- Suggested landing: `/var/www/tl/` (nginx already serves it on the AP/station binds).
-- Do not rewrite `desktop.html` / `probe.html` for a settings maze.
+- Origin-relative `GET`/`POST` `/api/wlan` (same `location.host` as the page). HTTP-only. No WebRTC. No OAuth.
+- `POST` JSON `{ssid, psk}` — `psk` may be empty. Show a hard error on HTTP 501 instead of hanging.
+- `GET` is optional: if Backend later returns a scan list, the page fills a dropdown; a typed SSID is enough if there is no scan.
+- Do not rewrite `desktop.html` / `probe.html` for a settings maze. Do not reprint the factory AP PSK here.
 
 ## BACKEND-HOLE (this SHA)
 

@@ -31,7 +31,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 for f in ta_display_backend.py ta_touch_backend.py ta_audio_backend.py; do
     [ -f "$HERE/$f" ] && install -m755 "$HERE/$f" "$PREFIX/$f"
 done
-for f in desktop.html probe.html; do
+for f in desktop.html probe.html index.html; do
     [ -f "$HERE/$f" ] && install -m644 "$HERE/$f" /var/www/tl/$f
 done
 
@@ -75,7 +75,7 @@ chmod 755 /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan
 # stock hostapd/dnsmasq units stay off — tesla-linux-wlan starts them on demand
 systemctl disable hostapd dnsmasq >/dev/null 2>&1 || true
 
-# nginx: existing desktop.html / probe.html on AP/station IPv4s only (never 0.0.0.0)
+# nginx: index.html (pick/save WLAN) + desktop.html / probe.html on AP/station IPv4s only (never 0.0.0.0)
 install -d /etc/nginx /etc/nginx/certs /etc/nginx/sites-available /etc/nginx/sites-enabled \
            /etc/systemd/system/nginx.service.d
 rm -f /etc/nginx/sites-enabled/default
@@ -89,10 +89,10 @@ proxy_send_timeout 3600s;
 proxy_buffering off;
 EOF
 cat > /etc/nginx/tl-locations.conf <<'EOF'
-# FRONTEND-HOLE (this SHA): pick/save WLAN UI. Serve existing pages; do not invent a maze.
+# WAVE 1: / is the station-WLAN picker (index.html). desktop.html stays the in-car stream.
 # BACKEND-HOLE (this SHA): /api/wlan → tesla-linux-wlan save-wlan / boot bounce.
 root /var/www/tl;
-index desktop.html;
+index index.html;
 location /sockets/display     { proxy_pass http://127.0.0.1:9091; include /etc/nginx/tl-ws.conf; }
 location /sockets/touchscreen { proxy_pass http://127.0.0.1:9092; include /etc/nginx/tl-ws.conf; }
 location /sockets/audio       { proxy_pass http://127.0.0.1:9093; include /etc/nginx/tl-ws.conf; }
