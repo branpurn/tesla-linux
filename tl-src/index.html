@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Tesla Linux — Wi-Fi</title>
+<title>Tesla Linux</title>
 <style>
 body{margin:0;background:#0b0b0b;color:#e8e8e8;font:16px/1.5 system-ui,sans-serif;padding:20px}
 h1{font-size:22px;margin:0 0 8px;color:#8ecdff}
@@ -15,17 +15,17 @@ button:disabled{opacity:.5;cursor:wait}
 .ok{color:#7bff9e}.bad{color:#ff7b7b}
 a{color:#8ecdff}
 </style>
-<h1>Tesla Linux</h1>
-<p>Save a station Wi-Fi so this Pi can leave the TeslaLinux setup network and join yours. You are on the setup LAN at this address.</p>
+<h1>Wi-Fi</h1>
+<p>Join the car's Wi-Fi</p>
 <form id="f">
-  <label>Network name (SSID)
+  <label>Network
     <select id="scan" hidden></select>
-    <input id="ssid" name="ssid" autocomplete="off" required>
+    <input id="ssid" name="ssid" autocomplete="off">
   </label>
-  <label>Password (leave blank if none)
+  <label>Password
     <input id="psk" name="psk" type="password" autocomplete="new-password">
   </label>
-  <button id="go" type="submit">Save</button>
+  <button id="go" type="submit">Join</button>
 </form>
 <p id="status"></p>
 <p><a href="desktop.html">Desktop</a> · <a href="probe.html">Probe</a></p>
@@ -35,10 +35,8 @@ const $=id=>document.getElementById(id);
 const status=m=>{ $('status').innerHTML=m; };
 
 function fail(r){
-  if(r && r.status===501){
-    return 'Save is not wired yet (HTTP 501). Backend still needs /api/wlan on this host.';
-  }
-  return 'Could not save'+(r?' (HTTP '+r.status+')':'');
+  const hint=r?'HTTP '+r.status:'error';
+  return '<span class="bad">Couldn\'t join</span> ('+hint+')';
 }
 
 async function fetchApi(opts){
@@ -69,6 +67,7 @@ function fillScan(list){
 }
 
 async function maybeScan(){
+  status('Scanning');
   try{
     const r=await fetchApi({method:'GET'});
     if(r.status===501 || !r.ok) return;
@@ -76,26 +75,29 @@ async function maybeScan(){
     const list=Array.isArray(data)?data: (data.ssids||data.networks||data.scan||[]);
     if(Array.isArray(list)) fillScan(list);
   }catch(e){ /* no scan endpoint — typing the SSID is enough */ }
+  finally{
+    if($('status').textContent==='Scanning') status('');
+  }
 }
 
 $('f').addEventListener('submit', async ev=>{
   ev.preventDefault();
   const ssid=$('ssid').value.trim();
   const psk=$('psk').value;
-  if(!ssid){ status('<span class="bad">Enter a network name.</span>'); return; }
+  if(!ssid){ status('<span class="bad">Couldn\'t join</span>'); return; }
   $('go').disabled=true;
-  status('Saving…');
+  status('Joining');
   try{
     const r=await fetchApi({
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({ssid, psk})
     });
-    if(!r.ok){ status('<span class="bad">'+fail(r)+'</span>'); return; }
-    status('<span class="ok">Saved. This Pi will join that network and drop the setup AP.</span>');
+    if(!r.ok){ status(fail(r)); return; }
+    status('<span class="ok">Saved</span><br>Next boot joins that WLAN.');
   }catch(e){
     const hung=e && e.name==='AbortError';
-    status('<span class="bad">'+(hung?'Save timed out — /api/wlan did not answer.':'Network error: '+(e.message||e))+'</span>');
+    status('<span class="bad">Couldn\'t join</span> ('+(hung?'timeout':'error')+')');
   }finally{ $('go').disabled=false; }
 });
 
