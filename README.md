@@ -10,6 +10,10 @@ sudo ./tl-src/build-image.sh
 
 Ubuntu Server arm64 raspi → `.img.xz` (`UBUNTU_REL` 26.04). Pi 4 8 GB only.
 
+Flash the same `.img.xz` with Raspberry Pi Imager → **Use custom** onto an SD card **or** a USB stick/SSD. Do not invent a second image or a bake flag.
+
+Pi 4 USB boot is operator-side: set EEPROM boot order (USB then SD) in `raspi-config` or `rpi-eeprom-config`.
+
 ## WLAN (WAVE 1)
 
 Preferred: Pi is a station on a saved Tesla (or other) WLAN (NetworkManager autoconnect).
