@@ -1,0 +1,134 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Tesla Linux</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;
+  font:13px ui-monospace,Consolas,monospace;color:#9f9}
+#wrap{position:relative;width:100vw;height:100vh;display:flex;align-items:center;justify-content:center}
+canvas{max-width:100%;max-height:100%;touch-action:none;cursor:crosshair;display:block}
+#hud{position:fixed;top:0;left:0;right:0;padding:4px 8px;background:rgba(0,0,0,.65);
+  pointer-events:none;z-index:10;font-size:12px}
+#hud.hide{display:none}
+</style>
+<div id="hud">starting…</div>
+<div id="wrap"><canvas id="c" width="1280" height="720"></canvas></div>
+<script>
+const hud=document.getElementById('hud'), canvas=document.getElementById('c'), ctx=canvas.getContext('2d');
+const secure = location.protocol==='https:';
+const base = `${secure?'wss':'ws'}://${location.host}`;
+let dec=null, cfg=false, started=false, spsPps=null, ts=0, frames=0, bytes=0, t0=Date.now();
+const hx=n=>n.toString(16).padStart(2,'0');
+function hudMsg(m){ hud.textContent=m; }
+
+/* ---------- video ---------- */
+function scan(b){
+  const types=new Set(); let spsOff=-1;
+  for(let i=0;i+4<b.length;i++){
+    if(b[i]===0&&b[i+1]===0&&(b[i+2]===1||(b[i+2]===0&&b[i+3]===1))){
+      const off=(b[i+2]===1)?i+3:i+4; if(off>=b.length) continue;
+      const t=b[off]&0x1f; types.add(t); if(t===7&&spsOff<0) spsOff=off;
+    }
+  }
+  return {types,spsOff};
+}
+const cat=(a,b)=>{const o=new Uint8Array(a.length+b.length);o.set(a,0);o.set(b,a.length);return o;};
+
+async function mkDecoder(codec){
+  try{
+    if(VideoDecoder.isConfigSupported){
+      const s=await VideoDecoder.isConfigSupported({codec});
+      if(!s.supported) codec='avc1.42e01f';
+    }
+    dec=new VideoDecoder({
+      output:f=>{
+        frames++;
+        if(canvas.width!==f.displayWidth){canvas.width=f.displayWidth;}
+        if(canvas.height!==f.displayHeight){canvas.height=f.displayHeight;}
+        ctx.drawImage(f,0,0); f.close();
+        if(frames%30===0){
+          const fps=(frames/((Date.now()-t0)/1000)).toFixed(1);
+          hudMsg(`${canvas.width}x${canvas.height} · ${fps} fps · ${(bytes/1024/1024).toFixed(1)} MiB · ${frames} frames · audio:${!actx?'off':(actx.state==='running'&&audioOn?'on':actx.state)} · click/drag to control`);
+        }
+      },
+      error:e=>hudMsg('decoder error: '+e.message)
+    });
+    dec.configure({codec, optimizeForLatency:true});
+    cfg=true;
+  }catch(err){ hudMsg('decoder setup failed: '+err.message); }
+}
+
+const vws=new WebSocket(base+'/sockets/display');
+vws.binaryType='arraybuffer';
+vws.onopen =()=>hudMsg('video socket open…');
+vws.onclose=()=>hudMsg('video socket closed');
+vws.onmessage=async ev=>{
+  const b=new Uint8Array(ev.data); bytes+=b.length;
+  const {types,spsOff}=scan(b);
+  const hasSPS=types.has(7), hasIDR=types.has(5);
+  if(hasSPS){ spsPps=b; if(!cfg) await mkDecoder('avc1.'+hx(b[spsOff+1])+hx(b[spsOff+2])+hx(b[spsOff+3])); }
+  if(!cfg) return;
+  if(!started){ if(!hasIDR) return; started=true; }
+  try{ dec.decode(new EncodedVideoChunk({type:hasIDR?'key':'delta',timestamp:ts,
+        data:(hasIDR&&!hasSPS&&spsPps)?cat(spsPps,b):b})); ts+=33333; }catch(e){}
+};
+
+/* ---------- input ---------- */
+const tws=new WebSocket(base+'/sockets/touchscreen');
+let inputReady=false;
+tws.onopen =()=>{inputReady=true;};
+tws.onclose=()=>{inputReady=false;};
+function send(type, ev){
+  if(!inputReady) return;
+  const r=canvas.getBoundingClientRect();
+  const p=(ev.touches&&ev.touches[0])||(ev.changedTouches&&ev.changedTouches[0])||ev;
+  const x=(p.clientX-r.left)/r.width, y=(p.clientY-r.top)/r.height;
+  if(x<0||x>1||y<0||y>1) return;
+  tws.send(JSON.stringify({type, x, y}));
+}
+let dragging=false;
+canvas.addEventListener('pointerdown',e=>{dragging=true;canvas.setPointerCapture(e.pointerId);send('down',e);e.preventDefault();});
+canvas.addEventListener('pointermove',e=>{if(dragging)send('move',e);e.preventDefault();});
+canvas.addEventListener('pointerup',  e=>{dragging=false;send('up',e);e.preventDefault();});
+canvas.addEventListener('pointercancel',e=>{dragging=false;send('up',e);});
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+// tap the HUD area to toggle it
+addEventListener('keydown',e=>{ if(e.key==='h') hud.classList.toggle('hide'); });
+
+/* ---------- audio: raw S16LE PCM -> Web Audio ----------
+   Starts automatically on load. Some browsers' autoplay policy opens the
+   AudioContext "suspended"; any later gesture resumes it, so a click is a
+   fallback, not a requirement. */
+const RATE=48000, CH=2;
+let actx=null, playAt=0, aws=null, abytes=0, audioOn=false;
+function startAudio(){
+  if(actx) return;
+  actx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:RATE});
+  playAt=actx.currentTime+0.08;                 // small jitter buffer
+  aws=new WebSocket(base+'/sockets/audio');
+  aws.binaryType='arraybuffer';
+  aws.onmessage=ev=>{
+    const pcm=new Int16Array(ev.data); abytes+=ev.data.byteLength;
+    const n=pcm.length/CH;
+    if(!n) return;
+    const buf=actx.createBuffer(CH,n,RATE);
+    for(let c=0;c<CH;c++){
+      const out=buf.getChannelData(c);
+      for(let i=0;i<n;i++) out[i]=pcm[i*CH+c]/32768;
+    }
+    const s=actx.createBufferSource(); s.buffer=buf; s.connect(actx.destination);
+    if(playAt<actx.currentTime) playAt=actx.currentTime+0.05;   // resync if we fell behind
+    s.start(playAt); playAt+=buf.duration;
+  };
+  aws.onopen =()=>{ audioOn=true; };
+  aws.onclose=()=>{ audioOn=false; };
+  if(actx.state==='suspended') actx.resume();
+}
+startAudio();                                   // no click required where policy allows
+const resumeAudio=()=>{                         // fallback: any gesture un-suspends it
+  if(!actx) startAudio();
+  if(actx && actx.state==='suspended') actx.resume();
+};
+['pointerdown','keydown','touchstart'].forEach(t=>addEventListener(t,resumeAudio,{passive:true}));
+if(!('VideoDecoder' in window)) hudMsg('NO WebCodecs — needs HTTPS (secure context). isSecureContext='+window.isSecureContext);
+</script>
