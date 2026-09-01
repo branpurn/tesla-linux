@@ -69,8 +69,10 @@ cp /etc/resolv.conf "$MNT/etc/resolv.conf"
 # --------------------------------------------------------------- payload -----
 log "staging payload"
 mkdir -p "$MNT/tmp/tl-src"
-cp "$SRC"/install-tesla-linux.sh "$SRC"/ta_*.py "$SRC"/*.html "$MNT/tmp/tl-src/" 2>/dev/null || true
-chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh"
+cp "$SRC"/install-tesla-linux.sh "$SRC"/ta_*.py "$SRC"/*.html \
+   "$SRC"/tesla-linux-wlan.sh "$SRC"/tesla-linux-wlan.service "$SRC"/ap.env \
+   "$MNT/tmp/tl-src/" 2>/dev/null || true
+chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh"
 # authorize the build key so the image is reachable headless
 mkdir -p "$MNT/home/ubuntu/.ssh"
 if [ -f "$SRC/authorized_keys" ]; then
@@ -109,47 +111,12 @@ chmod 600 /etc/netplan/01-network-manager-all.yaml
 systemctl enable NetworkManager >/dev/null 2>&1 || true
 
 # stack + units (chroot mode: no running systemd)
+# install writes nginx (AP/station binds only — never 0.0.0.0) + tesla-linux-wlan.service
 /tmp/tl-src/install-tesla-linux.sh --no-start
 
 # identity
 echo teslalinux > /etc/hostname
 sed -i 's/^127.0.1.1.*/127.0.1.1\tteslalinux/' /etc/hosts || echo "127.0.1.1 teslalinux" >> /etc/hosts
-
-# nginx site (TLS; cert generated per-device on first boot)
-rm -f /etc/nginx/sites-enabled/default
-mkdir -p /etc/nginx/certs
-cat > /etc/nginx/sites-available/tl <<'EOF'
-server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    server_name _;
-    ssl_certificate     /etc/nginx/certs/tl.crt;
-    ssl_certificate_key /etc/nginx/certs/tl.key;
-    root /var/www/tl;
-    index desktop.html;
-
-    location /sockets/display    { proxy_pass http://127.0.0.1:9091; include /etc/nginx/tl-ws.conf; }
-    location /sockets/touchscreen{ proxy_pass http://127.0.0.1:9092; include /etc/nginx/tl-ws.conf; }
-    location /sockets/audio      { proxy_pass http://127.0.0.1:9093; include /etc/nginx/tl-ws.conf; }
-}
-server {
-    listen 80; server_name _;
-    root /var/www/tl;
-    location = /probe.html { }
-    location / { return 301 https://$host$request_uri; }
-}
-EOF
-cat > /etc/nginx/tl-ws.conf <<'EOF'
-proxy_http_version 1.1;
-proxy_set_header Upgrade $http_upgrade;
-proxy_set_header Connection "upgrade";
-proxy_set_header Host $host;
-proxy_read_timeout 3600s;
-proxy_send_timeout 3600s;
-proxy_buffering off;
-EOF
-ln -sf /etc/nginx/sites-available/tl /etc/nginx/sites-enabled/tl
-systemctl enable nginx >/dev/null 2>&1 || true
 
 # first boot: per-device TLS cert + optional config from the FAT boot partition
 cat > /usr/local/sbin/tesla-linux-firstboot <<'EOF'
@@ -171,7 +138,14 @@ if [ -f "$CONF" ]; then
     . "$CONF" 2>/dev/null || true
     [ -n "${HOSTNAME_SET:-}" ] && hostnamectl set-hostname "$HOSTNAME_SET"
     if [ -n "${WIFI_SSID:-}" ]; then
-        nmcli con add type wifi con-name "$WIFI_SSID" ssid "$WIFI_SSID" 2>/dev/null || true
+        nmcli con add type wifi con-name "$WIFI_SSID" ifname "*" ssid "$WIFI_SSID" \
+            802-11-wireless.mode infrastructure \
+            connection.autoconnect yes \
+            connection.autoconnect-priority 10 2>/dev/null || true
+        nmcli con modify "$WIFI_SSID" \
+            802-11-wireless.mode infrastructure \
+            connection.autoconnect yes \
+            connection.autoconnect-priority 10 2>/dev/null || true
         [ -n "${WIFI_PSK:-}" ] && nmcli con modify "$WIFI_SSID" \
             wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$WIFI_PSK" 2>/dev/null || true
         nmcli con up "$WIFI_SSID" 2>/dev/null || true
@@ -189,9 +163,9 @@ chmod +x /usr/local/sbin/tesla-linux-firstboot
 cat > /etc/systemd/system/tesla-linux-firstboot.service <<'EOF'
 [Unit]
 Description=Tesla Linux first-boot provisioning
-Before=nginx.service
-Wants=network-online.target
-After=network-online.target
+Before=nginx.service tesla-linux-wlan.service
+Wants=NetworkManager.service
+After=NetworkManager.service
 
 [Service]
 Type=oneshot
