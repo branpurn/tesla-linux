@@ -19,21 +19,101 @@ gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer
 python3-gi python3-gst-1.0 python3-websockets python3-evdev \
 xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar dbus-x11 \
 pipewire pipewire-pulse pipewire-audio wireplumber pulseaudio-utils gstreamer1.0-pipewire \
-nginx openssl"
+nginx openssl network-manager hostapd iw dnsmasq rfkill"
 
 if [ "${1:-}" = "--print-packages" ]; then echo "$PKGS"; exit 0; fi
 
 echo "==> installing to $PREFIX (user=$TL_USER uid=$TL_UID)"
-install -d "$PREFIX" /etc/tesla-linux
+install -d "$PREFIX" /etc/tesla-linux /var/www/tl
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # --- payload -----------------------------------------------------------------
 for f in ta_display_backend.py ta_touch_backend.py ta_audio_backend.py; do
-    [ -f "$(dirname "$0")/$f" ] && install -m755 "$(dirname "$0")/$f" "$PREFIX/$f"
+    [ -f "$HERE/$f" ] && install -m755 "$HERE/$f" "$PREFIX/$f"
 done
-install -d /var/www/tl
 for f in desktop.html probe.html; do
-    [ -f "$(dirname "$0")/$f" ] && install -m644 "$(dirname "$0")/$f" /var/www/tl/$f
+    [ -f "$HERE/$f" ] && install -m644 "$HERE/$f" /var/www/tl/$f
 done
+
+# WAVE 1: factory AP env (SSID TeslaLinux / PSK teslalinux) + wlan helper/unit
+if [ -f "$HERE/ap.env" ]; then
+    install -m644 "$HERE/ap.env" /etc/tesla-linux/ap.env
+else
+    cat > /etc/tesla-linux/ap.env <<'EOF'
+AP_SSID=TeslaLinux
+AP_PSK=teslalinux
+AP_ADDR=10.42.0.1
+AP_PREFIX=24
+AP_DHCP_START=10.42.0.10
+AP_DHCP_END=10.42.0.200
+WAIT_SEC=20
+EOF
+fi
+install -m755 "$HERE/tesla-linux-wlan.sh" /usr/local/sbin/tesla-linux-wlan
+install -m644 "$HERE/tesla-linux-wlan.service" /etc/systemd/system/tesla-linux-wlan.service
+
+# NM dispatcher: rebind nginx on station up; AP fallback on wifi down
+install -d /etc/NetworkManager/dispatcher.d
+cat > /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan <<'EOF'
+#!/bin/sh
+# WAVE 1 — wifi only. Do not start AP if a station link is up.
+IFACE="$1"
+ACTION="$2"
+[ -e "/sys/class/net/$IFACE/wireless" ] || exit 0
+case "$ACTION" in
+    up|connectivity-change)
+        /usr/local/sbin/tesla-linux-wlan nginx-bind
+        ;;
+    down)
+        /usr/local/sbin/tesla-linux-wlan maybe-ap
+        ;;
+esac
+exit 0
+EOF
+chmod 755 /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan
+
+# stock hostapd/dnsmasq units stay off — tesla-linux-wlan starts them on demand
+systemctl disable hostapd dnsmasq >/dev/null 2>&1 || true
+
+# nginx: existing desktop.html / probe.html on AP/station IPv4s only (never 0.0.0.0)
+install -d /etc/nginx /etc/nginx/certs /etc/nginx/sites-available /etc/nginx/sites-enabled \
+           /etc/systemd/system/nginx.service.d
+rm -f /etc/nginx/sites-enabled/default
+cat > /etc/nginx/tl-ws.conf <<'EOF'
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+proxy_set_header Host $host;
+proxy_read_timeout 3600s;
+proxy_send_timeout 3600s;
+proxy_buffering off;
+EOF
+cat > /etc/nginx/tl-locations.conf <<'EOF'
+# FRONTEND-HOLE (this SHA): pick/save WLAN UI. Serve existing pages; do not invent a maze.
+# BACKEND-HOLE (this SHA): /api/wlan → tesla-linux-wlan save-wlan / boot bounce.
+root /var/www/tl;
+index desktop.html;
+location /sockets/display     { proxy_pass http://127.0.0.1:9091; include /etc/nginx/tl-ws.conf; }
+location /sockets/touchscreen { proxy_pass http://127.0.0.1:9092; include /etc/nginx/tl-ws.conf; }
+location /sockets/audio       { proxy_pass http://127.0.0.1:9093; include /etc/nginx/tl-ws.conf; }
+location /api/wlan { return 501; }
+EOF
+# Placeholder until tesla-linux-wlan nginx-bind sees an AP/station IPv4.
+# No listen 80 / listen 0.0.0.0 — nginx stays down-bind until a WLAN address exists.
+echo "# no AP/station IPv4 yet; tesla-linux-wlan nginx-bind will rewrite" > /etc/nginx/tl-http-server.conf
+echo "# no TLS binds yet" > /etc/nginx/tl-https-server.conf
+cat > /etc/nginx/sites-available/tl <<'EOF'
+# WAVE 1 binds: generated listen IPs in tl-http-server.conf / tl-https-server.conf.
+# FLAG-TLS: HTTP on AP/station LAN is acceptable; do not invent a new TLS policy.
+include /etc/nginx/tl-http-server.conf;
+include /etc/nginx/tl-https-server.conf;
+EOF
+ln -sf /etc/nginx/sites-available/tl /etc/nginx/sites-enabled/tl
+cat > /etc/systemd/system/nginx.service.d/tl-after-wlan.conf <<'EOF'
+[Unit]
+After=tesla-linux-wlan.service tesla-linux-firstboot.service
+Wants=tesla-linux-wlan.service
+EOF
 
 # --- tunables (edit here, not in the units) ----------------------------------
 if [ ! -f /etc/tesla-linux/tesla-linux.env ]; then
@@ -191,16 +271,26 @@ EOF
 loginctl enable-linger "$TL_USER" 2>/dev/null || true
 systemctl set-default graphical.target >/dev/null 2>&1 || true
 
+mkdir -p /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-user.target.wants
+
+enable_wlan_nginx() {
+    systemctl enable tesla-linux-wlan.service nginx.service >/dev/null 2>&1 || true
+    ln -sf /etc/systemd/system/tesla-linux-wlan.service \
+       /etc/systemd/system/multi-user.target.wants/tesla-linux-wlan.service
+}
+
 if [ "$START" = "1" ]; then
     systemctl daemon-reload
     systemctl enable tesla-linux-xorg tesla-linux-desktop tesla-linux-display \
                      tesla-linux-touch tesla-linux-audio >/dev/null 2>&1
-    echo "==> enabled. start with: systemctl start tesla-linux-xorg tesla-linux-desktop tesla-linux-display tesla-linux-touch tesla-linux-audio"
+    enable_wlan_nginx
+    echo "==> enabled. start with: systemctl start tesla-linux-xorg tesla-linux-desktop tesla-linux-display tesla-linux-touch tesla-linux-audio tesla-linux-wlan"
 else
     # bake-time: enable via symlink since systemctl can't talk to a running systemd
     for u in xorg desktop display touch audio; do
         ln -sf "/etc/systemd/system/tesla-linux-$u.service" \
            "/etc/systemd/system/graphical.target.wants/tesla-linux-$u.service" 2>/dev/null || true
     done
-    echo "==> installed (chroot mode; units symlinked into graphical.target.wants)"
+    enable_wlan_nginx
+    echo "==> installed (chroot mode; units symlinked into graphical.target.wants + multi-user.target.wants)"
 fi

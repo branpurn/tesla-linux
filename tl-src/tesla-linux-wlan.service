@@ -1,0 +1,14 @@
+[Unit]
+Description=Tesla Linux WLAN (saved station else TeslaLinux hostapd AP)
+After=NetworkManager.service tesla-linux-firstboot.service
+Wants=NetworkManager.service
+Before=nginx.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/tesla-linux-wlan boot
+ExecStop=/usr/local/sbin/tesla-linux-wlan ap-down
+
+[Install]
+WantedBy=multi-user.target

@@ -18,7 +18,7 @@ Inventory is against zip `tl-src/` (import **verbatim** into `tl-src/`). Do not 
 
 Not Debian. Not LXDE. Do not switch. Not Pi 5. Strip any “Pi 4 + Pi 5, one image” comments on import.
 
-No AOSP. No WebRTC. No WAVE 1 AP / Wi-Fi setup GUI in this PR.
+No AOSP. No WebRTC. WAVE 1 AP / station path: [docs/WAVE1-WLAN.md](WAVE1-WLAN.md). Pick/save GUI is a **FRONTEND-HOLE** on that SHA (do not invent a settings maze here).
 
 ## KEEP — bake path (import zip files verbatim)
 
@@ -65,7 +65,7 @@ One table. Origin-relative sockets are already in the zip (not hardcoded `https`
 - LXDE
 - Debian as the bake distro
 - Making kiss public
-- **hostapd / setup AP** and the WAVE 1 Wi-Fi setup GUI (after this PR — do not build here)
+- WAVE 1 pick/save **settings maze** (Frontend hole on WAVE 1 SHA — do not invent here)
 - Pi 5
 - Baking a real `.img` in this PR
 
@@ -76,19 +76,15 @@ One table. Origin-relative sockets are already in the zip (not hardcoded `https`
 | FLAG-TLS | This stack: nginx TLS + loopback WS. kiss after prune: HTTP-only. Tesla-browser TLS/HTTP behavior is **not** resolved here. Do not invent a TLS policy. | **FLAG** |
 | FLAG-AUDIO | This stack: raw S16LE PCM on :9093. kiss: FLAC / fMP4. Decoder/latency match is **not** resolved here. | **FLAG** |
 | FLAG-MJPEG | `desktop.html` has no MJPEG fallback. WebCodecs needs a secure context; HTTP-only Tesla-browser is KEEP-to-verify. kiss MJPEG default is **not** in this zip. | **FLAG** |
-| FLAG-AP-GUI | WAVE 1 AP Wi-Fi setup GUI (pick/save WLAN; bind AP LAN, reachable by other devices on the Pi WLAN, not loopback-only, never `0.0.0.0` to the world). | **document only** |
+| FLAG-AP-GUI | WAVE 1 AP + bind is in [WAVE1-WLAN.md](WAVE1-WLAN.md). Pick/save WLAN UI: **FRONTEND-HOLE** on that SHA. | **Frontend on WAVE 1 SHA** |
 
-Do not invent a TLS policy, an audio transcoder, or hostapd in this PR. `desktop.html` **is** WAVE 0 KEEP.
+Do not invent a TLS policy or an audio transcoder here. hostapd AP is WAVE 1 ([WAVE1-WLAN.md](WAVE1-WLAN.md)). `desktop.html` **is** WAVE 0 KEEP.
 
-## WAVE 1 — after this PR
+## WAVE 1
 
-Name only. Do not implement here:
+Implemented on the WAVE 1 PR vs `1cb7c04`: saved-WLAN NM autoconnect else **hostapd** AP SSID **TeslaLinux** / password **teslalinux**, GUI on AP LAN. See [docs/WAVE1-WLAN.md](WAVE1-WLAN.md).
 
-- WLAN station join
-- hostapd / setup AP
-- Web GUI on the AP
-
-The Tesla-browser stream page / in-car path is **`desktop.html` and is WAVE 0 KEEP**, not WAVE 1.
+The Tesla-browser stream page / in-car path is **`desktop.html` and is WAVE 0 KEEP**. Frontend fills pick/save on the WAVE 1 SHA; Backend bounces autoconnect on that SHA.
 
 ## Import status
 
