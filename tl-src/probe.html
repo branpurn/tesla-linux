@@ -1,0 +1,74 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tesla Linux — browser probe</title>
+<style>
+body{margin:0;background:#0b0b0b;color:#e8e8e8;font:16px/1.5 system-ui,sans-serif;padding:14px}
+h1{font-size:20px;margin:0 0 10px;color:#8ecdff}
+.big{font-size:44px;font-weight:700;color:#7bff9e;margin:6px 0 2px;font-family:ui-monospace,monospace}
+.sub{font-size:14px;color:#999;margin-bottom:14px}
+table{border-collapse:collapse;width:100%;max-width:760px}
+td{padding:6px 8px;border-bottom:1px solid #262626;vertical-align:top}
+td:first-child{color:#9ab;white-space:nowrap;width:44%}
+.ok{color:#7bff9e;font-weight:700}.bad{color:#ff7b7b;font-weight:700}
+.ua{font-size:12px;color:#888;word-break:break-all}
+</style>
+<h1>Tesla Linux — browser probe</h1>
+
+<div class="big" id="vp">…</div>
+<div class="sub">viewport (CSS px) — <b>this is the number to match</b></div>
+
+<table>
+<tr><td>viewport (CSS px)</td><td id="t_vp">…</td></tr>
+<tr><td>viewport × devicePixelRatio</td><td id="t_phys">…</td></tr>
+<tr><td>devicePixelRatio</td><td id="t_dpr">…</td></tr>
+<tr><td>screen.width × height</td><td id="t_screen">…</td></tr>
+<tr><td>screen.avail</td><td id="t_avail">…</td></tr>
+<tr><td>orientation</td><td id="t_or">…</td></tr>
+<tr><td><b>WebCodecs (VideoDecoder)</b></td><td id="t_wc">…</td></tr>
+<tr><td>H.264 decode supported</td><td id="t_h264">…</td></tr>
+<tr><td><b>isSecureContext</b> (HTTPS ok?)</td><td id="t_sec">…</td></tr>
+<tr><td>page protocol</td><td id="t_proto">…</td></tr>
+<tr><td>MediaSource (MSE fallback)</td><td id="t_mse">…</td></tr>
+<tr><td>WebSocket</td><td id="t_ws">…</td></tr>
+<tr><td>WebRTC (RTCPeerConnection)</td><td id="t_rtc">…</td></tr>
+<tr><td>AudioContext</td><td id="t_ac">…</td></tr>
+<tr><td>touch points</td><td id="t_touch">…</td></tr>
+<tr><td>user agent</td><td class="ua" id="t_ua">…</td></tr>
+</table>
+
+<script>
+const $=id=>document.getElementById(id);
+const yn=(b,y='YES',n='NO')=>`<span class="${b?'ok':'bad'}">${b?y:n}</span>`;
+
+function paint(){
+  const w=window.innerWidth, h=window.innerHeight, dpr=window.devicePixelRatio||1;
+  $('vp').textContent=`${w} × ${h}`;
+  $('t_vp').textContent=`${w} × ${h}`;
+  $('t_phys').textContent=`${Math.round(w*dpr)} × ${Math.round(h*dpr)}`;
+  $('t_dpr').textContent=dpr;
+  $('t_screen').textContent=`${screen.width} × ${screen.height}`;
+  $('t_avail').textContent=`${screen.availWidth} × ${screen.availHeight}`;
+  $('t_or').textContent=(screen.orientation&&screen.orientation.type)||(w>h?'landscape':'portrait');
+}
+paint(); addEventListener('resize',paint); addEventListener('orientationchange',()=>setTimeout(paint,300));
+
+const hasWC='VideoDecoder' in window;
+$('t_wc').innerHTML=yn(hasWC,'PRESENT (hardware decode available)','MISSING');
+$('t_sec').innerHTML=yn(window.isSecureContext,'true','false — WebCodecs needs HTTPS');
+$('t_proto').textContent=location.protocol+'//'+location.host;
+$('t_mse').innerHTML=yn('MediaSource' in window);
+$('t_ws').innerHTML=yn('WebSocket' in window);
+$('t_rtc').innerHTML=yn('RTCPeerConnection' in window);
+$('t_ac').innerHTML=yn(('AudioContext' in window)||('webkitAudioContext' in window));
+$('t_touch').textContent=(navigator.maxTouchPoints||0)+' (0 = mouse only)';
+$('t_ua').textContent=navigator.userAgent;
+
+if(hasWC && VideoDecoder.isConfigSupported){
+  VideoDecoder.isConfigSupported({codec:'avc1.42e01f'})
+    .then(r=>{$('t_h264').innerHTML=yn(!!r.supported,'YES (avc1.42e01f baseline)','NO');})
+    .catch(e=>{$('t_h264').innerHTML='<span class="bad">check failed: '+e.name+'</span>';});
+}else{
+  $('t_h264').innerHTML='<span class="bad">n/a — no WebCodecs</span>';
+}
+</script>
