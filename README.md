@@ -23,10 +23,10 @@ WIFI_PSK=yourpsk
 
 Fallback when no saved WLAN / associate fails: **hostapd** AP SSID **TeslaLinux**, WPA2-PSK password **teslalinux** (documented factory default; operators change it later). Do not invent a second SSID.
 
-Web GUI on that AP: `http://10.42.0.1/` (`desktop.html`) and `http://10.42.0.1/probe.html` — reachable by other devices on the Pi WLAN. Bind is AP LAN (and station IP when associated), not loopback-only, not `0.0.0.0` world.
+Web GUI on that AP: `http://10.42.0.1/` (pick/save station WLAN), `http://10.42.0.1/desktop.html` (in-car stream), `http://10.42.0.1/probe.html` — reachable by other devices on the Pi WLAN. Bind is AP LAN (and station IP when associated), not loopback-only, not `0.0.0.0` world.
 
 Factory AP password is also in `/etc/tesla-linux/ap.env` on the image.
 
-Frontend owns the pick/save Wi-Fi GUI on this SHA (do not invent a settings maze here). Backend bounces autoconnect (`tesla-linux-wlan save-wlan`) on this SHA.
+Frontend picker is `tl-src/index.html` (POST origin-relative `/api/wlan`). Backend bounces autoconnect (`tesla-linux-wlan save-wlan`) on this SHA.
 
 See [docs/WAVE1-WLAN.md](docs/WAVE1-WLAN.md). WAVE 0 KEEP / DROP / GAPS: [docs/WAVE0-KEEP-DROP-GAPS.md](docs/WAVE0-KEEP-DROP-GAPS.md).
