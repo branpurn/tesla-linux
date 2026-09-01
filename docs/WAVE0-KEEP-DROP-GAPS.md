@@ -101,3 +101,32 @@ Copywriter off. Frontend owns in-app strings.
 - desktop.html has no MJPEG fallback. WebCodecs needs secure context; HTTP Tesla-browser KEEP-to-verify. kiss MJPEG default is not in this zip.
 - WAVE 1 AP Wi-Fi setup GUI (pick/save WLAN, bind AP LAN not loopback-only / not 0.0.0.0 world) — document only.
 - Serve these pages so Tesla browser can open them while Pi is a station on Tesla WLAN (Ubuntu+XFCE).
+
+## KEEP — Tesla-browser client (Frontend; import zip files verbatim)
+
+Frontend owns in-app strings. Copywriter off. Do not invent WebRTC.
+
+| Zip path | Contract |
+|---|---|
+| `desktop.html` | canvas + origin-relative WS (`ws`/`wss` from `location.protocol` + `location.host`). `/sockets/display` (H264 Annex-B → WebCodecs VideoDecoder → canvas), `/sockets/touchscreen` (JSON pointer/touch), `/sockets/audio` (S16LE PCM → Web Audio). HUD. Title Tesla Linux. |
+| `probe.html` | viewport CSS-px, WebCodecs, isSecureContext, WebSocket, MSE, AudioContext. Diagnostic only. |
+
+Origin-relative already in the zip (not hardcoded `device.teslaandroid.com`). HTTP vs HTTPS follows the page. `desktop.html` does not use WebRTC. `probe.html` only reports `RTCPeerConnection`.
+
+## DROP (Frontend)
+
+- Flutter / kiss beta maze
+- Hardcoded `https`/`wss://device.teslaandroid.com`
+- WAVE 1 Wi-Fi setup GUI (do not build in WAVE 0)
+
+## GAPS / FLAG (Frontend; document, do not invent)
+
+| ID | Gap | Action |
+|---|---|---|
+| FLAG-MJPEG | `desktop.html` has no MJPEG fallback. WebCodecs needs a secure context; HTTP Tesla-browser KEEP-to-verify. kiss MJPEG default is not in this zip. | **FLAG** |
+| FLAG-AP-GUI | WAVE 1 AP Wi-Fi setup GUI (pick/save WLAN, bind AP LAN not loopback-only / not 0.0.0.0 world). | **document only** |
+| FLAG-STATION | Serve these pages so the Tesla browser can open them while the Pi is a station on Tesla WLAN (Ubuntu+XFCE). | **WAVE 1** |
+
+## Import status (update)
+
+Zip scripts + html (`build-image.sh`, `install-tesla-linux.sh`, `desktop.html`, `probe.html`, `authorized_keys`) imported. `ta_*.py` owned by Backend on this SHA.
