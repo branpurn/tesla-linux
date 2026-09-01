@@ -1,6 +1,6 @@
 # WAVE 1 — WLAN station else TeslaLinux AP
 
-vs `1cb7c04`. Ubuntu Server + XFCE, Raspberry Pi **4 8 GB only**. No AOSP. No Pi 5. No WebRTC. kiss stays **PRIVATE**.
+vs `1cb7c04`. Ubuntu Server + XFCE, Raspberry Pi **4 8 GB only**. No AOSP. No Pi 5. No WebRTC. kiss stays **PRIVATE**. Same `.img.xz` flashes SD or USB (Pi 4 USB boot: operator EEPROM).
 
 ## Product path
 
