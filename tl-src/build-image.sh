@@ -70,7 +70,8 @@ cp /etc/resolv.conf "$MNT/etc/resolv.conf"
 log "staging payload"
 mkdir -p "$MNT/tmp/tl-src"
 cp "$SRC"/install-tesla-linux.sh "$SRC"/ta_*.py "$SRC"/*.html \
-   "$SRC"/tesla-linux-wlan.sh "$SRC"/tesla-linux-wlan.service "$SRC"/ap.env \
+   "$SRC"/tesla-linux-wlan.sh "$SRC"/tesla-linux-wlan.service \
+   "$SRC"/tesla-linux-wlan-api.service "$SRC"/ap.env \
    "$MNT/tmp/tl-src/" 2>/dev/null || true
 chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh"
 # authorize the build key so the image is reachable headless

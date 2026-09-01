@@ -33,7 +33,9 @@ First-boot still creates the NM infra profile (`connection.autoconnect yes`). `t
 |---|---|
 | `/etc/tesla-linux/ap.env` | Factory `AP_SSID=TeslaLinux`, `AP_PSK=teslalinux`, `AP_ADDR=10.42.0.1` |
 | `/usr/local/sbin/tesla-linux-wlan` | `boot` / `ap-up` / `ap-down` / `nginx-bind` / `save-wlan` |
+| `/usr/local/sbin/ta_wlan_api.py` | loopback `127.0.0.1:9094` — GET scan + POST save-wlan kick |
 | `tesla-linux-wlan.service` | `After=NetworkManager.service`; oneshot `boot` |
+| `tesla-linux-wlan-api.service` | `Type=simple`; `TA_BIND=127.0.0.1` |
 | hostapd + dnsmasq | AP + DHCP (stock `hostapd.service` / `dnsmasq.service` stay disabled) |
 
 Connect a client to **TeslaLinux** / **teslalinux**, then open `http://10.42.0.1/` (pick/save station WLAN). Stream page stays `http://10.42.0.1/desktop.html`. Probe: `http://10.42.0.1/probe.html`.
@@ -49,16 +51,19 @@ Chrome lock (Designer): [design/ap-setup.md](../design/ap-setup.md) — title **
 - `GET` is optional: if Backend later returns a scan list, the page fills a dropdown; a typed SSID is enough if there is no scan.
 - Do not rewrite `desktop.html` / `probe.html` for a settings maze. Do not reprint the factory AP PSK here.
 
-## BACKEND-HOLE (this SHA)
+## Backend `/api/wlan` (this SHA)
 
-Stack glue / autoconnect bounce on **this SHA**. Do not open a second PR.
+`tl-src/ta_wlan_api.py` listens on **`127.0.0.1:9094`** (never `0.0.0.0`). nginx `location /api/wlan` `proxy_pass`es there. **501 is gone.**
 
 ```
 # save infra profile, tear down AP, NM associate, rebind nginx
 tesla-linux-wlan save-wlan <ssid> [psk]
 ```
 
-nginx `location /api/wlan` currently returns **501** — Backend replaces that with the handler that calls `save-wlan` / `boot`. Backends stay `TA_BIND=127.0.0.1` behind nginx. Do not rewrite `ta_*.py`.
+- `POST` JSON `{ssid, psk}` (`psk` may be empty) kicks `save-wlan` in a **background thread** and returns **HTTP 200 fast**. Picker fetch timeout is 15s — do not block the HTTP worker on `WAIT_SEC`.
+- `GET` returns `{ssids:[...]}`. Scan failure is `200 {ssids:[]}`, not 501.
+- Non-JSON POST or missing/invalid `ssid`: `400 {error:"..."}`.
+- Display/touch/audio stay `TA_BIND=127.0.0.1`. Do not rewrite those `ta_*.py` files.
 
 ## Packages
 
