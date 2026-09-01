@@ -1,0 +1,14 @@
+[Unit]
+Description=Tesla Linux WLAN API (loopback /api/wlan)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+Environment=TA_BIND=127.0.0.1
+Environment=TA_WLAN_PORT=9094
+ExecStart=/usr/bin/python3 /usr/local/sbin/ta_wlan_api.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

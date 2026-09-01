@@ -31,7 +31,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 for f in ta_display_backend.py ta_touch_backend.py ta_audio_backend.py; do
     [ -f "$HERE/$f" ] && install -m755 "$HERE/$f" "$PREFIX/$f"
 done
-for f in desktop.html probe.html; do
+for f in desktop.html probe.html index.html; do
     [ -f "$HERE/$f" ] && install -m644 "$HERE/$f" /var/www/tl/$f
 done
 
@@ -51,6 +51,8 @@ EOF
 fi
 install -m755 "$HERE/tesla-linux-wlan.sh" /usr/local/sbin/tesla-linux-wlan
 install -m644 "$HERE/tesla-linux-wlan.service" /etc/systemd/system/tesla-linux-wlan.service
+install -m755 "$HERE/ta_wlan_api.py" /usr/local/sbin/ta_wlan_api.py
+install -m644 "$HERE/tesla-linux-wlan-api.service" /etc/systemd/system/tesla-linux-wlan-api.service
 
 # NM dispatcher: rebind nginx on station up; AP fallback on wifi down
 install -d /etc/NetworkManager/dispatcher.d
@@ -75,7 +77,7 @@ chmod 755 /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan
 # stock hostapd/dnsmasq units stay off — tesla-linux-wlan starts them on demand
 systemctl disable hostapd dnsmasq >/dev/null 2>&1 || true
 
-# nginx: existing desktop.html / probe.html on AP/station IPv4s only (never 0.0.0.0)
+# nginx: index.html (pick/save WLAN) + desktop.html / probe.html on AP/station IPv4s only (never 0.0.0.0)
 install -d /etc/nginx /etc/nginx/certs /etc/nginx/sites-available /etc/nginx/sites-enabled \
            /etc/systemd/system/nginx.service.d
 rm -f /etc/nginx/sites-enabled/default
@@ -89,14 +91,19 @@ proxy_send_timeout 3600s;
 proxy_buffering off;
 EOF
 cat > /etc/nginx/tl-locations.conf <<'EOF'
-# FRONTEND-HOLE (this SHA): pick/save WLAN UI. Serve existing pages; do not invent a maze.
-# BACKEND-HOLE (this SHA): /api/wlan → tesla-linux-wlan save-wlan / boot bounce.
+# WAVE 1: / is the station-WLAN picker (index.html). desktop.html stays the in-car stream.
+# /api/wlan → loopback ta_wlan_api.py :9094 (save-wlan kick + nmcli scan). 501 gone.
 root /var/www/tl;
-index desktop.html;
+index index.html;
 location /sockets/display     { proxy_pass http://127.0.0.1:9091; include /etc/nginx/tl-ws.conf; }
 location /sockets/touchscreen { proxy_pass http://127.0.0.1:9092; include /etc/nginx/tl-ws.conf; }
 location /sockets/audio       { proxy_pass http://127.0.0.1:9093; include /etc/nginx/tl-ws.conf; }
-location /api/wlan { return 501; }
+location /api/wlan {
+    proxy_pass http://127.0.0.1:9094;
+    proxy_set_header Host $host;
+    proxy_set_header Content-Type $http_content_type;
+    client_max_body_size 8k;
+}
 EOF
 # Placeholder until tesla-linux-wlan nginx-bind sees an AP/station IPv4.
 # No listen 80 / listen 0.0.0.0 — nginx stays down-bind until a WLAN address exists.
@@ -111,8 +118,8 @@ EOF
 ln -sf /etc/nginx/sites-available/tl /etc/nginx/sites-enabled/tl
 cat > /etc/systemd/system/nginx.service.d/tl-after-wlan.conf <<'EOF'
 [Unit]
-After=tesla-linux-wlan.service tesla-linux-firstboot.service
-Wants=tesla-linux-wlan.service
+After=tesla-linux-wlan.service tesla-linux-wlan-api.service tesla-linux-firstboot.service
+Wants=tesla-linux-wlan.service tesla-linux-wlan-api.service
 EOF
 
 # --- tunables (edit here, not in the units) ----------------------------------
@@ -274,9 +281,11 @@ systemctl set-default graphical.target >/dev/null 2>&1 || true
 mkdir -p /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-user.target.wants
 
 enable_wlan_nginx() {
-    systemctl enable tesla-linux-wlan.service nginx.service >/dev/null 2>&1 || true
+    systemctl enable tesla-linux-wlan.service tesla-linux-wlan-api.service nginx.service >/dev/null 2>&1 || true
     ln -sf /etc/systemd/system/tesla-linux-wlan.service \
        /etc/systemd/system/multi-user.target.wants/tesla-linux-wlan.service
+    ln -sf /etc/systemd/system/tesla-linux-wlan-api.service \
+       /etc/systemd/system/multi-user.target.wants/tesla-linux-wlan-api.service
 }
 
 if [ "$START" = "1" ]; then
@@ -284,7 +293,7 @@ if [ "$START" = "1" ]; then
     systemctl enable tesla-linux-xorg tesla-linux-desktop tesla-linux-display \
                      tesla-linux-touch tesla-linux-audio >/dev/null 2>&1
     enable_wlan_nginx
-    echo "==> enabled. start with: systemctl start tesla-linux-xorg tesla-linux-desktop tesla-linux-display tesla-linux-touch tesla-linux-audio tesla-linux-wlan"
+    echo "==> enabled. start with: systemctl start tesla-linux-xorg tesla-linux-desktop tesla-linux-display tesla-linux-touch tesla-linux-audio tesla-linux-wlan tesla-linux-wlan-api"
 else
     # bake-time: enable via symlink since systemctl can't talk to a running systemd
     for u in xorg desktop display touch audio; do

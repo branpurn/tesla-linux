@@ -1,0 +1,105 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tesla Linux</title>
+<style>
+body{margin:0;background:#0b0b0b;color:#e8e8e8;font:16px/1.5 system-ui,sans-serif;padding:20px}
+h1{font-size:22px;margin:0 0 8px;color:#8ecdff}
+p{color:#aaa;margin:0 0 16px;max-width:36em}
+form{max-width:28em;display:flex;flex-direction:column;gap:10px}
+label{display:flex;flex-direction:column;gap:4px}
+input,button,select{font:inherit;padding:8px 10px;border:1px solid #333;border-radius:6px;background:#161616;color:#e8e8e8}
+button{background:#1b4f7a;border-color:#2a6ea8;color:#fff;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}
+#status{margin-top:14px;min-height:1.4em}
+.ok{color:#7bff9e}.bad{color:#ff7b7b}
+a{color:#8ecdff}
+</style>
+<h1>Wi-Fi</h1>
+<p>Join the car's Wi-Fi</p>
+<form id="f">
+  <label>Network
+    <select id="scan" hidden></select>
+    <input id="ssid" name="ssid" autocomplete="off">
+  </label>
+  <label>Password
+    <input id="psk" name="psk" type="password" autocomplete="new-password">
+  </label>
+  <button id="go" type="submit">Join</button>
+</form>
+<p id="status"></p>
+<p><a href="desktop.html">Desktop</a> · <a href="probe.html">Probe</a></p>
+<script>
+const api='/api/wlan';
+const $=id=>document.getElementById(id);
+const status=m=>{ $('status').innerHTML=m; };
+
+function fail(r){
+  const hint=r?'HTTP '+r.status:'error';
+  return '<span class="bad">Couldn\'t join</span> ('+hint+')';
+}
+
+async function fetchApi(opts){
+  const ac=new AbortController();
+  const t=setTimeout(()=>ac.abort(),15000);
+  try{
+    return await fetch(api, Object.assign({signal:ac.signal, credentials:'same-origin'}, opts));
+  }finally{ clearTimeout(t); }
+}
+
+function fillScan(list){
+  const names=list.map(x=>typeof x==='string'?x:(x&&x.ssid)||'').map(s=>String(s).trim()).filter(Boolean);
+  if(!names.length) return;
+  const sel=$('scan');
+  sel.hidden=false;
+  sel.replaceChildren();
+  const blank=document.createElement('option');
+  blank.value='';
+  blank.textContent='Choose a network…';
+  sel.appendChild(blank);
+  names.forEach(n=>{
+    const o=document.createElement('option');
+    o.value=n;
+    o.textContent=n;
+    sel.appendChild(o);
+  });
+  sel.addEventListener('change',()=>{ if(sel.value) $('ssid').value=sel.value; });
+}
+
+async function maybeScan(){
+  status('Scanning');
+  try{
+    const r=await fetchApi({method:'GET'});
+    if(r.status===501 || !r.ok) return;
+    const data=await r.json();
+    const list=Array.isArray(data)?data: (data.ssids||data.networks||data.scan||[]);
+    if(Array.isArray(list)) fillScan(list);
+  }catch(e){ /* no scan endpoint — typing the SSID is enough */ }
+  finally{
+    if($('status').textContent==='Scanning') status('');
+  }
+}
+
+$('f').addEventListener('submit', async ev=>{
+  ev.preventDefault();
+  const ssid=$('ssid').value.trim();
+  const psk=$('psk').value;
+  if(!ssid){ status('<span class="bad">Couldn\'t join</span>'); return; }
+  $('go').disabled=true;
+  status('Joining');
+  try{
+    const r=await fetchApi({
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ssid, psk})
+    });
+    if(!r.ok){ status(fail(r)); return; }
+    status('<span class="ok">Saved</span><br>Next boot joins that WLAN.');
+  }catch(e){
+    const hung=e && e.name==='AbortError';
+    status('<span class="bad">Couldn\'t join</span> ('+(hung?'timeout':'error')+')');
+  }finally{ $('go').disabled=false; }
+});
+
+maybeScan();
+</script>
