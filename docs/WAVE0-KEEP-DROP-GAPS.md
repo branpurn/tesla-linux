@@ -80,3 +80,24 @@ Name only. Do not implement here:
 |---|---|
 | 2026-09-01 | Zip `tl-src/` not in the opening prompt. PR opened with inventory + README bake command. |
 | 2026-09-01 | Backend follow-up: stack KEEP/DROP/GAPS landed. Zip bytes still absent — **not invented**. Awaiting verbatim `tl-src/` tarball (`ta_*.py`, `install-tesla-linux.sh`, nginx, units). |
+
+## KEEP / DROP / GAPS — Frontend (Tesla-browser client)
+
+Copywriter off. Frontend owns in-app strings.
+
+### KEEP
+
+- desktop.html: canvas + origin-relative WS (ws/wss from location.protocol + location.host). Sockets /sockets/display (H264 Annex-B → WebCodecs VideoDecoder → canvas), /sockets/touchscreen (JSON pointer/touch), /sockets/audio (S16LE PCM → Web Audio). HUD. Title Tesla Linux.
+- probe.html: viewport CSS-px, WebCodecs, isSecureContext, WebSocket, MSE, AudioContext. Diagnostic only.
+- Origin-relative already in zip (not hardcoded device.teslaandroid.com). HTTP vs HTTPS follows the page.
+- Do not invent WebRTC. desktop.html does not use it. probe.html only reports RTCPeerConnection.
+
+### DROP
+
+- Flutter / kiss beta maze. Hardcoded https/wss://device.teslaandroid.com. WAVE 1 Wi-Fi setup GUI (do not build in WAVE 0).
+
+### GAPS
+
+- desktop.html has no MJPEG fallback. WebCodecs needs secure context; HTTP Tesla-browser KEEP-to-verify. kiss MJPEG default is not in this zip.
+- WAVE 1 AP Wi-Fi setup GUI (pick/save WLAN, bind AP LAN not loopback-only / not 0.0.0.0 world) — document only.
+- Serve these pages so Tesla browser can open them while Pi is a station on Tesla WLAN (Ubuntu+XFCE).
