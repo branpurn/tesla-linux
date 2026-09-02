@@ -3,10 +3,14 @@ Description=Tesla Linux WLAN (saved station else TeslaLinux hostapd AP)
 After=NetworkManager.service tesla-linux-firstboot.service
 Wants=NetworkManager.service
 Before=nginx.service
+# AP must not wait on HDMI/X — do not After/Requires tesla-linux-desktop or xorg.
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+ExecStartPre=/usr/local/sbin/tesla-linux-wlan eth-up
 ExecStart=/usr/local/sbin/tesla-linux-wlan boot
 ExecStop=/usr/local/sbin/tesla-linux-wlan ap-down
 
