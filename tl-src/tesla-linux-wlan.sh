@@ -644,22 +644,21 @@ cmd_selftest() {
     if ! cmd_eth_up; then
         echo "FAIL: eth-up after wait timeout should skip (0)"; fail=1
     fi
+    primary_wired_iface() { printf '%s\n' usb0; }
+    out="$(wait_wired_iface)"
+    [ "$out" = usb0 ] || { echo "FAIL: wait_wired_iface usb0"; fail=1; }
     if cmd_ap_up; then
         echo "FAIL: ap-up without iface returned 0"; fail=1
     fi
     wait_wifi_iface() { return 1; }
     wait_wired_iface() { return 1; }
+    primary_wired_iface() { return 1; }
     wired_ifaces() { return 0; }
     NGINX_HTTP="$dir/boot-none-http.conf"
     NGINX_HTTPS="$dir/boot-none-https.conf"
     if cmd_boot; then
         echo "FAIL: boot without wired/wifi returned 0"; fail=1
     fi
-
-    unset -f wait_wired_iface
-    primary_wired_iface() { printf '%s\n' usb0; }
-    out="$(wait_wired_iface)"
-    [ "$out" = usb0 ] || { echo "FAIL: wait_wired_iface usb0"; fail=1; }
 
     # No wifi / no hostapd: 10.42.1.1 bound → unit success + nginx listen (not 0.0.0.0).
     cmd_eth_up() { return 0; }
