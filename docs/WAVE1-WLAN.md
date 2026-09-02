@@ -35,7 +35,7 @@ First-boot still creates the NM infra profile (`connection.autoconnect yes`). `t
 | `/etc/NetworkManager/system-connections/tesla-linux-eth.nmconnection` | Wired static **10.42.1.1/24** (no DHCP; not AP `10.42.0.1/24`) |
 | `/usr/local/sbin/tesla-linux-wlan` | `boot` / `eth-up` / `ap-up` / `ap-down` / `nginx-bind` / `maybe-ap` / `save-wlan` |
 | `/usr/local/sbin/ta_wlan_api.py` | loopback `127.0.0.1:9094` — GET scan + POST save-wlan kick |
-| `tesla-linux-wlan.service` | `After=NetworkManager.service`; oneshot `boot`; `Restart=on-failure`; `WantedBy=multi-user.target` (not desktop/X) |
+| `tesla-linux-wlan.service` | `After=NetworkManager.service`; oneshot `boot`; `Restart=on-failure`; `WantedBy=multi-user.target` (not desktop/X). nginx `After=`/`Wants=` this unit; this unit does not `Before=nginx` |
 | `tesla-linux-wlan-api.service` | `Type=simple`; `TA_BIND=127.0.0.1` |
 | hostapd + dnsmasq | AP + DHCP (stock `hostapd.service` / `dnsmasq.service` stay disabled) |
 
