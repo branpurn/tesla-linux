@@ -10,9 +10,15 @@ sudo ./tl-src/build-image.sh
 
 Ubuntu Server arm64 raspi → `.img.xz` (`UBUNTU_REL` 26.04). Pi 4 8 GB only.
 
-Flash the same `.img.xz` with Raspberry Pi Imager → **Use custom** onto an SD card **or** a USB stick/SSD. Do not invent a second image or a bake flag.
+Flash the same `tesla-linux-20260901-pi.img.xz` with Raspberry Pi Imager → **Use custom** onto an SD card **or** a USB stick/SSD. Do not invent a second image or a bake flag. Do not rebake.
 
-Pi 4 USB boot is operator-side: set EEPROM boot order (USB then SD) in `raspi-config` or `rpi-eeprom-config`.
+### USB or SD (Pi 4)
+
+Operator-side. Image is not USB-hostile (`root=LABEL=writable`, `LABEL=` fstab). Gap is EEPROM / power / HDMI.
+
+- **EEPROM USB MSD:** Raspberry Pi Imager → Choose OS → Misc utility images → Bootloader → USB boot. Write to a spare SD. Power the Pi 4 with that SD (no USB OS yet). Success = rapid green ACT blink and HDMI green screen (~10s). Power off, remove the recovery SD, then boot the tesla-linux USB stick. Official docs: [boot EEPROM](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#boot-eeprom). `BOOT_ORDER` USB-then-SD is `0xf14` (read right-to-left). Default empty EEPROM is `0xf41` (SD then USB).
+- **USB3 power:** official 5V 3A PSU. If red PWR flickers or the USB SSD/stick hangs at solid green, use a USB 2.0 port or a powered hub. Do not invent a second image.
+- **HDMI:** use HDMI0 (micro-HDMI nearest USB-C). Ubuntu KMS has no firmware splash — black until the kernel starts is expected. Wait; first boot still brings XFCE on `:0`.
 
 ## WLAN (WAVE 1)
 
