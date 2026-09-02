@@ -300,6 +300,7 @@ cat > /etc/systemd/system/tesla-linux-desktop.service <<EOF
 Description=Tesla Linux — XFCE session
 After=tesla-linux-xorg.service
 Requires=tesla-linux-xorg.service
+# No BindsTo/PartOf xorg or display — desktop restart must not take down xorg/display.
 
 [Service]
 User=$TL_USER
@@ -318,7 +319,8 @@ EOF
 cat > /etc/systemd/system/tesla-linux-display.service <<EOF
 [Unit]
 Description=Tesla Linux — screen capture/encode -> WebSocket
-After=tesla-linux-desktop.service
+# After xorg only — not desktop. A desktop restart loop must not block or take down capture.
+After=tesla-linux-xorg.service
 Requires=tesla-linux-xorg.service
 
 [Service]
