@@ -72,14 +72,13 @@ mkdir -p "$MNT/tmp/tl-src"
 cp "$SRC"/install-tesla-linux.sh "$SRC"/ta_*.py "$SRC"/*.html \
    "$SRC"/tesla-linux-wlan.sh "$SRC"/tesla-linux-wlan.service \
    "$SRC"/tesla-linux-wlan-api.service "$SRC"/ap.env \
-   "$SRC"/tesla-linux-hdmi-clone \
    "$MNT/tmp/tl-src/" 2>/dev/null || true
 # Stage authorized_keys for teslalinux (never print the key). Not ubuntu — ubuntu is DOA.
 if [ -f "$SRC/authorized_keys" ]; then
   cp "$SRC/authorized_keys" "$MNT/tmp/tl-src/authorized_keys"
 fi
-chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh" \
-         "$MNT/tmp/tl-src/tesla-linux-hdmi-clone"
+chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh"
+# HDMI clone is DESCPE — do not stage or install tesla-linux-hdmi-clone.
 
 # ---------------------------------------------------------------- chroot -----
 log "provisioning inside chroot (qemu-aarch64)"
@@ -268,6 +267,12 @@ fi
   || die "getty@tty1 not enabled"
 if grep -Eq '^Conflicts=.*getty@tty1' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
   die "xorg Conflicts=getty@tty1 would take HDMI getty down"
+fi
+if grep -Eq '^ExecStartPost=.*tesla-linux-hdmi-clone' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
+  die "xorg still ExecStartPost tesla-linux-hdmi-clone"
+fi
+if [ -e "$MNT/usr/local/sbin/tesla-linux-hdmi-clone" ]; then
+  die "tesla-linux-hdmi-clone still installed on image"
 fi
 grep -q '^Environment=DISPLAY=:0$' "$MNT/etc/systemd/system/tesla-linux-desktop.service" \
   || die "desktop is not DISPLAY=:0"

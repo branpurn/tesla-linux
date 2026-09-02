@@ -28,8 +28,8 @@ Capture stays `ximagesrc` on `DISPLAY=:0` (`ta_display_backend.py` unchanged). T
 | `/etc/X11/xorg.conf.d/20-tesla-linux-input.conf` | `Driver libinput` + `Option GrabDevice true` for keyboard / pointer / touchpad. |
 | `/etc/udev/rules.d/60-tesla-linux-kbm-seat0.rules` | Tag USB HID `ID_SEAT=seat0` so Xorg `-seat seat0` gets the devices. Required for this Xorg path — not a second install stack. |
 | `/etc/X11/xorg.conf.d/99-vc4.conf` | HDMI KMS (`modesetting` on vc4). Kept. Not a second Screen. Not changed this PR. |
-| `/usr/local/sbin/tesla-linux-hdmi-clone` | Unchanged this PR. HDMI clone is Infra/DESCPE. |
-| `tesla-linux-xorg.service` | `Xorg :0 vt7 -seat seat0 -ac -noreset -novtswitch`. **No** `Conflicts=getty@tty1`. No `After=` wlan. |
+| `tesla-linux-hdmi-clone` | **Not installed, not run.** HDMI XFCE is DESCPE. Xorg has no `ExecStartPost` clone. File may remain in the tree only. |
+| `tesla-linux-xorg.service` | `Xorg :0 vt7 -seat seat0 -ac -noreset -novtswitch`. **No** `Conflicts=getty@tty1`. **No** `ExecStartPost` clone. No `After=` wlan. |
 | `getty@tty1.service` | **Enabled** (not masked). HDMI vt1 is Infra getty. |
 | `/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf` | `NAutoVTs=0` `ReserveVT=1` — keep tty1 in text mode; do not spawn extra VTs that would fight X on vt7. |
 | `serial-getty@ttyAMA0` / `ttyS0` / `ttyAMA1` | Infra qemu typed-login path. Kept. |
