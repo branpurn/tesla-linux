@@ -61,9 +61,9 @@ else
     pass "install script does not Conflicts=getty@tty1"
 fi
 if grep -q 'systemctl mask getty@tty1' "$INSTALL"; then
-    bad "install script still masks getty@tty1"
+    pass "install remasks getty@tty1 (HDMI is pinned SSH banner, not login)"
 else
-    pass "install script does not mask getty@tty1"
+    bad "install script does not remask getty@tty1"
 fi
 grep -q 'GrabDevice' "$INSTALL" && pass "install writes GrabDevice" || bad "no GrabDevice"
 grep -Eq 'Driver[[:space:]]+"libinput"' "$INSTALL" && pass "install writes Driver libinput" || bad "no libinput driver"
@@ -96,10 +96,12 @@ plant() {
     local t="$1"
     mkdir -p "$t/etc/systemd/system/getty.target.wants" \
              "$t/etc/systemd/system/graphical.target.wants" \
+             "$t/etc/systemd/system/multi-user.target.wants" \
              "$t/etc/systemd/system/serial-getty@.service.d" \
              "$t/etc/systemd/logind.conf.d" \
              "$t/etc/X11/xorg.conf.d" \
              "$t/etc/udev/rules.d" \
+             "$t/etc/NetworkManager/dispatcher.d" \
              "$t/usr/lib/systemd/system" \
              "$t/usr/lib/xorg/modules/input" \
              "$t/usr/local/sbin" \
@@ -108,8 +110,9 @@ plant() {
     : > "$t/usr/lib/xorg/modules/input/libinput_drv.so"
     : > "$t/usr/bin/Xorg"
     ln -sfn /usr/lib/systemd/system/graphical.target "$t/etc/systemd/system/default.target"
-    ln -sfn /usr/lib/systemd/system/getty@.service \
-        "$t/etc/systemd/system/getty.target.wants/getty@tty1.service"
+    # HDMI is a write-only pinned SSH banner — getty@tty1 stays masked.
+    ln -sfn /dev/null "$t/etc/systemd/system/getty@tty1.service"
+    ln -sfn /dev/null "$t/etc/systemd/system/autovt@tty1.service"
     ln -sfn /usr/lib/systemd/system/serial-getty@.service \
         "$t/etc/systemd/system/getty.target.wants/serial-getty@ttyAMA0.service"
     ln -sfn /usr/lib/systemd/system/serial-getty@.service \
@@ -209,6 +212,16 @@ ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=
 EOF
     cp "$HERE/tesla-linux-wlan.sh" "$t/usr/local/sbin/tesla-linux-wlan"
     chmod +x "$t/usr/local/sbin/tesla-linux-wlan"
+    cp "$HERE/tesla-linux-hdmi-banner" "$t/usr/local/sbin/tesla-linux-hdmi-banner"
+    chmod +x "$t/usr/local/sbin/tesla-linux-hdmi-banner"
+    cp "$HERE/tesla-linux-hdmi-banner.service" "$t/etc/systemd/system/tesla-linux-hdmi-banner.service"
+    ln -sfn /etc/systemd/system/tesla-linux-hdmi-banner.service \
+        "$t/etc/systemd/system/multi-user.target.wants/tesla-linux-hdmi-banner.service"
+    cat > "$t/etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan" <<'EOF'
+#!/bin/sh
+/usr/local/sbin/tesla-linux-wlan maybe-ap
+/usr/local/sbin/tesla-linux-hdmi-banner once >/dev/null 2>&1 || true
+EOF
 }
 
 plant "$TREE"
@@ -233,10 +246,13 @@ expect_fail "ExecStartPost hdmi-clone fails gate" "hdmi-clone" "$INSTALL" --veri
 sed -i '/^ExecStartPost=\/usr\/local\/sbin\/tesla-linux-hdmi-clone$/d' \
     "$TREE/etc/systemd/system/tesla-linux-xorg.service"
 
-# Negative: getty masked
-ln -sfn /dev/null "$TREE/etc/systemd/system/getty@tty1.service"
-expect_fail "masked getty fails gate" "masked" "$INSTALL" --verify-kbm "$TREE"
+# Negative: getty unmasked (login would bury the pinned SSH banner)
 rm -f "$TREE/etc/systemd/system/getty@tty1.service"
+ln -sfn /usr/lib/systemd/system/getty@.service \
+    "$TREE/etc/systemd/system/getty.target.wants/getty@tty1.service"
+expect_fail "unmasked getty fails gate" "unmasked" "$INSTALL" --verify-kbm "$TREE"
+rm -f "$TREE/etc/systemd/system/getty.target.wants/getty@tty1.service"
+ln -sfn /dev/null "$TREE/etc/systemd/system/getty@tty1.service"
 
 # Negative: no GrabDevice
 sed -i '/GrabDevice/d' "$TREE/etc/X11/xorg.conf.d/20-tesla-linux-input.conf"
