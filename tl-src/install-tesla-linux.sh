@@ -11,6 +11,18 @@ PREFIX=/opt/tesla-linux
 START=1
 [ "${1:-}" = "--no-start" ] && START=0
 
+# Canonical package list — single source of truth for both the live box and the
+# image bake. `install-tesla-linux.sh --print-packages` emits it for the chroot.
+# xserver-xorg-input-libinput is required so USB HID attaches to dummy Xorg :0.
+# python3-evdev is the uinput touch backend, not the Xorg HID driver.
+PKGS="xserver-xorg-core xserver-xorg-video-dummy xserver-xorg-input-libinput \
+xinit x11-utils x11-xserver-utils xinput \
+gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+python3-gi python3-gst-1.0 python3-websockets python3-evdev \
+xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar dbus-x11 \
+pipewire pipewire-pulse pipewire-audio wireplumber pulseaudio-utils gstreamer1.0-pipewire \
+nginx openssl network-manager hostapd iw dnsmasq rfkill"
+
 # Factory console user (documented like AP PSK teslalinux). chpasswd must stick.
 # Fail the bake/install if the password is not written — no `|| true`.
 ensure_factory_user() {
@@ -128,7 +140,7 @@ ensure_serial_console() {
     done
     # Stock serial-getty@.service BindsTo=dev-%i.device. qemu raspi4b often never
     # activates that udev unit → DEPEND-fail, no guest shell. Empty BindsTo= clears it.
-    # Do not After= tesla-linux-wlan. HDMI getty@tty1 stays masked (not this unit).
+    # Do not After= tesla-linux-wlan. HDMI getty@tty1 is Infra on vt1 (not this unit).
     cat > /etc/systemd/system/serial-getty@.service.d/tl-no-binds-to-dev.conf <<'EOF'
 # qemu: udev may never activate dev-ttyAMA0.device / dev-ttyS0.device.
 # Stock BindsTo=dev-%i.device then DEPEND-fails the getty. Empty BindsTo= clears it.
@@ -138,45 +150,156 @@ BindsTo=
 EOF
 }
 
-# HDMI / tty1 is Xorg :0 + tesla-linux-desktop (teslalinux), not getty.
-# Serial-getty on ttyAMA0/ttyS0/ttyAMA1 stays (qemu typed login).
-# logind ReserveVT=1 would keep tty1 for getty — that is the JUMP HDMI-is-getty fail.
-ensure_getty_not_on_hdmi() {
+# HDMI vt1 is getty (Infra SSH-banner slice). Xorg :0 must not occupy vt1.
+# USB KBM is grabbed by Xorg libinput — HDMI getty must not steal HID.
+# Do not mask getty@tty1. Do not Conflicts=getty@tty1.
+ensure_hdmi_getty_vt1() {
     mkdir -p /etc/systemd/system/getty.target.wants /etc/systemd/logind.conf.d
-    rm -f /etc/systemd/system/getty.target.wants/getty@tty1.service \
-          /etc/systemd/system/getty.target.wants/autovt@tty1.service \
-          /etc/systemd/system/getty@tty1.service.d/autologin.conf
-    ln -sfn /dev/null /etc/systemd/system/getty@tty1.service
-    ln -sfn /dev/null /etc/systemd/system/autovt@tty1.service
+    # Drop leftover JUMP masks so Infra can run getty on HDMI vt1.
+    if [ -L /etc/systemd/system/getty@tty1.service ]; then
+        case "$(readlink /etc/systemd/system/getty@tty1.service)" in
+            /dev/null|dev/null) rm -f /etc/systemd/system/getty@tty1.service ;;
+        esac
+    fi
+    if [ -L /etc/systemd/system/autovt@tty1.service ]; then
+        case "$(readlink /etc/systemd/system/autovt@tty1.service)" in
+            /dev/null|dev/null) rm -f /etc/systemd/system/autovt@tty1.service ;;
+        esac
+    fi
+    rm -f /etc/systemd/system/getty@tty1.service.d/autologin.conf
+
+    local getty_src=""
+    for p in /usr/lib/systemd/system/getty@.service /lib/systemd/system/getty@.service; do
+        if [ -f "$p" ]; then
+            getty_src="$p"
+            break
+        fi
+    done
+    if [ -z "$getty_src" ]; then
+        echo "ERROR: getty@.service missing" >&2
+        exit 1
+    fi
+    ln -sfn "$getty_src" /etc/systemd/system/getty.target.wants/getty@tty1.service
+
     cat > /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf <<'EOF'
-# HDMI VT is Xorg :0 / tesla-linux-desktop (teslalinux). Do not reserve tty1 for getty.
-# Serial getty on ttyAMA0/ttyS0/ttyAMA1 is unchanged.
+# HDMI vt1 is getty (Infra). Xorg :0 uses vt7. Do not spawn extra VTs.
+# ReserveVT=1 keeps tty1 in text mode for that getty. NAutoVTs=0: no autovt on tty2+.
 [Login]
 NAutoVTs=0
-ReserveVT=0
+ReserveVT=1
 EOF
-    local mask
-    mask="$(readlink /etc/systemd/system/getty@tty1.service)"
-    case "$mask" in
-        /dev/null|dev/null) ;;
+
+    if [ -L /etc/systemd/system/getty@tty1.service ]; then
+        case "$(readlink /etc/systemd/system/getty@tty1.service)" in
+            /dev/null|dev/null)
+                echo "ERROR: getty@tty1 is still masked" >&2
+                exit 1
+                ;;
+        esac
+    fi
+    [ -L /etc/systemd/system/getty.target.wants/getty@tty1.service ] \
+        || { echo "ERROR: getty@tty1 not enabled in getty.target.wants" >&2; exit 1; }
+    grep -q '^NAutoVTs=0$' /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf \
+        || { echo "ERROR: logind NAutoVTs=0 did not stick" >&2; exit 1; }
+    grep -q '^ReserveVT=1$' /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf \
+        || { echo "ERROR: logind ReserveVT=1 did not stick" >&2; exit 1; }
+}
+
+# libinput_drv.so must exist on a real install (live / chroot / mounted bake).
+# Fake verify roots may plant the file; skip only when Xorg itself is absent.
+libinput_driver_present() {
+    local r="${1:-}"
+    local p g
+    for p in \
+        "$r/usr/lib/xorg/modules/input/libinput_drv.so" \
+        "$r/usr/lib/aarch64-linux-gnu/xorg/modules/input/libinput_drv.so" \
+        "$r/usr/lib/x86_64-linux-gnu/xorg/modules/input/libinput_drv.so"; do
+        [ -f "$p" ] && return 0
+    done
+    for g in "$r"/usr/lib/*/xorg/modules/input/libinput_drv.so; do
+        [ -f "$g" ] && return 0
+    done
+    return 1
+}
+
+# Fail the bake/install if autologin XFCE / KBM-on-:0 did not stick.
+# Optional prefix ($1) is an image root (host-side check of a mounted bake).
+# No `|| true` — any miss exits 1.
+verify_kbm_on_display0() {
+    local r="${1:-}"
+    local xorg="$r/etc/systemd/system/tesla-linux-xorg.service"
+    local virt="$r/etc/X11/xorg.conf.d/10-virtual.conf"
+    local inp="$r/etc/X11/xorg.conf.d/20-tesla-linux-input.conf"
+    local udev="$r/etc/udev/rules.d/60-tesla-linux-kbm-seat0.rules"
+    local getty_mask="$r/etc/systemd/system/getty@tty1.service"
+    local getty_wants="$r/etc/systemd/system/getty.target.wants/getty@tty1.service"
+
+    case "$PKGS" in
+        *xserver-xorg-input-libinput*) ;;
         *)
-            echo "ERROR: getty@tty1 is not masked (readlink='$mask')" >&2
+            echo "ERROR: PKGS missing xserver-xorg-input-libinput" >&2
             exit 1
             ;;
     esac
-    if [ -e /etc/systemd/system/getty.target.wants/getty@tty1.service ]; then
-        echo "ERROR: getty@tty1 still in getty.target.wants" >&2
+
+    [ -f "$xorg" ] || { echo "ERROR: missing tesla-linux-xorg.service" >&2; exit 1; }
+    grep -q '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$xorg" \
+        || { echo "ERROR: tesla-linux-xorg is not Xorg :0 vt7 (HDMI getty needs vt1)" >&2; exit 1; }
+    if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$xorg"; then
+        echo "ERROR: tesla-linux-xorg still occupies HDMI vt1" >&2
         exit 1
     fi
-    grep -q '^NAutoVTs=0$' /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf \
-        || { echo "ERROR: logind NAutoVTs=0 did not stick" >&2; exit 1; }
-    grep -q '^ReserveVT=0$' /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf \
-        || { echo "ERROR: logind ReserveVT=0 did not stick" >&2; exit 1; }
+    grep -q -- '-seat seat0' "$xorg" \
+        || { echo "ERROR: tesla-linux-xorg missing -seat seat0" >&2; exit 1; }
+    grep -q -- '-novtswitch' "$xorg" \
+        || { echo "ERROR: tesla-linux-xorg missing -novtswitch" >&2; exit 1; }
+    if grep -Eq '^Conflicts=.*getty@tty1' "$xorg"; then
+        echo "ERROR: tesla-linux-xorg Conflicts=getty@tty1 would take HDMI getty down" >&2
+        exit 1
+    fi
+
+    if [ -L "$getty_mask" ]; then
+        case "$(readlink "$getty_mask")" in
+            /dev/null|dev/null)
+                echo "ERROR: getty@tty1 is masked; Infra needs HDMI getty on vt1" >&2
+                exit 1
+                ;;
+        esac
+    fi
+    [ -L "$getty_wants" ] \
+        || { echo "ERROR: getty@tty1 not enabled in getty.target.wants" >&2; exit 1; }
+
+    [ -f "$virt" ] || { echo "ERROR: missing 10-virtual.conf" >&2; exit 1; }
+    grep -q 'AutoAddDevices' "$virt" \
+        || { echo "ERROR: 10-virtual.conf missing AutoAddDevices" >&2; exit 1; }
+    grep -q 'AutoEnableDevices' "$virt" \
+        || { echo "ERROR: 10-virtual.conf missing AutoEnableDevices" >&2; exit 1; }
+
+    [ -f "$inp" ] || { echo "ERROR: missing 20-tesla-linux-input.conf" >&2; exit 1; }
+    grep -q 'Driver[[:space:]]*"libinput"' "$inp" \
+        || { echo "ERROR: 20-tesla-linux-input.conf is not Driver libinput" >&2; exit 1; }
+    grep -q 'GrabDevice' "$inp" \
+        || { echo "ERROR: 20-tesla-linux-input.conf missing GrabDevice (kernel VT would steal HID)" >&2; exit 1; }
+    grep -q 'MatchIsKeyboard' "$inp" \
+        || { echo "ERROR: 20-tesla-linux-input.conf missing MatchIsKeyboard" >&2; exit 1; }
+    grep -q 'MatchIsPointer' "$inp" \
+        || { echo "ERROR: 20-tesla-linux-input.conf missing MatchIsPointer" >&2; exit 1; }
+    if grep -Eiq 'Driver[[:space:]]*"kbd"' "$inp" "$virt"; then
+        echo "ERROR: Xorg input uses Driver kbd (binds to the console VT)" >&2
+        exit 1
+    fi
+
+    [ -f "$udev" ] || { echo "ERROR: missing 60-tesla-linux-kbm-seat0.rules" >&2; exit 1; }
+    grep -q 'ENV{ID_SEAT}="seat0"' "$udev" \
+        || { echo "ERROR: kbm udev rule does not assign ID_SEAT=seat0" >&2; exit 1; }
+
+    # Require the driver when this looks like a real Xorg install (or a planted test file).
+    if [ -e "$r/usr/bin/Xorg" ] || [ -d "$r/usr/lib/xorg" ] || [ -z "$r" ]; then
+        libinput_driver_present "$r" \
+            || { echo "ERROR: xserver-xorg-input-libinput did not stick (libinput_drv.so missing)" >&2; exit 1; }
+    fi
 }
 
-# Fail the bake/install if autologin XFCE / getty-not-on-HDMI did not stick.
-# Optional prefix ($1) is an image root (host-side check of a mounted bake).
-# No `|| true` — any miss exits 1.
 verify_autologin_hdmi() {
     local r="${1:-}"
     local xorg="$r/etc/systemd/system/tesla-linux-xorg.service"
@@ -185,19 +308,22 @@ verify_autologin_hdmi() {
     local clone="$r/usr/local/sbin/tesla-linux-hdmi-clone"
     local virt="$r/etc/X11/xorg.conf.d/10-virtual.conf"
     local vc4="$r/etc/X11/xorg.conf.d/99-vc4.conf"
-    local getty_mask="$r/etc/systemd/system/getty@tty1.service"
+    local getty_unit="$r/etc/systemd/system/getty@tty1.service"
+    local getty_wants="$r/etc/systemd/system/getty.target.wants/getty@tty1.service"
     local logind="$r/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf"
-    local rl mask
+    local rl
 
     [ -f "$xorg" ] || { echo "ERROR: missing tesla-linux-xorg.service" >&2; exit 1; }
-    grep -q '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$xorg" \
-        || { echo "ERROR: tesla-linux-xorg is not Xorg :0 vt1 (HDMI VT)" >&2; exit 1; }
-    if grep -q ' vt7 ' "$xorg"; then
-        echo "ERROR: tesla-linux-xorg still uses vt7 — HDMI would stay on getty" >&2
+    grep -q '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$xorg" \
+        || { echo "ERROR: tesla-linux-xorg is not Xorg :0 vt7 (HDMI getty needs vt1)" >&2; exit 1; }
+    if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$xorg"; then
+        echo "ERROR: tesla-linux-xorg still occupies HDMI vt1" >&2
         exit 1
     fi
-    grep -q '^Conflicts=getty@tty1.service$' "$xorg" \
-        || { echo "ERROR: tesla-linux-xorg missing Conflicts=getty@tty1.service" >&2; exit 1; }
+    if grep -Eq '^Conflicts=.*getty@tty1' "$xorg"; then
+        echo "ERROR: tesla-linux-xorg Conflicts=getty@tty1 would take HDMI getty down" >&2
+        exit 1
+    fi
     if grep -Eiq '^After=.*tesla-linux-wlan|^Requires=.*tesla-linux-wlan' "$xorg"; then
         echo "ERROR: tesla-linux-xorg must not After/Requires wlan" >&2
         exit 1
@@ -215,24 +341,21 @@ verify_autologin_hdmi() {
         exit 1
     fi
 
-    [ -L "$getty_mask" ] || { echo "ERROR: getty@tty1.service is not a mask symlink" >&2; exit 1; }
-    mask="$(readlink "$getty_mask")"
-    case "$mask" in
-        /dev/null|dev/null) ;;
-        *)
-            echo "ERROR: getty@tty1 is not masked (readlink='$mask')" >&2
-            exit 1
-            ;;
-    esac
-    if [ -e "$r/etc/systemd/system/getty.target.wants/getty@tty1.service" ]; then
-        echo "ERROR: getty@tty1 still in getty.target.wants" >&2
-        exit 1
+    if [ -L "$getty_unit" ]; then
+        case "$(readlink "$getty_unit")" in
+            /dev/null|dev/null)
+                echo "ERROR: getty@tty1 is masked; Infra needs HDMI getty on vt1" >&2
+                exit 1
+                ;;
+        esac
     fi
+    [ -L "$getty_wants" ] \
+        || { echo "ERROR: getty@tty1 not enabled in getty.target.wants" >&2; exit 1; }
     [ -f "$logind" ] || { echo "ERROR: missing logind tesla-linux-hdmi.conf" >&2; exit 1; }
     grep -q '^NAutoVTs=0$' "$logind" \
         || { echo "ERROR: logind NAutoVTs is not 0" >&2; exit 1; }
-    grep -q '^ReserveVT=0$' "$logind" \
-        || { echo "ERROR: logind ReserveVT is not 0" >&2; exit 1; }
+    grep -q '^ReserveVT=1$' "$logind" \
+        || { echo "ERROR: logind ReserveVT is not 1 (HDMI getty needs tty1 reserved)" >&2; exit 1; }
 
     [ -L "$r/etc/systemd/system/getty.target.wants/serial-getty@ttyAMA0.service" ] \
         || { echo "ERROR: serial-getty@ttyAMA0 not enabled" >&2; exit 1; }
@@ -322,34 +445,25 @@ verify_autologin_hdmi() {
         echo "ERROR: display-manager.service is enabled; product is tesla-linux-desktop, not a DM" >&2
         exit 1
     fi
+
+    verify_kbm_on_display0 "$r"
 }
 
-# --verify-autologin [root] checks a live box or a mounted image. Do not run ensure_*.
-if [ "${1:-}" = "--verify-autologin" ]; then
+# --verify-autologin / --verify-kbm [root] checks a live box or a mounted image.
+# Do not run ensure_*. KBM-on-:0 is part of the same fail-hard gate.
+if [ "${1:-}" = "--verify-autologin" ] || [ "${1:-}" = "--verify-kbm" ]; then
     verify_autologin_hdmi "${2:-}"
     exit 0
 fi
 
-if [ "${1:-}" != "--print-packages" ]; then
-    ensure_factory_user
-    purge_cloud_init_ubuntu
-    ensure_sshd_qemu
-    ensure_serial_console
-    ensure_getty_not_on_hdmi
-    set_graphical_default
-fi
-TL_UID=""
-
-# Canonical package list — single source of truth for both the live box and the
-# image bake. `install-tesla-linux.sh --print-packages` emits it for the chroot.
-PKGS="xserver-xorg-core xserver-xorg-video-dummy xinit x11-utils x11-xserver-utils xinput \
-gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-python3-gi python3-gst-1.0 python3-websockets python3-evdev \
-xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar dbus-x11 \
-pipewire pipewire-pulse pipewire-audio wireplumber pulseaudio-utils gstreamer1.0-pipewire \
-nginx openssl network-manager hostapd iw dnsmasq rfkill"
-
 if [ "${1:-}" = "--print-packages" ]; then echo "$PKGS"; exit 0; fi
+
+ensure_factory_user
+purge_cloud_init_ubuntu
+ensure_sshd_qemu
+ensure_serial_console
+ensure_hdmi_getty_vt1
+set_graphical_default
 TL_UID="$(id -u "$TL_USER")"
 
 echo "==> installing to $PREFIX (user=$TL_USER uid=$TL_UID)"
@@ -539,6 +653,8 @@ cat > /etc/X11/xorg.conf.d/10-virtual.conf <<'EOF'
 # Dummy is Screen 0 primary so X starts with no HDMI. Tesla-browser 1088x832.
 Section "ServerFlags"
     Option "AllowEmptyInitialConfiguration" "true"
+    Option "AutoAddDevices" "true"
+    Option "AutoEnableDevices" "true"
 EndSection
 
 Section "Device"
@@ -569,6 +685,35 @@ EndSection
 Section "ServerLayout"
     Identifier "TeslaLinux"
     Screen 0 "VirtualScreen"
+    Option "AutoAddDevices" "true"
+    Option "AutoEnableDevices" "true"
+EndSection
+EOF
+# USB / evdev HID -> libinput on dummy Xorg :0. GrabDevice so HDMI getty on
+# vt1 does not steal keys/pointer. Do not use Driver "kbd" (console VT).
+cat > /etc/X11/xorg.conf.d/20-tesla-linux-input.conf <<'EOF'
+Section "InputClass"
+    Identifier "TeslaLinux keyboard"
+    MatchIsKeyboard "on"
+    MatchDevicePath "/dev/input/event*"
+    Driver "libinput"
+    Option "GrabDevice" "true"
+EndSection
+
+Section "InputClass"
+    Identifier "TeslaLinux pointer"
+    MatchIsPointer "on"
+    MatchDevicePath "/dev/input/event*"
+    Driver "libinput"
+    Option "GrabDevice" "true"
+EndSection
+
+Section "InputClass"
+    Identifier "TeslaLinux touchpad"
+    MatchIsTouchpad "on"
+    MatchDevicePath "/dev/input/event*"
+    Driver "libinput"
+    Option "GrabDevice" "true"
 EndSection
 EOF
 # Keep 99-vc4.conf for HDMI KMS (slave GPU / --same-as clone, not a second Screen).
@@ -586,6 +731,17 @@ echo uinput > /etc/modules-load.d/uinput.conf
 echo 'KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"' \
     > /etc/udev/rules.d/99-uinput.rules
 usermod -aG input "$TL_USER"
+
+# USB HID -> seat0 so dummy Xorg :0 (not HDMI getty) owns keyboards/mice.
+# Lexical 60- so ID_SEAT is set before systemd 71-seat.rules.
+cat > /etc/udev/rules.d/60-tesla-linux-kbm-seat0.rules <<'EOF'
+# Tesla-Linux: USB HID keyboards/mice/touchpads belong to seat0 (Xorg :0).
+# HDMI getty on vt1 must not get a second seat. Xorg GrabDevice steals HID
+# from the kernel VT. Do not invent a second install stack.
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="seat", ENV{ID_SEAT}="seat0"
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", TAG+="seat", ENV{ID_SEAT}="seat0"
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_TOUCHPAD}=="1", TAG+="seat", ENV{ID_SEAT}="seat0"
+EOF
 
 # --- PipeWire: always-present virtual sink so headless audio has a target -----
 install -d /etc/pipewire/pipewire.conf.d
@@ -616,16 +772,16 @@ EOF
 cat > /etc/systemd/system/tesla-linux-xorg.service <<EOF
 [Unit]
 Description=Tesla Linux — X server on virtual display (HDMI 1/2 slave clone)
-After=systemd-user-sessions.service
+After=systemd-user-sessions.service systemd-udevd.service
 Before=tesla-linux-desktop.service
-Conflicts=getty@tty1.service
-# HDMI/console VT is vt1 (not vt7). getty@tty1 must not own it.
+# HDMI getty owns vt1. Xorg :0 is vt7 so USB KBM attaches without occupying HDMI.
+# Do not Conflicts=getty@tty1 — that would take HDMI getty down.
 # X and AP stay independent. Do not wait on tesla-linux-wlan.
 
 [Service]
 # teslalinux session dir so xfce4-session has XDG_RUNTIME_DIR if linger is late.
 ExecStartPre=/bin/sh -c 'install -d -m700 -o $TL_USER -g $TL_USER /run/user/$TL_UID'
-ExecStart=/usr/bin/Xorg :0 vt1 -ac -noreset -novtswitch
+ExecStart=/usr/bin/Xorg :0 vt7 -seat seat0 -ac -noreset -novtswitch
 ExecStartPost=/usr/local/sbin/tesla-linux-hdmi-clone
 Restart=always
 RestartSec=2
@@ -714,8 +870,8 @@ EOF
 # --- boot into graphical.target (symlink — not systemctl set-default || true) -
 loginctl enable-linger "$TL_USER" 2>/dev/null || true
 set_graphical_default
-# Autologin XFCE on :0; HDMI 1/2 slave-clone that session. getty@tty1 must not own HDMI.
-ensure_getty_not_on_hdmi
+# Autologin XFCE on :0. HDMI vt1 is getty (Infra). USB KBM is grabbed by Xorg :0.
+ensure_hdmi_getty_vt1
 
 mkdir -p /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-user.target.wants
 
@@ -736,8 +892,8 @@ enable_wlan_nginx
 
 if [ "$START" = "1" ]; then
     systemctl daemon-reload
-    systemctl stop getty@tty1.service
-    systemctl mask getty@tty1.service autovt@tty1.service
+    systemctl unmask getty@tty1.service autovt@tty1.service
+    systemctl enable getty@tty1.service
     systemctl enable tesla-linux-xorg tesla-linux-desktop tesla-linux-display \
                      tesla-linux-touch tesla-linux-audio >/dev/null 2>&1
     /usr/local/sbin/tesla-linux-wlan eth-up >/dev/null 2>&1 || true
@@ -746,5 +902,5 @@ else
     echo "==> installed (chroot mode; units symlinked into graphical.target.wants + multi-user.target.wants)"
 fi
 
-# Fail the bake/install if autologin XFCE / getty-not-on-HDMI did not stick.
+# Fail the bake/install if autologin XFCE / KBM-on-:0 did not stick.
 verify_autologin_hdmi
