@@ -37,6 +37,7 @@ From FAT `current/`:
 - Factory user teslalinux / teslalinux (`chpasswd`); `ubuntu` userdel'd. cloud-init purged.
 - SSH: `ssh-keygen -A` in bake; `PasswordAuthentication yes`. `ssh teslalinux@guest` is the qemu path.
 - Serial getty enabled on ttyAMA0 / ttyS0 / ttyAMA1. cmdline keeps `console=serial0,115200 console=tty1`.
+- HDMI / qemu VNC (tty1) is XFCE on `:0` (`Xorg vt1`), not `getty@tty1` (masked). Serial-getty remains the typed login path.
 
 ## QA hwsim injection (work image only)
 Work copy rootfs has `qa-hwsim.service` (WantedBy=multi-user) that only runs
