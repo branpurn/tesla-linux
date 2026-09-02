@@ -250,7 +250,7 @@ grep -q 'xfce4-session' "$MNT/etc/systemd/system/tesla-linux-desktop.service" \
   || die "desktop is not xfce4-session"
 grep -q '^ReserveVT=0$' "$MNT/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf" \
   || die "logind ReserveVT is not 0"
-if grep -Eiq 'After=.*tesla-linux-(xorg|desktop)|Requires=.*tesla-linux-(xorg|desktop)' \
+if grep -Eiq '^After=.*tesla-linux-(xorg|desktop)|^Requires=.*tesla-linux-(xorg|desktop)' \
       "$MNT/etc/systemd/system/tesla-linux-wlan.service"; then
   die "wlan After/Requires xorg or desktop"
 fi
