@@ -400,10 +400,16 @@ write_nginx_servers() {
 }
 
 reload_nginx() {
-    if command -v nginx >/dev/null 2>&1; then
-        nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null && return 0
+    # Listen files are already written. Never systemctl-start or systemctl-restart
+    # nginx from this oneshot — that waits for nginx, nginx After=wlan waits here.
+    # If nginx is not active yet, systemd starts it after this unit (After=/Wants=).
+    if ! command -v nginx >/dev/null 2>&1; then
+        return 0
     fi
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+    if ! systemctl is-active --quiet nginx 2>/dev/null; then
+        return 0
+    fi
+    nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null || true
 }
 
 cmd_nginx_bind() {
@@ -630,6 +636,37 @@ cmd_selftest() {
     if [ -e /sys/class/net/eth0 ]; then
         is_wired_iface eth0 || { echo "FAIL: eth0 should be wired"; fail=1; }
     fi
+
+    # reload_nginx: inactive → no-op; active → nginx -t && nginx -s reload only.
+    ng_log="$dir/nginx-invocations"
+    : > "$ng_log"
+    systemctl() {
+        if [ "${1:-}" = is-active ] && [ "${2:-}" = --quiet ]; then
+            [ "${MOCK_NGINX_ACTIVE:-0}" = 1 ]
+            return $?
+        fi
+        echo "systemctl $*" >> "$ng_log"
+        return 1
+    }
+    nginx() {
+        echo "nginx $*" >> "$ng_log"
+        return 0
+    }
+    MOCK_NGINX_ACTIVE=0
+    reload_nginx || { echo "FAIL: reload_nginx inactive returned non-zero"; fail=1; }
+    if grep -Eq 'restart|start | -s reload|reload nginx' "$ng_log"; then
+        echo "FAIL: reload_nginx acted while nginx inactive"; fail=1
+    fi
+    MOCK_NGINX_ACTIVE=1
+    : > "$ng_log"
+    reload_nginx || { echo "FAIL: reload_nginx active returned non-zero"; fail=1; }
+    grep -q -- '-t' "$ng_log" || { echo "FAIL: no nginx -t when active"; fail=1; }
+    grep -q -- '-s reload' "$ng_log" || { echo "FAIL: no nginx -s reload when active"; fail=1; }
+    if grep -E 'systemctl' "$ng_log"; then
+        echo "FAIL: reload_nginx used systemctl start/restart"; fail=1
+    fi
+    unset -f systemctl nginx
+    unset MOCK_NGINX_ACTIVE
 
     reload_nginx() { return 0; }
     wifi_iface() { return 1; }

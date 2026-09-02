@@ -266,6 +266,13 @@ if grep -Eiq '^After=.*tesla-linux-(xorg|desktop)|^Requires=.*tesla-linux-(xorg|
       "$MNT/etc/systemd/system/tesla-linux-wlan.service"; then
   die "wlan After/Requires xorg or desktop"
 fi
+if grep -Eiq '^Before=.*nginx\.service' "$MNT/etc/systemd/system/tesla-linux-wlan.service"; then
+  die "wlan still Before=nginx.service (deadlock with nginx After=wlan)"
+fi
+if awk '/^reload_nginx\(\)/,/^}/' "$MNT/usr/local/sbin/tesla-linux-wlan" \
+      | grep -Eq 'systemctl[[:space:]]+(restart|start)[[:space:]]+nginx'; then
+  die "reload_nginx still systemctl restart nginx"
+fi
 
 # ------------------------------------------------------------------ pack -----
 log "packing"

@@ -2,7 +2,8 @@
 Description=Tesla Linux WLAN (saved station else TeslaLinux hostapd AP)
 After=NetworkManager.service tesla-linux-firstboot.service
 Wants=NetworkManager.service
-Before=nginx.service
+# nginx After=/Wants= this unit (install drop-in) so it starts after listen files.
+# Do not Before=nginx — a oneshot that systemctl-restarts nginx deadlocks.
 # AP must not wait on HDMI/X — do not After/Requires tesla-linux-desktop or xorg.
 
 [Service]
