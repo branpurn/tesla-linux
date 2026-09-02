@@ -74,14 +74,12 @@ cp "$SRC"/install-tesla-linux.sh "$SRC"/ta_*.py "$SRC"/*.html \
    "$SRC"/tesla-linux-wlan-api.service "$SRC"/ap.env \
    "$SRC"/tesla-linux-hdmi-clone \
    "$MNT/tmp/tl-src/" 2>/dev/null || true
+# Stage authorized_keys for teslalinux (never print the key). Not ubuntu — ubuntu is DOA.
+if [ -f "$SRC/authorized_keys" ]; then
+  cp "$SRC/authorized_keys" "$MNT/tmp/tl-src/authorized_keys"
+fi
 chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh" \
          "$MNT/tmp/tl-src/tesla-linux-hdmi-clone"
-# authorize the build key so the image is reachable headless
-mkdir -p "$MNT/home/ubuntu/.ssh"
-if [ -f "$SRC/authorized_keys" ]; then
-  cp "$SRC/authorized_keys" "$MNT/home/ubuntu/.ssh/authorized_keys"
-  chmod 700 "$MNT/home/ubuntu/.ssh"; chmod 600 "$MNT/home/ubuntu/.ssh/authorized_keys"
-fi
 
 # ---------------------------------------------------------------- chroot -----
 log "provisioning inside chroot (qemu-aarch64)"
@@ -90,8 +88,8 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 echo "--- inside: $(uname -m) ---"
 
-# cloud-init OUT (boot hangs, broken Imager customisation, we don't need it)
-apt-get purge -y cloud-init >/dev/null 2>&1 || true
+# cloud-init OUT (boot hangs, broken Imager customisation, recreates ubuntu)
+apt-get purge -y cloud-init cloud-init-base cloud-guest-utils >/dev/null 2>&1 || true
 rm -rf /etc/cloud /var/lib/cloud
 systemctl mask systemd-networkd-wait-online.service >/dev/null 2>&1 || true
 
@@ -114,8 +112,19 @@ chmod 600 /etc/netplan/01-network-manager-all.yaml
 systemctl enable NetworkManager >/dev/null 2>&1 || true
 
 # stack + units (chroot mode: no running systemd)
-# install writes nginx (AP/station/ethernet binds only — never 0.0.0.0) + tesla-linux-wlan.service
+# install writes teslalinux/chpasswd, graphical.target symlink, ssh-keygen -A,
+# serial-getty, nginx (AP/station/ethernet binds only — never 0.0.0.0) + wlan.
 /tmp/tl-src/install-tesla-linux.sh --no-start
+
+# Fail the bake if factory login / default.target / ssh host keys did not stick.
+id teslalinux >/dev/null
+hash="$(getent shadow teslalinux | cut -d: -f2)"
+case "$hash" in ''|'*'|'!'|'!*'|'!!') echo "ERROR: teslalinux password missing" >&2; exit 1;; esac
+id ubuntu >/dev/null 2>&1 && { echo "ERROR: ubuntu user still present" >&2; exit 1; }
+rl="$(readlink /etc/systemd/system/default.target)"
+case "$rl" in */graphical.target|graphical.target) ;; *) echo "ERROR: default.target is $rl" >&2; exit 1;; esac
+ls /etc/ssh/ssh_host_*_key >/dev/null
+# cmdline stays console=serial0,115200 console=tty1 — do not rewrite it.
 
 # identity — teslalinux.local via existing avahi-daemon (do not add a second mDNS stack)
 echo teslalinux > /etc/hostname
@@ -158,10 +167,10 @@ if [ -f "$CONF" ]; then
     fi
 fi
 [ -f /boot/firmware/authorized_keys ] && {
-    install -d -m700 /home/ubuntu/.ssh
-    cat /boot/firmware/authorized_keys >> /home/ubuntu/.ssh/authorized_keys
-    chmod 600 /home/ubuntu/.ssh/authorized_keys
-    chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+    install -d -m700 /home/teslalinux/.ssh
+    cat /boot/firmware/authorized_keys >> /home/teslalinux/.ssh/authorized_keys
+    chmod 600 /home/teslalinux/.ssh/authorized_keys
+    chown -R teslalinux:teslalinux /home/teslalinux/.ssh
 }
 exit 0
 EOF
@@ -185,7 +194,8 @@ mkdir -p /etc/systemd/system/multi-user.target.wants
 ln -sf /etc/systemd/system/tesla-linux-firstboot.service \
        /etc/systemd/system/multi-user.target.wants/tesla-linux-firstboot.service
 
-chown -R ubuntu:ubuntu /home/ubuntu 2>/dev/null || true
+chown -R teslalinux:teslalinux /home/teslalinux
+# ssh host keys + PasswordAuthentication: install-tesla-linux.sh (ssh-keygen -A).
 systemctl enable ssh >/dev/null 2>&1 || true
 apt-get clean
 rm -rf /var/lib/apt/lists/* /tmp/tl-src /tmp/provision.sh
@@ -194,6 +204,29 @@ CHROOT
 
 chmod +x "$MNT/tmp/provision.sh"
 chroot "$MNT" /bin/bash /tmp/provision.sh
+
+# Image-on-disk gates (not paper). Fail the bake if any of these are missing.
+log "verifying teslalinux / graphical.target / ssh / serial-getty on image"
+grep -q '^teslalinux:' "$MNT/etc/passwd" || die "teslalinux missing from passwd"
+if grep -q '^ubuntu:' "$MNT/etc/passwd"; then die "ubuntu still in passwd"; fi
+_tlhash="$(awk -F: '$1=="teslalinux"{print $2}' "$MNT/etc/shadow")"
+case "$_tlhash" in ''|'*'|'!'|'!*'|'!!') die "teslalinux password not set in shadow";; esac
+unset _tlhash
+_rl="$(readlink "$MNT/etc/systemd/system/default.target")"
+case "$_rl" in */graphical.target|graphical.target) ;; *) die "default.target is $_rl";; esac
+ls "$MNT/etc/ssh/ssh_host_"*_key >/dev/null || die "ssh host keys missing"
+grep -q '^PasswordAuthentication yes$' "$MNT/etc/ssh/sshd_config.d/99-tesla-linux.conf" \
+  || die "sshd PasswordAuthentication not yes"
+[ -L "$MNT/etc/systemd/system/getty.target.wants/serial-getty@ttyAMA0.service" ] \
+  || die "serial-getty@ttyAMA0 not enabled"
+[ -L "$MNT/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service" ] \
+  || die "serial-getty@ttyS0 not enabled"
+grep -q '^User=teslalinux$' "$MNT/etc/systemd/system/tesla-linux-desktop.service" \
+  || die "tesla-linux-desktop User is not teslalinux"
+[ -d "$MNT/home/teslalinux" ] || die "teslalinux home missing"
+if [ -f "$SRC/authorized_keys" ]; then
+  [ -f "$MNT/home/teslalinux/.ssh/authorized_keys" ] || die "teslalinux authorized_keys missing"
+fi
 
 # ------------------------------------------------------------------ pack -----
 log "packing"

@@ -2,6 +2,8 @@
 
 Tesla-Linux — Ubuntu Server + XFCE on Raspberry Pi 4 (8 GB). KISS replacement for tesla-android-kiss.
 
+Console login **teslalinux** / **teslalinux** (factory).
+
 ## Bake
 
 ```bash

@@ -51,11 +51,12 @@ setup_tap() {
 run_raspi4b() {
   ensure_sd_power2
   setup_tap
-  echo "Starting raspi4b SERIAL=$SERIAL (2GiB smp4 TCG usb-net=$TAP VNC:1 graphical)"
+  echo "Starting raspi4b SERIAL=$SERIAL (2GiB smp4 TCG usb-net=$TAP VNC:1 serial=stdio)"
+  echo "Serial login: teslalinux / teslalinux (factory). Type on this stdio."
   exec qemu-system-aarch64 \
     -M raspi4b -cpu cortex-a72 -smp 4 -m 2048 -accel tcg,thread=multi \
     -kernel "$KERNEL" -dtb "$DTB" -initrd "$INITRD" \
-    -append "rw earlycon=pl011,0xfe201000 console=tty1 console=ttyAMA1,115200 console=ttyAMA0,115200 random.trust_cpu=on root=LABEL=writable rootfstype=ext4 panic=10 rootwait fsck.repair=yes" \
+    -append "rw earlycon=pl011,0xfe201000 console=serial0,115200 console=ttyAMA0,115200 console=tty1 random.trust_cpu=on root=LABEL=writable rootfstype=ext4 panic=10 rootwait fsck.repair=yes" \
     -drive "file=$IMG,if=sd,format=raw" \
     "${serial_args[@]}" \
     -monitor "unix:$ROOT/monitor.sock,server=on,wait=off" \
@@ -68,11 +69,12 @@ run_raspi4b() {
 run_virt() {
   setup_tap
   local initrd="$INITRD"; [ -f "$INITRD_VIRT" ] && initrd="$INITRD_VIRT"
-  echo "Starting virt SERIAL=$SERIAL initrd=$(basename "$initrd")"
+  echo "Starting virt SERIAL=$SERIAL initrd=$(basename "$initrd") serial=stdio"
+  echo "Serial login: teslalinux / teslalinux (factory). Type on this stdio."
   exec qemu-system-aarch64 \
     -M virt -cpu max -smp 4 -m 4096 -accel tcg,thread=multi \
     -kernel "$KERNEL" -initrd "$initrd" \
-    -append "rw console=ttyAMA0,115200 earlycon=pl011,0x09000000 random.trust_cpu=on root=LABEL=writable rootfstype=ext4 panic=10 rootwait" \
+    -append "rw console=serial0,115200 console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 random.trust_cpu=on root=LABEL=writable rootfstype=ext4 panic=10 rootwait" \
     -drive "if=none,id=hd0,file=$IMG,format=raw" -device virtio-blk-pci,drive=hd0 \
     -netdev "tap,id=n0,ifname=$TAP,script=no,downscript=no" -device virtio-net-pci,netdev=n0 \
     -device virtio-gpu-pci -device ramfb \
