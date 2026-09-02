@@ -6,9 +6,9 @@
 |---|---|
 | `<title>` | Tesla Linux |
 | Heading | Wi-Fi |
-| Helper | Join the car's Wi-Fi |
+| Helper | Join the same Wi-Fi network as the car |
 | SSID control | Network |
-| Password | Password (`type=password`) |
+| Password | Password (`type=password`, show/hide peek) |
 | Primary | Join |
 | Status | Scanning · Joining · Saved · Couldn't join |
 
@@ -16,6 +16,8 @@
 - **Joining** — on submit.
 - **Saved** — HTTP 2xx, plus one-line helper: `Next boot joins that WLAN.`
 - **Couldn't join** — 501 / error / timeout / empty SSID. A short HTTP/timeout hint may sit on the same status line.
+
+Copy lock: never "the car's Wi-Fi" / "the car's WiFi". The car does not broadcast an SSID to join. Helper means the same Wi-Fi network as the car.
 
 Footer stays `Desktop` · `Probe`. Dark KISS, one column. No AP-password editor. No fake SSIDs.
 

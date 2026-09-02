@@ -46,7 +46,7 @@ Connect a client to **TeslaLinux** / **teslalinux**, then open `http://10.42.0.1
 
 `tl-src/index.html` → `/var/www/tl/index.html` (nginx `index`). Operator on the AP LAN saves a **station** SSID+PSK.
 
-Chrome lock (Designer): [design/ap-setup.md](../design/ap-setup.md) — title **Tesla Linux**; heading **Wi-Fi**; helper **Join the car's Wi-Fi**; labels **Network** / **Password**; button **Join**; status **Scanning · Joining · Saved · Couldn't join**.
+Chrome lock (Designer): [design/ap-setup.md](../design/ap-setup.md) — title **Tesla Linux**; heading **Wi-Fi**; helper **Join the same Wi-Fi network as the car**; labels **Network** / **Password**; button **Join**; status **Scanning · Joining · Saved · Couldn't join**.
 
 - Origin-relative `GET`/`POST` `/api/wlan` (same `location.host` as the page). HTTP-only. No WebRTC. No OAuth.
 - `POST` JSON `{ssid, psk}` — `psk` may be empty. Show a hard error on HTTP 501 instead of hanging.

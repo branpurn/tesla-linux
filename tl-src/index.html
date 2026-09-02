@@ -14,16 +14,22 @@ button:disabled{opacity:.5;cursor:wait}
 #status{margin-top:14px;min-height:1.4em}
 .ok{color:#7bff9e}.bad{color:#ff7b7b}
 a{color:#8ecdff}
+.psk-row{display:flex;gap:8px}
+.psk-row input{flex:1;min-width:0}
+.psk-row button{flex:0 0 auto;background:#161616;border-color:#333;color:#e8e8e8}
 </style>
 <h1>Wi-Fi</h1>
-<p>Join the car's Wi-Fi</p>
+<p>Join the same Wi-Fi network as the car</p>
 <form id="f">
   <label>Network
     <select id="scan" hidden></select>
     <input id="ssid" name="ssid" autocomplete="off">
   </label>
   <label>Password
-    <input id="psk" name="psk" type="password" autocomplete="new-password">
+    <span class="psk-row">
+      <input id="psk" name="psk" type="password" autocomplete="new-password">
+      <button type="button" id="peek" aria-pressed="false">Show</button>
+    </span>
   </label>
   <button id="go" type="submit">Join</button>
 </form>
@@ -99,6 +105,13 @@ $('f').addEventListener('submit', async ev=>{
     const hung=e && e.name==='AbortError';
     status('<span class="bad">Couldn\'t join</span> ('+(hung?'timeout':'error')+')');
   }finally{ $('go').disabled=false; }
+});
+
+$('peek').addEventListener('click',()=>{
+  const p=$('psk'), show=p.type==='password';
+  p.type=show?'text':'password';
+  $('peek').textContent=show?'Hide':'Show';
+  $('peek').setAttribute('aria-pressed', show?'true':'false');
 });
 
 maybeScan();
