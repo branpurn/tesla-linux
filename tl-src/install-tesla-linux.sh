@@ -17,6 +17,10 @@ ensure_factory_user() {
     if ! id teslalinux >/dev/null 2>&1; then
         useradd -m -s /bin/bash teslalinux
     fi
+    local g
+    for g in sudo video audio render input; do
+        getent group "$g" >/dev/null || groupadd "$g"
+    done
     usermod -aG sudo,video,audio,render,input teslalinux
     if ! echo 'teslalinux:teslalinux' | chpasswd; then
         echo "ERROR: chpasswd teslalinux:teslalinux failed" >&2
