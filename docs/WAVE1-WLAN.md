@@ -34,7 +34,7 @@ First-boot still creates the NM infra profile (`connection.autoconnect yes`). `t
 | `/etc/tesla-linux/ap.env` | Factory `AP_SSID=TeslaLinux`, `AP_PSK=teslalinux`, `AP_ADDR=10.42.0.1`, `ETH_ADDR=10.42.1.1` |
 | `/etc/NetworkManager/system-connections/tesla-linux-eth.nmconnection` | Wired static **10.42.1.1/24** (no DHCP; not AP `10.42.0.1/24`) |
 | `/usr/local/sbin/tesla-linux-wlan` | `boot` / `eth-up` / `ap-up` / `ap-down` / `nginx-bind` / `maybe-ap` / `save-wlan` |
-| `/usr/local/sbin/ta_wlan_api.py` | loopback `127.0.0.1:9094` — GET scan + POST save-wlan kick |
+| `/usr/local/sbin/ta_wlan_api.py` | loopback `127.0.0.1:9094` — GET scan + POST save-wlan kick + POST `/api/reboot` |
 | `tesla-linux-wlan.service` | `After=NetworkManager.service tesla-linux-firstboot.service`; oneshot `boot`; `Restart=on-failure`; `WantedBy=multi-user.target` (not desktop/X). nginx `After=`/`Wants=` this unit; this unit does not `Before=nginx` |
 | `tesla-linux-firstboot.service` | `After=NetworkManager.service`; `Before=tesla-linux-wlan.service` (eth-up/cert before wlan boot). Does not `Before=nginx`. After the TLS cert: `nginx -t && nginx -s reload` only if nginx is already active; never `systemctl start/restart nginx`. |
 | `tesla-linux-wlan-api.service` | `Type=simple`; `TA_BIND=127.0.0.1` |
@@ -53,9 +53,9 @@ Chrome lock (Designer): [design/ap-setup.md](../design/ap-setup.md) — title **
 - `GET` is optional: if Backend later returns a scan list, the page fills a dropdown; a typed SSID is enough if there is no scan.
 - Do not rewrite `desktop.html` / `probe.html` for a settings maze. Do not reprint the factory AP PSK here.
 
-## Backend `/api/wlan` (this SHA)
+## Backend `/api/wlan` + `/api/reboot` (this SHA)
 
-`tl-src/ta_wlan_api.py` listens on **`127.0.0.1:9094`** (never `0.0.0.0`). nginx `location /api/wlan` `proxy_pass`es there. **501 is gone.**
+`tl-src/ta_wlan_api.py` listens on **`127.0.0.1:9094`** (never `0.0.0.0`). nginx `location /api/wlan` and `location /api/reboot` `proxy_pass` there. **501 is gone.**
 
 ```
 # save infra profile, tear down AP, NM associate, rebind nginx
@@ -65,6 +65,7 @@ tesla-linux-wlan save-wlan <ssid> [psk]
 - `POST` JSON `{ssid, psk}` (`psk` may be empty) kicks `save-wlan` in a **background thread** and returns **HTTP 200 fast**. Picker fetch timeout is 15s — do not block the HTTP worker on `WAIT_SEC`.
 - `GET` returns `{ssids:[...]}`. Scan failure is `200 {ssids:[]}`, not 501.
 - Non-JSON POST or missing/invalid `ssid`: `400 {error:"..."}`.
+- `POST /api/reboot` kicks a real system reboot (`systemctl reboot`, then `/sbin/reboot`) in a **background thread** and returns **HTTP 200 fast**. Desktop/probe Reboot buttons use origin-relative POST. Hint: **Next boot joins that WLAN.**
 - Display/touch/audio stay `TA_BIND=127.0.0.1`. Do not rewrite those `ta_*.py` files.
 
 ## Packages
