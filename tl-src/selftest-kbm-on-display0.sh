@@ -75,8 +75,16 @@ fi
 grep -q '60-tesla-linux-kbm-seat0.rules' "$INSTALL" && pass "install writes kbm udev rule" || bad "no kbm udev rule"
 grep -q 'ensure_hdmi_getty_vt1' "$INSTALL" && pass "getty-on-vt1 helper present" || bad "missing ensure_hdmi_getty_vt1"
 
-# HDMI clone / dummy / vc4 must not be rewritten this PR (file-level).
-grep -q -- '--same-as' "$HERE/tesla-linux-hdmi-clone" && pass "hdmi-clone still --same-as" || bad "hdmi-clone lost --same-as"
+if grep -Eq '^ExecStartPost=.*tesla-linux-hdmi-clone' "$INSTALL"; then
+    bad "install still ExecStartPost tesla-linux-hdmi-clone"
+else
+    pass "install does not ExecStartPost tesla-linux-hdmi-clone"
+fi
+if grep -q 'install -m755 .*tesla-linux-hdmi-clone' "$INSTALL"; then
+    bad "install still installs tesla-linux-hdmi-clone"
+else
+    pass "install does not install tesla-linux-hdmi-clone"
+fi
 grep -q 'PrimaryGPU" "false"' "$INSTALL" && pass "99-vc4.conf still non-primary" || bad "99-vc4.conf changed role"
 
 # --- fake image root ---------------------------------------------------------
@@ -115,13 +123,12 @@ plant() {
 
     cat > "$t/etc/systemd/system/tesla-linux-xorg.service" <<'EOF'
 [Unit]
-Description=Tesla Linux — X server on virtual display (HDMI 1/2 slave clone)
+Description=Tesla Linux — X server on virtual display
 After=systemd-user-sessions.service systemd-udevd.service
 Before=tesla-linux-desktop.service
 
 [Service]
 ExecStart=/usr/bin/Xorg :0 vt7 -seat seat0 -ac -noreset -novtswitch
-ExecStartPost=/usr/local/sbin/tesla-linux-hdmi-clone
 
 [Install]
 WantedBy=graphical.target
@@ -201,8 +208,7 @@ ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOAR
 ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", TAG+="seat", ENV{ID_SEAT}="seat0"
 EOF
     cp "$HERE/tesla-linux-wlan.sh" "$t/usr/local/sbin/tesla-linux-wlan"
-    cp "$HERE/tesla-linux-hdmi-clone" "$t/usr/local/sbin/tesla-linux-hdmi-clone"
-    chmod +x "$t/usr/local/sbin/tesla-linux-wlan" "$t/usr/local/sbin/tesla-linux-hdmi-clone"
+    chmod +x "$t/usr/local/sbin/tesla-linux-wlan"
 }
 
 plant "$TREE"
@@ -219,6 +225,13 @@ sed -i '/Before=tesla-linux-desktop.service/a Conflicts=getty@tty1.service' \
     "$TREE/etc/systemd/system/tesla-linux-xorg.service"
 expect_fail "Conflicts=getty fails gate" "Conflicts" "$INSTALL" --verify-kbm "$TREE"
 sed -i '/^Conflicts=getty@tty1.service$/d' "$TREE/etc/systemd/system/tesla-linux-xorg.service"
+
+# Negative: HDMI clone hung off Xorg
+sed -i '/^ExecStart=\/usr\/bin\/Xorg /a ExecStartPost=/usr/local/sbin/tesla-linux-hdmi-clone' \
+    "$TREE/etc/systemd/system/tesla-linux-xorg.service"
+expect_fail "ExecStartPost hdmi-clone fails gate" "hdmi-clone" "$INSTALL" --verify-kbm "$TREE"
+sed -i '/^ExecStartPost=\/usr\/local\/sbin\/tesla-linux-hdmi-clone$/d' \
+    "$TREE/etc/systemd/system/tesla-linux-xorg.service"
 
 # Negative: getty masked
 ln -sfn /dev/null "$TREE/etc/systemd/system/getty@tty1.service"

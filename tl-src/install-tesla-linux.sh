@@ -257,6 +257,10 @@ verify_kbm_on_display0() {
         echo "ERROR: tesla-linux-xorg Conflicts=getty@tty1 would take HDMI getty down" >&2
         exit 1
     fi
+    if grep -Eq '^ExecStartPost=.*tesla-linux-hdmi-clone' "$xorg"; then
+        echo "ERROR: tesla-linux-xorg still ExecStartPost tesla-linux-hdmi-clone (HDMI XFCE is DESCPE)" >&2
+        exit 1
+    fi
 
     if [ -L "$getty_mask" ]; then
         case "$(readlink "$getty_mask")" in
@@ -305,7 +309,6 @@ verify_autologin_hdmi() {
     local xorg="$r/etc/systemd/system/tesla-linux-xorg.service"
     local desk="$r/etc/systemd/system/tesla-linux-desktop.service"
     local wlan="$r/etc/systemd/system/tesla-linux-wlan.service"
-    local clone="$r/usr/local/sbin/tesla-linux-hdmi-clone"
     local virt="$r/etc/X11/xorg.conf.d/10-virtual.conf"
     local vc4="$r/etc/X11/xorg.conf.d/99-vc4.conf"
     local getty_unit="$r/etc/systemd/system/getty@tty1.service"
@@ -322,6 +325,10 @@ verify_autologin_hdmi() {
     fi
     if grep -Eq '^Conflicts=.*getty@tty1' "$xorg"; then
         echo "ERROR: tesla-linux-xorg Conflicts=getty@tty1 would take HDMI getty down" >&2
+        exit 1
+    fi
+    if grep -Eq '^ExecStartPost=.*tesla-linux-hdmi-clone' "$xorg"; then
+        echo "ERROR: tesla-linux-xorg still ExecStartPost tesla-linux-hdmi-clone (HDMI XFCE is DESCPE)" >&2
         exit 1
     fi
     if grep -Eiq '^After=.*tesla-linux-wlan|^Requires=.*tesla-linux-wlan' "$xorg"; then
@@ -399,9 +406,6 @@ verify_autologin_hdmi() {
     grep -q 'eth_static_bound' "$wlan_bin" \
         || { echo "ERROR: tesla-linux-wlan missing eth_static_bound" >&2; exit 1; }
 
-    [ -x "$clone" ] || { echo "ERROR: tesla-linux-hdmi-clone missing or not executable" >&2; exit 1; }
-    grep -q -- '--same-as' "$clone" \
-        || { echo "ERROR: tesla-linux-hdmi-clone is not xrandr --same-as" >&2; exit 1; }
     [ -f "$virt" ] || { echo "ERROR: missing 10-virtual.conf" >&2; exit 1; }
     grep -q '1088x832' "$virt" \
         || { echo "ERROR: 10-virtual.conf is not 1088x832" >&2; exit 1; }
@@ -504,7 +508,8 @@ IFACE_WAIT_SEC=60
 EOF
 fi
 install -m755 "$HERE/tesla-linux-wlan.sh" /usr/local/sbin/tesla-linux-wlan
-install -m755 "$HERE/tesla-linux-hdmi-clone" /usr/local/sbin/tesla-linux-hdmi-clone
+# HDMI clone is DESCPE. Do not install or run tesla-linux-hdmi-clone from this path.
+rm -f /usr/local/sbin/tesla-linux-hdmi-clone
 install -m644 "$HERE/tesla-linux-wlan.service" /etc/systemd/system/tesla-linux-wlan.service
 install -m755 "$HERE/ta_wlan_api.py" /usr/local/sbin/ta_wlan_api.py
 install -m644 "$HERE/tesla-linux-wlan-api.service" /etc/systemd/system/tesla-linux-wlan-api.service
@@ -646,8 +651,8 @@ if [ -f /etc/tesla-linux/tesla-linux.env ]; then
 fi
 
 # Virtual display (this SHA): dummy is Screen 0 primary so X starts without HDMI.
-# Do not invent Xvfb. HDMI 1/2 are slave clones of that :0 session (--same-as dummy).
-# --- Xorg: dummy 1088x832 (web console) + vc4 KMS for HDMI slave outputs ------
+# Do not invent Xvfb. HDMI clone is DESCPE — do not ExecStartPost tesla-linux-hdmi-clone.
+# --- Xorg: dummy 1088x832 (Tesla-browser) — no HDMI slave/clone this path ------
 install -d /etc/X11/xorg.conf.d
 cat > /etc/X11/xorg.conf.d/10-virtual.conf <<'EOF'
 # Dummy is Screen 0 primary so X starts with no HDMI. Tesla-browser 1088x832.
@@ -716,7 +721,7 @@ Section "InputClass"
     Option "GrabDevice" "true"
 EndSection
 EOF
-# Keep 99-vc4.conf for HDMI KMS (slave GPU / --same-as clone, not a second Screen).
+# Keep 99-vc4.conf for HDMI KMS (not a second Screen). Do not fold HDMI clone here.
 cat > /etc/X11/xorg.conf.d/99-vc4.conf <<'EOF'
 Section "OutputClass"
     Identifier  "vc4"
@@ -771,18 +776,18 @@ EOF
 # --- systemd units ------------------------------------------------------------
 cat > /etc/systemd/system/tesla-linux-xorg.service <<EOF
 [Unit]
-Description=Tesla Linux — X server on virtual display (HDMI 1/2 slave clone)
+Description=Tesla Linux — X server on virtual display
 After=systemd-user-sessions.service systemd-udevd.service
 Before=tesla-linux-desktop.service
 # HDMI getty owns vt1. Xorg :0 is vt7 so USB KBM attaches without occupying HDMI.
 # Do not Conflicts=getty@tty1 — that would take HDMI getty down.
+# Do not ExecStartPost tesla-linux-hdmi-clone — HDMI XFCE is DESCPE.
 # X and AP stay independent. Do not wait on tesla-linux-wlan.
 
 [Service]
 # teslalinux session dir so xfce4-session has XDG_RUNTIME_DIR if linger is late.
 ExecStartPre=/bin/sh -c 'install -d -m700 -o $TL_USER -g $TL_USER /run/user/$TL_UID'
 ExecStart=/usr/bin/Xorg :0 vt7 -seat seat0 -ac -noreset -novtswitch
-ExecStartPost=/usr/local/sbin/tesla-linux-hdmi-clone
 Restart=always
 RestartSec=2
 TimeoutStopSec=5
