@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Clone HDMI 1/2 onto the dummy virtual display (same :0 Screen, not a second desktop).
+# Missing HDMI must not fail tesla-linux-xorg.service.
+set +e
+export DISPLAY="${DISPLAY:-:0}"
+
+for _ in $(seq 1 30); do
+    xdpyinfo >/dev/null 2>&1 && break
+    sleep 1
+done
+xdpyinfo >/dev/null 2>&1 || exit 0
+
+# RandR 1.4: HDMI (modesetting/vc4) shows the dummy framebuffer. Ignore failures.
+xrandr --setprovideroutputsource modesetting dummy >/dev/null 2>&1
+xrandr --setprovideroutputsource modesetting Dummy >/dev/null 2>&1
+xrandr --setprovideroutputsource vc4 dummy >/dev/null 2>&1
+xrandr --setprovideroutputsource vc4 Dummy >/dev/null 2>&1
+# Provider 0 is Screen 0 (dummy). Extra providers get dummy as their image source.
+nprov="$(xrandr --listproviders 2>/dev/null | awk '/^Providers:/ {print $2}')"
+if [ -n "${nprov:-}" ] && [ "$nprov" -gt 1 ] 2>/dev/null; then
+    i=1
+    while [ "$i" -lt "$nprov" ]; do
+        xrandr --setprovideroutputsource "$i" 0 >/dev/null 2>&1
+        i=$((i + 1))
+    done
+fi
+
+outputs="$(xrandr 2>/dev/null)" || exit 0
+dummy=""
+for d in DUMMY0 Dummy-0 DUMMY-0; do
+    echo "$outputs" | grep -q "^${d} " && dummy="$d" && break
+done
+[ -n "$dummy" ] || exit 0
+
+for hdmi in HDMI-1 HDMI-A-1 HDMI-2 HDMI-A-2; do
+    echo "$outputs" | grep -q "^${hdmi} " || continue
+    DISPLAY=:0 xrandr --output "$hdmi" --auto --same-as "$dummy" >/dev/null 2>&1
+done
+
+exit 0

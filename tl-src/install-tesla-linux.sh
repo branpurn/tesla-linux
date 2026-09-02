@@ -54,6 +54,7 @@ IFACE_WAIT_SEC=60
 EOF
 fi
 install -m755 "$HERE/tesla-linux-wlan.sh" /usr/local/sbin/tesla-linux-wlan
+install -m755 "$HERE/tesla-linux-hdmi-clone" /usr/local/sbin/tesla-linux-hdmi-clone
 install -m644 "$HERE/tesla-linux-wlan.service" /etc/systemd/system/tesla-linux-wlan.service
 install -m755 "$HERE/ta_wlan_api.py" /usr/local/sbin/ta_wlan_api.py
 install -m644 "$HERE/tesla-linux-wlan-api.service" /etc/systemd/system/tesla-linux-wlan-api.service
@@ -178,24 +179,69 @@ TA_BIND=127.0.0.1
 TA_ENCODER=
 TA_BITRATE=8000
 TA_FPS=30
-# Remote display geometry used for touch coordinate mapping
-TA_WIDTH=1920
-TA_HEIGHT=1080
+# Remote display geometry used for touch coordinate mapping (Tesla-browser 1088x832)
+TA_WIDTH=1088
+TA_HEIGHT=832
 # Audio capture source (monitor of the virtual sink)
 TA_AUDIO_SRC=tesla.monitor
 XDG_RUNTIME_DIR=/run/user/$TL_UID
 EOF
 fi
+# Tesla-browser web-console geometry — pin even on re-install
+if [ -f /etc/tesla-linux/tesla-linux.env ]; then
+    sed -i 's/^TA_WIDTH=.*/TA_WIDTH=1088/' /etc/tesla-linux/tesla-linux.env
+    sed -i 's/^TA_HEIGHT=.*/TA_HEIGHT=832/' /etc/tesla-linux/tesla-linux.env
+    grep -q '^TA_WIDTH=' /etc/tesla-linux/tesla-linux.env || echo 'TA_WIDTH=1088' >> /etc/tesla-linux/tesla-linux.env
+    grep -q '^TA_HEIGHT=' /etc/tesla-linux/tesla-linux.env || echo 'TA_HEIGHT=832' >> /etc/tesla-linux/tesla-linux.env
+fi
 
-# BACKEND-HOLE (later SHA): virtual-display / HDMI clone if :0 stays black — do not invent Xvfb here.
-# --- Xorg on the real display (Pi: pin to the vc4 KMS node, not the v3d node) --
+# Virtual display (this SHA): dummy is Screen 0 primary so X starts without HDMI.
+# Do not invent Xvfb. HDMI 1/2 are slave clones of that :0 session (--same-as dummy).
+# --- Xorg: dummy 1088x832 (web console) + vc4 KMS for HDMI slave outputs ------
 install -d /etc/X11/xorg.conf.d
+cat > /etc/X11/xorg.conf.d/10-virtual.conf <<'EOF'
+# Dummy is Screen 0 primary so X starts with no HDMI. Tesla-browser 1088x832.
+Section "ServerFlags"
+    Option "AllowEmptyInitialConfiguration" "true"
+EndSection
+
+Section "Device"
+    Identifier "Virtual"
+    Driver     "dummy"
+    VideoRam   256000
+EndSection
+
+Section "Monitor"
+    Identifier "VirtualMonitor"
+    HorizSync   28.0-80.0
+    VertRefresh 48.0-75.0
+    Modeline "1088x832" 74.75 1088 1152 1264 1440 832 835 845 862 -hsync +vsync
+EndSection
+
+Section "Screen"
+    Identifier "VirtualScreen"
+    Device     "Virtual"
+    Monitor    "VirtualMonitor"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth   24
+        Modes   "1088x832"
+        Virtual 1088 832
+    EndSubSection
+EndSection
+
+Section "ServerLayout"
+    Identifier "TeslaLinux"
+    Screen 0 "VirtualScreen"
+EndSection
+EOF
+# Keep 99-vc4.conf for HDMI KMS (slave GPU / --same-as clone, not a second Screen).
 cat > /etc/X11/xorg.conf.d/99-vc4.conf <<'EOF'
 Section "OutputClass"
     Identifier  "vc4"
     MatchDriver "vc4"
     Driver      "modesetting"
-    Option      "PrimaryGPU" "true"
+    Option      "PrimaryGPU" "false"
 EndSection
 EOF
 
@@ -233,12 +279,14 @@ EOF
 # --- systemd units ------------------------------------------------------------
 cat > /etc/systemd/system/tesla-linux-xorg.service <<EOF
 [Unit]
-Description=Tesla Linux — X server on the HDMI display
+Description=Tesla Linux — X server on virtual display (HDMI 1/2 slave clone)
 After=systemd-user-sessions.service
 Before=tesla-linux-desktop.service
+# Do not After=tesla-linux-wlan — AP must not wait on X; X must not wait on AP.
 
 [Service]
 ExecStart=/usr/bin/Xorg :0 vt7 -ac -noreset -novtswitch
+ExecStartPost=/usr/local/sbin/tesla-linux-hdmi-clone
 Restart=always
 RestartSec=2
 TimeoutStopSec=5
