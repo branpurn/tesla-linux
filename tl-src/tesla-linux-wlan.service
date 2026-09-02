@@ -10,6 +10,7 @@ Type=oneshot
 RemainAfterExit=yes
 Restart=on-failure
 RestartSec=5
+# eth-up waits for delayed usb-net/cdc_ether. Missing wlan0 is not a unit fail when 10.42.1.1 is bound.
 ExecStartPre=/usr/local/sbin/tesla-linux-wlan eth-up
 ExecStart=/usr/local/sbin/tesla-linux-wlan boot
 ExecStop=/usr/local/sbin/tesla-linux-wlan ap-down
