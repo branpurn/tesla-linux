@@ -12,6 +12,13 @@ td{padding:6px 8px;border-bottom:1px solid #262626;vertical-align:top}
 td:first-child{color:#9ab;white-space:nowrap;width:44%}
 .ok{color:#7bff9e;font-weight:700}.bad{color:#ff7b7b;font-weight:700}
 .ua{font-size:12px;color:#888;word-break:break-all}
+#bar{position:fixed;bottom:0;left:0;right:0;padding:10px 14px;
+  display:flex;align-items:center;gap:10px;background:#111;border-top:1px solid #262626}
+#bar button{font:inherit;padding:8px 12px;border:1px solid #2a6ea8;border-radius:6px;
+  background:#1b4f7a;color:#fff;cursor:pointer}
+#bar button:disabled{opacity:.5;cursor:wait}
+#bar .hint{color:#999;font-size:14px}
+body{padding-bottom:64px}
 </style>
 <h1>Tesla Linux — browser probe</h1>
 
@@ -36,6 +43,11 @@ td:first-child{color:#9ab;white-space:nowrap;width:44%}
 <tr><td>touch points</td><td id="t_touch">…</td></tr>
 <tr><td>user agent</td><td class="ua" id="t_ua">…</td></tr>
 </table>
+
+<div id="bar">
+  <button type="button" id="reboot">Reboot</button>
+  <span class="hint">Next boot joins that WLAN.</span>
+</div>
 
 <script>
 const $=id=>document.getElementById(id);
@@ -71,4 +83,10 @@ if(hasWC && VideoDecoder.isConfigSupported){
 }else{
   $('t_h264').innerHTML='<span class="bad">n/a — no WebCodecs</span>';
 }
+
+/* No reboot HTTP on this SHA (nginx: /api/wlan + /sockets/* only). Do not invent one. */
+$('reboot').addEventListener('click',()=>{
+  $('reboot').disabled=true;
+  $('reboot').textContent='Next boot joins that WLAN.';
+});
 </script>

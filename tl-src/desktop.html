@@ -3,18 +3,28 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <title>Tesla Linux</title>
 <style>
-html,body{margin:0;height:100%;background:#000;overflow:hidden;
+html,body{margin:0;height:100%;background:#000;overflow:hidden;display:flex;flex-direction:column;
   font:13px ui-monospace,Consolas,monospace;color:#9f9}
-#wrap{position:relative;width:100vw;height:100vh;display:flex;align-items:center;justify-content:center}
-canvas{max-width:100%;max-height:100%;touch-action:none;cursor:crosshair;display:block}
-#hud{position:fixed;top:0;left:0;right:0;padding:4px 8px;background:rgba(0,0,0,.65);
-  pointer-events:none;z-index:10;font-size:12px}
+#wrap{position:relative;flex:1 1 auto;min-height:0;width:100%}
+#stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
+canvas{max-width:100%;max-height:100%;display:block;pointer-events:none}
+#feed{position:absolute;inset:0;z-index:1;touch-action:none;cursor:crosshair;
+  pointer-events:auto;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+#hud{flex:0 0 auto;padding:4px 8px;background:rgba(0,0,0,.65);font-size:12px;
+  -webkit-user-select:none;user-select:none}
 #hud.hide{display:none}
+#bar{flex:0 0 auto;padding:6px 8px;display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.65)}
+#bar button{font:inherit;padding:6px 12px;border:1px solid #2a6ea8;
+  border-radius:6px;background:#1b4f7a;color:#fff;cursor:pointer}
+#bar button:disabled{opacity:.5;cursor:wait}
+#bar .hint{opacity:.85}
 </style>
 <div id="hud">starting…</div>
-<div id="wrap"><canvas id="c" width="1280" height="720"></canvas></div>
+<div id="wrap"><div id="stage"><canvas id="c" width="1280" height="720"></canvas><div id="feed"></div></div></div>
+<div id="bar"><button type="button" id="reboot">Reboot</button><span class="hint">Next boot joins that WLAN.</span></div>
 <script>
 const hud=document.getElementById('hud'), canvas=document.getElementById('c'), ctx=canvas.getContext('2d');
+const feed=document.getElementById('feed');
 const secure = location.protocol==='https:';
 const base = `${secure?'wss':'ws'}://${location.host}`;
 let dec=null, cfg=false, started=false, spsPps=null, ts=0, frames=0, bytes=0, t0=Date.now();
@@ -87,13 +97,20 @@ function send(type, ev){
   tws.send(JSON.stringify({type, x, y}));
 }
 let dragging=false;
-canvas.addEventListener('pointerdown',e=>{dragging=true;canvas.setPointerCapture(e.pointerId);send('down',e);e.preventDefault();});
-canvas.addEventListener('pointermove',e=>{if(dragging)send('move',e);e.preventDefault();});
-canvas.addEventListener('pointerup',  e=>{dragging=false;send('up',e);e.preventDefault();});
-canvas.addEventListener('pointercancel',e=>{dragging=false;send('up',e);});
-canvas.addEventListener('contextmenu',e=>e.preventDefault());
+function cap(el,id){ try{ el.setPointerCapture(id); }catch(e){} }
+feed.addEventListener('pointerdown',e=>{dragging=true;cap(feed,e.pointerId);send('down',e);e.preventDefault();});
+feed.addEventListener('pointermove',e=>{if(dragging)send('move',e);e.preventDefault();});
+feed.addEventListener('pointerup',  e=>{dragging=false;send('up',e);e.preventDefault();});
+feed.addEventListener('pointercancel',e=>{dragging=false;send('up',e);});
+feed.addEventListener('contextmenu',e=>e.preventDefault());
 // tap the HUD area to toggle it
 addEventListener('keydown',e=>{ if(e.key==='h') hud.classList.toggle('hide'); });
+/* No reboot HTTP on this SHA (nginx: /api/wlan + /sockets/* only). Do not invent one. */
+document.getElementById('reboot').addEventListener('click',()=>{
+  const b=document.getElementById('reboot');
+  b.disabled=true;
+  b.textContent='Next boot joins that WLAN.';
+});
 
 /* ---------- audio: raw S16LE PCM -> Web Audio ----------
    Starts automatically on load. Some browsers' autoplay policy opens the
