@@ -84,6 +84,11 @@ if(hasWC && VideoDecoder.isConfigSupported){
   $('t_h264').innerHTML='<span class="bad">n/a — no WebCodecs</span>';
 }
 
-/* No reboot HTTP on this SHA (nginx: /api/wlan + /sockets/* only). Do not invent one. */
-$('reboot').addEventListener('click',()=>{ $('reboot').disabled=true; });
+$('reboot').addEventListener('click', async ()=>{
+  if($('reboot').disabled) return;
+  $('reboot').disabled=true;
+  try{
+    await fetch('/api/reboot',{method:'POST',credentials:'same-origin',cache:'no-store'});
+  }catch(e){}
+});
 </script>

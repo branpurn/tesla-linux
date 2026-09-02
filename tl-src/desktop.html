@@ -105,9 +105,13 @@ feed.addEventListener('pointercancel',e=>{dragging=false;send('up',e);});
 feed.addEventListener('contextmenu',e=>e.preventDefault());
 // tap the HUD area to toggle it
 addEventListener('keydown',e=>{ if(e.key==='h') hud.classList.toggle('hide'); });
-/* No reboot HTTP on this SHA (nginx: /api/wlan + /sockets/* only). Do not invent one. */
-document.getElementById('reboot').addEventListener('click',()=>{
-  document.getElementById('reboot').disabled=true;
+document.getElementById('reboot').addEventListener('click', async ()=>{
+  const b=document.getElementById('reboot');
+  if(b.disabled) return;
+  b.disabled=true;
+  try{
+    await fetch('/api/reboot',{method:'POST',credentials:'same-origin',cache:'no-store'});
+  }catch(e){}
 });
 
 /* ---------- audio: raw S16LE PCM -> Web Audio ----------
