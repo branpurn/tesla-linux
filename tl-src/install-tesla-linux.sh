@@ -187,7 +187,7 @@ verify_autologin_hdmi() {
     fi
     grep -q '^Conflicts=getty@tty1.service$' "$xorg" \
         || { echo "ERROR: tesla-linux-xorg missing Conflicts=getty@tty1.service" >&2; exit 1; }
-    if grep -Eiq 'After=.*tesla-linux-wlan|Requires=.*tesla-linux-wlan' "$xorg"; then
+    if grep -Eiq '^After=.*tesla-linux-wlan|^Requires=.*tesla-linux-wlan' "$xorg"; then
         echo "ERROR: tesla-linux-xorg must not After/Requires wlan" >&2
         exit 1
     fi
@@ -243,7 +243,7 @@ verify_autologin_hdmi() {
         || { echo "ERROR: 99-vc4.conf must not be a second Screen / primary GPU" >&2; exit 1; }
 
     [ -f "$wlan" ] || { echo "ERROR: missing tesla-linux-wlan.service" >&2; exit 1; }
-    if grep -Eiq 'After=.*tesla-linux-(xorg|desktop)|Requires=.*tesla-linux-(xorg|desktop)' "$wlan"; then
+    if grep -Eiq '^After=.*tesla-linux-(xorg|desktop)|^Requires=.*tesla-linux-(xorg|desktop)' "$wlan"; then
         echo "ERROR: tesla-linux-wlan must not After/Requires xorg or desktop" >&2
         exit 1
     fi
@@ -566,7 +566,7 @@ After=systemd-user-sessions.service
 Before=tesla-linux-desktop.service
 Conflicts=getty@tty1.service
 # HDMI/console VT is vt1 (not vt7). getty@tty1 must not own it.
-# Do not After=tesla-linux-wlan — AP must not wait on X; X must not wait on AP.
+# X and AP stay independent. Do not wait on tesla-linux-wlan.
 
 [Service]
 # teslalinux session dir so xfce4-session has XDG_RUNTIME_DIR if linger is late.
