@@ -72,8 +72,10 @@ mkdir -p "$MNT/tmp/tl-src"
 cp "$SRC"/install-tesla-linux.sh "$SRC"/ta_*.py "$SRC"/*.html \
    "$SRC"/tesla-linux-wlan.sh "$SRC"/tesla-linux-wlan.service \
    "$SRC"/tesla-linux-wlan-api.service "$SRC"/ap.env \
+   "$SRC"/tesla-linux-hdmi-clone \
    "$MNT/tmp/tl-src/" 2>/dev/null || true
-chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh"
+chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh" \
+         "$MNT/tmp/tl-src/tesla-linux-hdmi-clone"
 # authorize the build key so the image is reachable headless
 mkdir -p "$MNT/home/ubuntu/.ssh"
 if [ -f "$SRC/authorized_keys" ]; then
