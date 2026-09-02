@@ -322,11 +322,58 @@ verify_autologin_hdmi() {
         echo "ERROR: display-manager.service is enabled; product is tesla-linux-desktop, not a DM" >&2
         exit 1
     fi
+
+    # USB HID on XFCE :0 — dummy Screen 0 has no input driver without libinput.
+    # Do not wait on HDMI clone. Do not break 99-uinput.rules.
+    local hid_udev="$r/etc/udev/rules.d/99-tesla-linux-hid.rules"
+    local hid_xorg="$r/etc/X11/xorg.conf.d/40-tesla-linux-hid.conf"
+    local uinput_udev="$r/etc/udev/rules.d/99-uinput.rules"
+    [ -f "$hid_udev" ] || { echo "ERROR: missing 99-tesla-linux-hid.rules" >&2; exit 1; }
+    grep -q 'TAG+="seat"' "$hid_udev" \
+        || { echo "ERROR: HID udev rules do not TAG+= seat" >&2; exit 1; }
+    grep -q 'ID_INPUT_KEYBOARD' "$hid_udev" \
+        || { echo "ERROR: HID udev rules missing ID_INPUT_KEYBOARD" >&2; exit 1; }
+    grep -q 'ID_INPUT_MOUSE' "$hid_udev" \
+        || { echo "ERROR: HID udev rules missing ID_INPUT_MOUSE" >&2; exit 1; }
+    grep -q 'ID_INPUT_TOUCHPAD' "$hid_udev" \
+        || { echo "ERROR: HID udev rules missing ID_INPUT_TOUCHPAD" >&2; exit 1; }
+    [ -f "$hid_xorg" ] || { echo "ERROR: missing InputClass/libinput snippet" >&2; exit 1; }
+    grep -q 'Section "InputClass"' "$hid_xorg" \
+        || { echo "ERROR: 40-tesla-linux-hid.conf is not an InputClass" >&2; exit 1; }
+    grep -q 'Driver[[:space:]]*"libinput"' "$hid_xorg" \
+        || { echo "ERROR: InputClass snippet is not Driver libinput" >&2; exit 1; }
+    grep -q 'Option[[:space:]]*"AutoAddDevices"[[:space:]]*"true"' "$virt" \
+        || { echo "ERROR: AutoAddDevices must stay on" >&2; exit 1; }
+    if grep -Eiq 'Option[[:space:]]+"AutoAddDevices"[[:space:]]+"false"' "$virt" "$hid_xorg"; then
+        echo "ERROR: AutoAddDevices must stay on (not false)" >&2
+        exit 1
+    fi
+    [ -f "$uinput_udev" ] || { echo "ERROR: 99-uinput.rules missing" >&2; exit 1; }
+    grep -q 'KERNEL=="uinput"' "$uinput_udev" \
+        || { echo "ERROR: 99-uinput.rules lost KERNEL==uinput" >&2; exit 1; }
+    grep -q 'GROUP="input"' "$uinput_udev" \
+        || { echo "ERROR: 99-uinput.rules lost GROUP=input" >&2; exit 1; }
+    if [ -n "$r" ]; then
+        grep -E '^input:' "$r/etc/group" | grep -q teslalinux \
+            || { echo "ERROR: teslalinux not in group input" >&2; exit 1; }
+    else
+        id -nG teslalinux 2>/dev/null | grep -qw input \
+            || { echo "ERROR: teslalinux not in group input" >&2; exit 1; }
+    fi
 }
 
 # --verify-autologin [root] checks a live box or a mounted image. Do not run ensure_*.
 if [ "${1:-}" = "--verify-autologin" ]; then
     verify_autologin_hdmi "${2:-}"
+    # Fail if the X input driver dropped out of --print-packages / PKGS.
+    hid_pkgs="$("$0" --print-packages)" || {
+        echo "ERROR: --print-packages failed (libinput must stay in PKGS)" >&2
+        exit 1
+    }
+    echo "$hid_pkgs" | grep -qw xserver-xorg-input-libinput \
+        || { echo "ERROR: xserver-xorg-input-libinput missing from PKGS" >&2; exit 1; }
+    echo "$hid_pkgs" | grep -qw xinput \
+        || { echo "ERROR: xinput missing from PKGS" >&2; exit 1; }
     exit 0
 fi
 
@@ -342,14 +389,22 @@ TL_UID=""
 
 # Canonical package list — single source of truth for both the live box and the
 # image bake. `install-tesla-linux.sh --print-packages` emits it for the chroot.
-PKGS="xserver-xorg-core xserver-xorg-video-dummy xinit x11-utils x11-xserver-utils xinput \
+PKGS="xserver-xorg-core xserver-xorg-video-dummy xserver-xorg-input-libinput \
+xinit x11-utils x11-xserver-utils xinput \
 gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
 python3-gi python3-gst-1.0 python3-websockets python3-evdev \
 xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar dbus-x11 \
 pipewire pipewire-pulse pipewire-audio wireplumber pulseaudio-utils gstreamer1.0-pipewire \
 nginx openssl network-manager hostapd iw dnsmasq rfkill"
 
-if [ "${1:-}" = "--print-packages" ]; then echo "$PKGS"; exit 0; fi
+if [ "${1:-}" = "--print-packages" ]; then
+    echo "$PKGS" | grep -qw xserver-xorg-input-libinput \
+        || { echo "ERROR: xserver-xorg-input-libinput missing from PKGS" >&2; exit 1; }
+    echo "$PKGS" | grep -qw xinput \
+        || { echo "ERROR: xinput missing from PKGS" >&2; exit 1; }
+    echo "$PKGS"
+    exit 0
+fi
 TL_UID="$(id -u "$TL_USER")"
 
 echo "==> installing to $PREFIX (user=$TL_USER uid=$TL_UID)"
@@ -539,6 +594,7 @@ cat > /etc/X11/xorg.conf.d/10-virtual.conf <<'EOF'
 # Dummy is Screen 0 primary so X starts with no HDMI. Tesla-browser 1088x832.
 Section "ServerFlags"
     Option "AllowEmptyInitialConfiguration" "true"
+    Option "AutoAddDevices" "true"
 EndSection
 
 Section "Device"
@@ -580,11 +636,44 @@ Section "OutputClass"
     Option      "PrimaryGPU" "false"
 EndSection
 EOF
+# USB HID on :0. Dummy Screen 0 stays primary. Do not wait on HDMI clone.
+cat > /etc/X11/xorg.conf.d/40-tesla-linux-hid.conf <<'EOF'
+# Claim USB HID (keyboard / mouse / touchpad) with libinput on Xorg :0.
+# AutoAddDevices stays on (see 10-virtual.conf ServerFlags).
+Section "InputClass"
+    Identifier "Tesla Linux keyboard"
+    MatchIsKeyboard "on"
+    MatchDevicePath "/dev/input/event*"
+    Driver "libinput"
+EndSection
+
+Section "InputClass"
+    Identifier "Tesla Linux pointer"
+    MatchIsPointer "on"
+    MatchDevicePath "/dev/input/event*"
+    Driver "libinput"
+EndSection
+
+Section "InputClass"
+    Identifier "Tesla Linux touchpad"
+    MatchIsTouchpad "on"
+    MatchDevicePath "/dev/input/event*"
+    Driver "libinput"
+EndSection
+EOF
 
 # --- uinput (virtual touch device) -------------------------------------------
 echo uinput > /etc/modules-load.d/uinput.conf
 echo 'KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"' \
     > /etc/udev/rules.d/99-uinput.rules
+# USB HID event nodes for Xorg :0 / seat0. Do not change 99-uinput.rules.
+cat > /etc/udev/rules.d/99-tesla-linux-hid.rules <<'EOF'
+# Tag ID_INPUT keyboards/mice/touchpads for the graphical seat (Xorg :0).
+# teslalinux stays in group input. Leave 99-uinput.rules alone.
+ACTION=="add|change", SUBSYSTEM=="input", ENV{ID_INPUT_KEYBOARD}=="?*", TAG+="seat"
+ACTION=="add|change", SUBSYSTEM=="input", ENV{ID_INPUT_MOUSE}=="?*", TAG+="seat"
+ACTION=="add|change", SUBSYSTEM=="input", ENV{ID_INPUT_TOUCHPAD}=="?*", TAG+="seat"
+EOF
 usermod -aG input "$TL_USER"
 
 # --- PipeWire: always-present virtual sink so headless audio has a target -----
