@@ -115,6 +115,8 @@ systemctl enable NetworkManager >/dev/null 2>&1 || true
 # install writes teslalinux/chpasswd, graphical.target symlink, ssh-keygen -A,
 # serial-getty, nginx (AP/station/ethernet binds only — never 0.0.0.0) + wlan.
 /tmp/tl-src/install-tesla-linux.sh --no-start
+# Autologin XFCE / getty-not-on-HDMI — fail the chroot if it did not stick.
+/tmp/tl-src/install-tesla-linux.sh --verify-autologin
 
 # Fail the bake if factory login / default.target / ssh host keys did not stick.
 id teslalinux >/dev/null
@@ -226,6 +228,31 @@ grep -q '^User=teslalinux$' "$MNT/etc/systemd/system/tesla-linux-desktop.service
 [ -d "$MNT/home/teslalinux" ] || die "teslalinux home missing"
 if [ -f "$SRC/authorized_keys" ]; then
   [ -f "$MNT/home/teslalinux/.ssh/authorized_keys" ] || die "teslalinux authorized_keys missing"
+fi
+
+# Autologin XFCE on :0; getty must not own HDMI. Fail the bake if it did not stick.
+log "verifying autologin XFCE / getty-not-on-HDMI"
+"$SRC/install-tesla-linux.sh" --verify-autologin "$MNT"
+grep -q '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
+  || die "Xorg is not on vt1"
+if grep -q ' vt7 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
+  die "Xorg still on vt7"
+fi
+[ "$(readlink "$MNT/etc/systemd/system/getty@tty1.service")" = /dev/null ] \
+  || die "getty@tty1 is not masked"
+[ ! -e "$MNT/etc/systemd/system/getty.target.wants/getty@tty1.service" ] \
+  || die "getty@tty1 still in getty.target.wants"
+grep -q '^Conflicts=getty@tty1.service$' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
+  || die "xorg missing Conflicts=getty@tty1"
+grep -q '^Environment=DISPLAY=:0$' "$MNT/etc/systemd/system/tesla-linux-desktop.service" \
+  || die "desktop is not DISPLAY=:0"
+grep -q 'xfce4-session' "$MNT/etc/systemd/system/tesla-linux-desktop.service" \
+  || die "desktop is not xfce4-session"
+grep -q '^ReserveVT=0$' "$MNT/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf" \
+  || die "logind ReserveVT is not 0"
+if grep -Eiq 'After=.*tesla-linux-(xorg|desktop)|Requires=.*tesla-linux-(xorg|desktop)' \
+      "$MNT/etc/systemd/system/tesla-linux-wlan.service"; then
+  die "wlan After/Requires xorg or desktop"
 fi
 
 # ------------------------------------------------------------------ pack -----
