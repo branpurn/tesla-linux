@@ -223,6 +223,18 @@ grep -q '^PasswordAuthentication yes$' "$MNT/etc/ssh/sshd_config.d/99-tesla-linu
   || die "serial-getty@ttyAMA0 not enabled"
 [ -L "$MNT/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service" ] \
   || die "serial-getty@ttyS0 not enabled"
+[ -f "$MNT/etc/systemd/system/serial-getty@.service.d/tl-no-binds-to-dev.conf" ] \
+  || die "serial-getty BindsTo drop-in missing"
+grep -q '^BindsTo=$' "$MNT/etc/systemd/system/serial-getty@.service.d/tl-no-binds-to-dev.conf" \
+  || die "serial-getty drop-in does not clear BindsTo"
+if grep -Eq '^BindsTo=dev-' "$MNT/etc/systemd/system/serial-getty@.service.d/tl-no-binds-to-dev.conf"; then
+  die "serial-getty still BindsTo the device unit"
+fi
+if grep -Eq 'no Wi-Fi iface after .*fail so the unit can restart' "$MNT/usr/local/sbin/tesla-linux-wlan"; then
+  die "wlan boot still fails the unit solely for missing wifi"
+fi
+grep -q 'wait_wired_iface' "$MNT/usr/local/sbin/tesla-linux-wlan" \
+  || die "wlan missing wait_wired_iface"
 grep -q '^User=teslalinux$' "$MNT/etc/systemd/system/tesla-linux-desktop.service" \
   || die "tesla-linux-desktop User is not teslalinux"
 [ -d "$MNT/home/teslalinux" ] || die "teslalinux home missing"
