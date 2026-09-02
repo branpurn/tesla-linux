@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# Tesla Linux — pinned SSH banner on the HDMI TTY (tty1).
+#
+# Write-only overlay. HDMI is not a login. getty@tty1 stays masked so a
+# login prompt cannot bury the pin. StandardInput=null / no PAMName.
+# Xorg :0 vt7 + libinput GrabDevice stay Backend's (do not rewrite here).
+#
+# Sentence: to control the baremetal host, SSH to <wlan> or 10.42.1.1 as teslalinux
+# Live WLAN IPv4 = station address, or 10.42.0.1 in AP mode. Never all-zeros,
+# never a placeholder token. Ethernet factory is 10.42.1.1. Username teslalinux.
+#
+# Pin: redraw at VT home (not lost in scrollback). Refresh when the IPv4 changes.
+set -euo pipefail
+
+AP_ENV="${AP_ENV:-/etc/tesla-linux/ap.env}"
+# shellcheck source=/dev/null
+[ -f "$AP_ENV" ] && . "$AP_ENV"
+
+AP_ADDR="${AP_ADDR:-10.42.0.1}"
+ETH_ADDR="${ETH_ADDR:-10.42.1.1}"
+TL_USER="${TL_USER:-teslalinux}"
+HOSTAPD_PID="${HOSTAPD_PID:-/run/tesla-linux-hostapd.pid}"
+HDMI_TTY="${HDMI_TTY:-/dev/tty1}"
+BANNER_FILE="${BANNER_FILE:-/run/tesla-linux/hdmi-banner}"
+
+is_bindable_ipv4() {
+    local ip="$1"
+    case "$ip" in
+        ''|0.0.0.0|127.*|169.254.*) return 1 ;;
+        *:*) return 1 ;;
+        *.*.*.*) return 0 ;;
+    esac
+    return 1
+}
+
+iface_ipv4s() {
+    local iface="$1" a
+    [ -n "$iface" ] || return 0
+    ip -4 -o addr show dev "$iface" 2>/dev/null \
+        | awk '{print $4}' \
+        | while IFS= read -r a; do
+            a="${a%%/*}"
+            a="${a%%[[:space:]]*}"
+            is_bindable_ipv4 "$a" || continue
+            printf '%s\n' "$a"
+        done
+}
+
+wifi_iface() {
+    local d n
+    d="$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2=="wifi"{print $1; exit}' || true)"
+    if [ -n "$d" ]; then
+        printf '%s\n' "$d"
+        return 0
+    fi
+    for n in /sys/class/net/*/wireless; do
+        [ -e "$n" ] || continue
+        basename "$(dirname "$n")"
+        return 0
+    done
+    return 1
+}
+
+hostapd_running() {
+    [ -f "$HOSTAPD_PID" ] && kill -0 "$(cat "$HOSTAPD_PID" 2>/dev/null)" 2>/dev/null
+}
+
+# Live WLAN IPv4 only (not ethernet 10.42.1.1). Station address, or AP 10.42.0.1.
+wlan_ipv4() {
+    local iface ip
+    if hostapd_running && is_bindable_ipv4 "$AP_ADDR"; then
+        printf '%s\n' "$AP_ADDR"
+        return 0
+    fi
+    iface="$(wifi_iface 2>/dev/null || true)"
+    [ -n "$iface" ] || return 1
+    while IFS= read -r ip; do
+        [ -n "$ip" ] || continue
+        [ "$ip" = "$ETH_ADDR" ] && continue
+        if [ "$ip" = "$AP_ADDR" ]; then
+            continue
+        fi
+        is_bindable_ipv4 "$ip" || continue
+        printf '%s\n' "$ip"
+        return 0
+    done < <(iface_ipv4s "$iface")
+    while IFS= read -r ip; do
+        [ "$ip" = "$AP_ADDR" ] || continue
+        is_bindable_ipv4 "$ip" || continue
+        printf '%s\n' "$AP_ADDR"
+        return 0
+    done < <(iface_ipv4s "$iface")
+    return 1
+}
+
+# Chairman sentence. No all-zeros listen. No placeholder token. Ethernet factory always 10.42.1.1.
+banner_text() {
+    local wlan
+    wlan="$(wlan_ipv4 2>/dev/null || true)"
+    if [ -n "$wlan" ] && is_bindable_ipv4 "$wlan"; then
+        printf 'to control the baremetal host, SSH to %s or %s as %s\n' \
+            "$wlan" "$ETH_ADDR" "$TL_USER"
+        return 0
+    fi
+    printf 'to control the baremetal host, SSH to %s as %s\n' \
+        "$ETH_ADDR" "$TL_USER"
+}
+
+# Pin at the top of the HDMI TTY. Write-only, no controlling tty, no login.
+pin_banner() {
+    local msg="$1"
+    mkdir -p "$(dirname "$BANNER_FILE")"
+    printf '%s\n' "$msg" > "$BANNER_FILE"
+    [ -c "$HDMI_TTY" ] || return 0
+    # Open write-only; do not become a session leader on this TTY (HID stays on :0).
+    if ! { true >>"$HDMI_TTY"; } 2>/dev/null; then
+        return 0
+    fi
+    {
+        printf '\033[?25l\033[H\033[J%s\n' "$msg"
+    } >"$HDMI_TTY" 2>/dev/null || true
+}
+
+cmd_once() {
+    pin_banner "$(banner_text)"
+}
+
+cmd_daemon() {
+    local now
+    trap ':' USR1 HUP
+    while true; do
+        now="$(banner_text)"
+        # Redraw every pass so kernel printk / scrollback cannot bury the pin.
+        # Sleep is interrupted by USR1 when NetworkManager/wlan IPv4 changes.
+        pin_banner "$now"
+        sleep 2 || true
+    done
+}
+
+cmd_selftest() {
+    local fail=0 out
+
+    is_bindable_ipv4 0.0.0.0 && { echo "FAIL: 0.0.0.0 bindable"; fail=1; }
+    is_bindable_ipv4 127.0.0.1 && { echo "FAIL: loopback bindable"; fail=1; }
+    is_bindable_ipv4 169.254.1.1 && { echo "FAIL: link-local bindable"; fail=1; }
+    is_bindable_ipv4 10.42.1.1 || { echo "FAIL: eth factory not bindable"; fail=1; }
+    is_bindable_ipv4 10.42.0.1 || { echo "FAIL: AP addr not bindable"; fail=1; }
+
+    # AP mode: hostapd up → 10.42.0.1 even if the wifi iface is empty.
+    hostapd_running() { return 0; }
+    wifi_iface() { printf '%s\n' wlan0; }
+    iface_ipv4s() { return 0; }
+    out="$(wlan_ipv4)"
+    [ "$out" = 10.42.0.1 ] || { echo "FAIL: AP wlan_ipv4 got '$out'"; fail=1; }
+    out="$(banner_text)"
+    echo "$out" | grep -q '10.42.0.1' || { echo "FAIL: AP sentence missing 10.42.0.1"; fail=1; }
+    echo "$out" | grep -q '10.42.1.1' || { echo "FAIL: AP sentence missing 10.42.1.1"; fail=1; }
+    echo "$out" | grep -q 'teslalinux' || { echo "FAIL: AP sentence missing teslalinux"; fail=1; }
+    echo "$out" | grep -q 'to control the baremetal host, SSH to' \
+        || { echo "FAIL: AP sentence missing chairman prefix"; fail=1; }
+    echo "$out" | grep -Eq '0\.0\.0\.0' && { echo "FAIL: AP sentence leaked all-zeros"; fail=1; }
+
+    # Station: first bindable wifi IPv4 that is not ethernet / AP.
+    hostapd_running() { return 1; }
+    iface_ipv4s() {
+        printf '%s\n' 0.0.0.0
+        printf '%s\n' 10.42.1.1
+        printf '%s\n' 192.168.8.4
+    }
+    out="$(wlan_ipv4)"
+    [ "$out" = 192.168.8.4 ] || { echo "FAIL: station wlan_ipv4 got '$out'"; fail=1; }
+    out="$(banner_text)"
+    echo "$out" | grep -q '192.168.8.4' || { echo "FAIL: station sentence missing station IPv4"; fail=1; }
+    echo "$out" | grep -q '10.42.1.1' || { echo "FAIL: station sentence missing 10.42.1.1"; fail=1; }
+    echo "$out" | grep -q 'teslalinux' || { echo "FAIL: station sentence missing teslalinux"; fail=1; }
+    echo "$out" | grep -Eq '0\.0\.0\.0' && { echo "FAIL: station sentence leaked all-zeros"; fail=1; }
+
+    # AP address on the wifi iface, hostapd already down — still 10.42.0.1.
+    iface_ipv4s() { printf '%s\n' 10.42.0.1; }
+    out="$(wlan_ipv4)"
+    [ "$out" = 10.42.0.1 ] || { echo "FAIL: iface AP-addr wlan_ipv4 got '$out'"; fail=1; }
+
+    # No WLAN IPv4: ethernet factory + user only. No all-zeros. No invented token.
+    wifi_iface() { return 1; }
+    iface_ipv4s() { return 0; }
+    if wlan_ipv4 >/dev/null; then
+        echo "FAIL: wlan_ipv4 succeeded with no wifi"; fail=1
+    fi
+    out="$(banner_text)"
+    echo "$out" | grep -q '10.42.1.1' || { echo "FAIL: eth-only sentence missing 10.42.1.1"; fail=1; }
+    echo "$out" | grep -q 'teslalinux' || { echo "FAIL: eth-only sentence missing teslalinux"; fail=1; }
+    echo "$out" | grep -Eq '0\.0\.0\.0' && { echo "FAIL: eth-only sentence leaked all-zeros"; fail=1; }
+
+    grep -q '10.42.1.1' "$0" || { echo "FAIL: script text missing 10.42.1.1"; fail=1; }
+    grep -q 'teslalinux' "$0" || { echo "FAIL: script text missing teslalinux"; fail=1; }
+
+    if [ "$fail" -eq 0 ]; then
+        echo "tesla-linux-hdmi-banner selftest OK"
+        return 0
+    fi
+    echo "tesla-linux-hdmi-banner selftest FAILED"
+    return 1
+}
+
+usage() {
+    cat <<EOF
+usage: tesla-linux-hdmi-banner <once|daemon|selftest>
+  once      write the pinned HDMI SSH banner now
+  daemon    redraw / refresh when the WLAN or ethernet IPv4 changes
+  selftest  sentence + placeholder checks (no hardware)
+EOF
+}
+
+main() {
+    case "${1:-}" in
+        once) cmd_once ;;
+        daemon) cmd_daemon ;;
+        selftest) cmd_selftest ;;
+        -h|--help|help|'') usage ;;
+        *) usage >&2; exit 2 ;;
+    esac
+}
+
+if [ "${TL_HDMI_BANNER_SOURCED:-}" != 1 ]; then
+    main "$@"
+fi
