@@ -3,11 +3,11 @@
 #
 # NetworkManager owns infrastructure (station) autoconnect.
 # Fallback AP is hostapd + dnsmasq (not nmcli hotspot), SSID TeslaLinux.
-# nginx listen is rewritten to the current AP/station IPv4s only
-# (never 0.0.0.0, never loopback-only).
+# nginx listen is rewritten to the current AP / station / ethernet IPv4s only
+# (never 0.0.0.0, never loopback-only). teslalinux.local is existing avahi.
 #
 # FRONTEND-HOLE (this SHA): pick/save WLAN UI — do not invent a settings maze.
-# BACKEND-HOLE (this SHA): bounce glue is cmd save-wlan / boot; HTTP API TBD.
+# BACKEND-HOLE (later SHA): HDMI-less / virtual-display clone — AP must not wait on X.
 set -euo pipefail
 
 AP_ENV="${AP_ENV:-/etc/tesla-linux/ap.env}"
@@ -21,7 +21,12 @@ AP_ADDR="${AP_ADDR:-10.42.0.1}"
 AP_PREFIX="${AP_PREFIX:-24}"
 AP_DHCP_START="${AP_DHCP_START:-10.42.0.10}"
 AP_DHCP_END="${AP_DHCP_END:-10.42.0.200}"
+ETH_ADDR="${ETH_ADDR:-10.42.1.1}"
+ETH_PREFIX="${ETH_PREFIX:-24}"
+ETH_CONN="${ETH_CONN:-tesla-linux-eth}"
 WAIT_SEC="${WAIT_SEC:-20}"
+# brcmfmac often appears after this oneshot first runs — wait, then fail so systemd restarts.
+IFACE_WAIT_SEC="${IFACE_WAIT_SEC:-60}"
 
 HOSTAPD_CONF="${HOSTAPD_CONF:-/etc/tesla-linux/hostapd.conf}"
 DNSMASQ_CONF="${DNSMASQ_CONF:-/etc/tesla-linux/dnsmasq-ap.conf}"
@@ -55,6 +60,59 @@ wifi_iface() {
         [ -e "$n" ] || continue
         basename "$(dirname "$n")"
         return 0
+    done
+    return 1
+}
+
+# Wired / VM-virtio ethernet we may bind nginx to (eth0, end0, en*).
+# Not lo, not docker/veth, not wifi. Type ARPHRD_ETHER=1.
+is_wired_iface() {
+    local n="$1"
+    [ -n "$n" ] || return 1
+    case "$n" in
+        lo|docker*|veth*|br-*|virbr*|tun*|wg*) return 1 ;;
+    esac
+    [ -e "/sys/class/net/$n" ] || return 1
+    [ -e "/sys/class/net/$n/wireless" ] && return 1
+    [ "$(cat "/sys/class/net/$n/type" 2>/dev/null || echo 0)" = "1" ]
+}
+
+wired_ifaces() {
+    local n
+    for n in /sys/class/net/*; do
+        [ -e "$n" ] || continue
+        n="$(basename "$n")"
+        is_wired_iface "$n" || continue
+        printf '%s\n' "$n"
+    done
+}
+
+# Primary jack / VM nic: eth0, then end0, then first en*.
+primary_wired_iface() {
+    local n
+    for n in eth0 end0; do
+        is_wired_iface "$n" && { printf '%s\n' "$n"; return 0; }
+    done
+    for n in /sys/class/net/en*; do
+        [ -e "$n" ] || continue
+        n="$(basename "$n")"
+        is_wired_iface "$n" && { printf '%s\n' "$n"; return 0; }
+    done
+    n="$(wired_ifaces | head -n1)"
+    [ -n "$n" ] && { printf '%s\n' "$n"; return 0; }
+    return 1
+}
+
+wait_wifi_iface() {
+    local i=0 iface
+    while :; do
+        if iface="$(wifi_iface)"; then
+            printf '%s\n' "$iface"
+            return 0
+        fi
+        [ "$i" -ge "$IFACE_WAIT_SEC" ] && break
+        sleep 1
+        i=$((i + 1))
     done
     return 1
 }
@@ -239,21 +297,40 @@ iface_ipv4s() {
 }
 
 collect_bind_ips() {
-    local iface="${1:-}" ip
+    local iface="${1:-}" n ip
     local seen="|"
+    _emit_ip() {
+        local a="$1"
+        [ -n "$a" ] || return 0
+        case "$seen" in *"|$a|"*) return 0 ;; esac
+        seen="${seen}${a}|"
+        printf '%s\n' "$a"
+    }
     if [ -n "$iface" ]; then
         while IFS= read -r ip; do
-            [ -n "$ip" ] || continue
-            case "$seen" in *"|$ip|"*) continue ;; esac
-            seen="${seen}${ip}|"
-            printf '%s\n' "$ip"
+            _emit_ip "$ip"
         done < <(iface_ipv4s "$iface")
     fi
+    # Wired eth0/end0/en* (and VM virtio) — picker/desktop on the same ethernet.
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        [ "$n" = "$iface" ] && continue
+        while IFS= read -r ip; do
+            _emit_ip "$ip"
+        done < <(iface_ipv4s "$n")
+    done < <(wired_ifaces)
     if hostapd_running && is_bindable_ipv4 "$AP_ADDR"; then
-        case "$seen" in
-            *"|$AP_ADDR|"*) ;;
-            *) printf '%s\n' "$AP_ADDR" ;;
-        esac
+        _emit_ip "$AP_ADDR"
+    fi
+    # Factory ethernet static (10.42.1.1) when assigned — never 0.0.0.0.
+    if is_bindable_ipv4 "$ETH_ADDR"; then
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            if iface_ipv4s "$n" | grep -qx "$ETH_ADDR"; then
+                _emit_ip "$ETH_ADDR"
+                break
+            fi
+        done < <(wired_ifaces)
     fi
 }
 
@@ -310,13 +387,13 @@ cmd_nginx_bind() {
         log "nginx bind HTTP on: $(echo "$ips" | tr '\n' ' ')"
         reload_nginx
     else
-        log "no AP/station IPv4 yet; nginx not listening world"
+        log "no AP/station/ethernet IPv4 yet; nginx not listening world"
     fi
 }
 
 cmd_ap_up() {
     local iface
-    iface="$(wifi_iface)" || { log "no Wi-Fi iface; skip AP"; return 0; }
+    iface="$(wifi_iface)" || { log "no Wi-Fi iface; cannot start AP"; return 1; }
     if station_associated "$iface"; then
         log "station associated; not starting AP"
         cmd_nginx_bind
@@ -394,12 +471,53 @@ cmd_save_wlan() {
     cmd_nginx_bind
 }
 
+# Static 10.42.1.1/24 on the primary wired iface. No DHCP client. Not the AP subnet.
+cmd_eth_up() {
+    local iface name type
+    if ! iface="$(primary_wired_iface)"; then
+        log "no wired iface; skip $ETH_CONN"
+        return 0
+    fi
+    log "wired $iface -> $ETH_ADDR/$ETH_PREFIX ($ETH_CONN, not DHCP, not $AP_ADDR/$AP_PREFIX)"
+    if command -v nmcli >/dev/null 2>&1; then
+        while IFS=: read -r name type; do
+            [ -n "$name" ] || continue
+            [ "$name" = "$ETH_CONN" ] && continue
+            case "$type" in
+                802-3-ethernet|ethernet)
+                    nmcli connection modify "$name" connection.autoconnect no 2>/dev/null || true
+                    ;;
+            esac
+        done < <(nmcli -t -f NAME,TYPE connection show 2>/dev/null || true)
+        if nmcli -t -f NAME connection show 2>/dev/null | grep -Fxq "$ETH_CONN"; then
+            nmcli connection modify "$ETH_CONN" \
+                connection.interface-name "$iface" \
+                connection.autoconnect yes \
+                ipv4.method manual \
+                ipv4.addresses "$ETH_ADDR/$ETH_PREFIX" \
+                ipv4.never-default yes \
+                ipv6.method disabled 2>/dev/null || true
+        else
+            nmcli connection add type ethernet con-name "$ETH_CONN" ifname "$iface" \
+                ipv4.method manual ipv4.addresses "$ETH_ADDR/$ETH_PREFIX" \
+                ipv4.never-default yes ipv6.method disabled \
+                connection.autoconnect yes 2>/dev/null || true
+        fi
+        nmcli connection up "$ETH_CONN" ifname "$iface" 2>/dev/null || true
+    fi
+    if ! iface_ipv4s "$iface" | grep -qx "$ETH_ADDR"; then
+        ip link set "$iface" up 2>/dev/null || true
+        ip addr add "$ETH_ADDR/$ETH_PREFIX" dev "$iface" 2>/dev/null || true
+    fi
+}
+
 cmd_boot() {
     local iface
-    if ! iface="$(wifi_iface)"; then
-        log "no Wi-Fi iface; nothing to do"
-        cmd_nginx_bind
-        return 0
+    # Ethernet (or leftover AP/station) bind first — do not wait on X/desktop.
+    cmd_nginx_bind
+    if ! iface="$(wait_wifi_iface)"; then
+        log "no Wi-Fi iface after ${IFACE_WAIT_SEC}s; fail so the unit can restart"
+        return 1
     fi
     if has_saved_infra; then
         log "saved infra WLAN present; waiting ${WAIT_SEC}s for NM autoconnect"
@@ -445,6 +563,7 @@ cmd_selftest() {
     [ "$(echo "$out" | grep -c '10.42.0.1' || true)" = 1 ] || { echo "FAIL: unique 10.42.0.1"; fail=1; }
     is_bindable_ipv4 0.0.0.0 && { echo "FAIL: 0.0.0.0 bindable"; fail=1; }
     is_bindable_ipv4 10.42.0.1 || { echo "FAIL: AP addr not bindable"; fail=1; }
+    is_bindable_ipv4 10.42.1.1 || { echo "FAIL: eth static not bindable"; fail=1; }
 
     dir="$(mktemp -d)"
     NGINX_HTTP="$dir/http.conf"
@@ -458,6 +577,53 @@ cmd_selftest() {
     NGINX_HTTPS="$dir/https2.conf"
     write_nginx_servers ""
     grep -Eq 'listen ' "$dir/http2.conf" && { echo "FAIL: empty bind still listens"; fail=1; }
+
+    HOSTAPD_CONF="$dir/hostapd.conf"
+    write_hostapd_conf wlan0
+    grep -q '^ssid=TeslaLinux$' "$dir/hostapd.conf" || { echo "FAIL: SSID TeslaLinux"; fail=1; }
+    grep -q '^ignore_broadcast_ssid=0$' "$dir/hostapd.conf" || { echo "FAIL: hidden SSID"; fail=1; }
+    grep -q '^wpa_passphrase=teslalinux$' "$dir/hostapd.conf" || { echo "FAIL: factory PSK"; fail=1; }
+
+    is_wired_iface lo && { echo "FAIL: lo is wired"; fail=1; }
+    is_wired_iface docker0 && { echo "FAIL: docker0 is wired"; fail=1; }
+    is_wired_iface "" && { echo "FAIL: empty is wired"; fail=1; }
+    if [ -e /sys/class/net/eth0 ]; then
+        is_wired_iface eth0 || { echo "FAIL: eth0 should be wired"; fail=1; }
+    fi
+
+    reload_nginx() { return 0; }
+    wifi_iface() { return 1; }
+    IFACE_WAIT_SEC=0
+    if wait_wifi_iface >/dev/null; then
+        echo "FAIL: wait_wifi_iface succeeded with no iface"; fail=1
+    fi
+    if cmd_ap_up; then
+        echo "FAIL: ap-up without iface returned 0"; fail=1
+    fi
+    if cmd_boot; then
+        echo "FAIL: boot without iface/station returned 0"; fail=1
+    fi
+
+    wired_ifaces() { printf '%s\n' eth0; }
+    iface_ipv4s() {
+        case "$1" in
+            wlan0) printf '%s\n' 10.8.0.4 ;;
+            eth0) printf '%s\n' 10.42.1.1 ;;
+            *) ;;
+        esac
+    }
+    hostapd_running() { return 0; }
+    ETH_ADDR=10.42.1.1
+    out="$(collect_bind_ips wlan0)"
+    echo "$out" | grep -qx '10.8.0.4' || { echo "FAIL: station ip in collect"; fail=1; }
+    echo "$out" | grep -qx '10.42.1.1' || { echo "FAIL: eth static in collect"; fail=1; }
+    echo "$out" | grep -qx '10.42.0.1' || { echo "FAIL: AP ip in collect"; fail=1; }
+    echo "$out" | grep -Eq '0\.0\.0\.0|127\.|169\.254' && { echo "FAIL: collect leaked"; fail=1; }
+    NGINX_HTTP="$dir/http.conf"
+    NGINX_HTTPS="$dir/https.conf"
+    write_nginx_servers "$(printf '%s\n' 10.42.0.1 10.42.1.1)"
+    grep -q 'listen 10.42.1.1:80;' "$dir/http.conf" || { echo "FAIL: eth listen"; fail=1; }
+    grep -Eq '0\.0\.0\.0|listen 80;|listen \[::\]' "$dir/http.conf" && { echo "FAIL: world listen after eth"; fail=1; }
     rm -rf "$dir"
 
     if [ "$fail" -eq 0 ]; then
@@ -470,11 +636,12 @@ cmd_selftest() {
 
 usage() {
     cat <<EOF
-usage: tesla-linux-wlan <boot|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan|selftest>
-  boot         saved infra NM autoconnect (~${WAIT_SEC}s) else hostapd AP
+usage: tesla-linux-wlan <boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan|selftest>
+  boot         wait ~${IFACE_WAIT_SEC}s for wifi iface; saved infra (~${WAIT_SEC}s) else AP
+  eth-up       static ${ETH_ADDR}/${ETH_PREFIX} on primary wired iface (no DHCP)
   ap-up        TeslaLinux hostapd AP + dnsmasq (never if station is up)
   ap-down      stop AP; return iface to NetworkManager
-  nginx-bind   listen on current AP/station IPv4s only
+  nginx-bind   listen on current AP/station/ethernet IPv4s only
   maybe-ap     dispatcher: station if possible, else AP
   save-wlan    BACKEND bounce: save infra SSID/PSK, AP down, NM up
   selftest     address-filter checks (no hardware)
@@ -485,12 +652,13 @@ main() {
     local cmd="${1:-}"
     shift || true
     case "$cmd" in
-        boot|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan)
+        boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan)
             with_lock
             ;;
     esac
     case "$cmd" in
         boot) cmd_boot ;;
+        eth-up) cmd_eth_up ;;
         ap-up) cmd_ap_up ;;
         ap-down) cmd_ap_down ;;
         nginx-bind) cmd_nginx_bind ;;

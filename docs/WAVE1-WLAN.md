@@ -9,9 +9,9 @@ vs `1cb7c04`. Ubuntu Server + XFCE, Raspberry Pi **4 8 GB only**. No AOSP. No Pi
    - SSID: **TeslaLinux** (TeslaAndroid-like). Do not invent a second SSID.
    - WPA2-PSK factory default password: **teslalinux**
    - AP LAN: **10.42.0.1/24** (DHCP `10.42.0.10`–`10.42.0.200`)
-3. Web GUI on that AP: `/var/www/tl/index.html` at `http://10.42.0.1/` (pick/save station WLAN). Stream remains `/var/www/tl/desktop.html`. `probe.html` unchanged. Reachable by **other devices** on the Pi WLAN.
+3. Web GUI on that AP: `/var/www/tl/index.html` at `http://10.42.0.1/` (pick/save station WLAN). Stream remains `/var/www/tl/desktop.html`. `probe.html` unchanged. Also `http://10.42.1.1/` on the wired ethernet static (peer `10.42.1.2/24`) and `http://teslalinux.local/` (existing avahi; do not add a second mDNS stack). Station IP when associated.
    - Not loopback-only. Not `0.0.0.0` to the world.
-   - Bind HTTP to the AP LAN address and, when associated, to the WLAN station address.
+   - Bind HTTP to AP **10.42.0.1**, ethernet static **10.42.1.1**, and the WLAN station IPv4 when associated.
    - FLAG-TLS (WAVE 0): do not invent a new TLS policy. HTTP on the AP LAN is acceptable so a Tesla browser can open the GUI without a cert maze.
 
 Factory password **teslalinux** is a documented operator default, not a secret. Operators change it later (`/etc/tesla-linux/ap.env`). Frontend may add that to the picker later.
@@ -25,16 +25,17 @@ WIFI_SSID=YourTeslaWLAN
 WIFI_PSK=yourpsk
 ```
 
-First-boot still creates the NM infra profile (`connection.autoconnect yes`). `tesla-linux-wlan.service` then waits ~20s for association; if that fails, the TeslaLinux AP comes up.
+First-boot still creates the NM infra profile (`connection.autoconnect yes`). `tesla-linux-wlan.service` waits ~60s for a wifi iface (brcmfmac race), then ~20s for association; if that fails, the TeslaLinux AP comes up. Oneshot `Restart=on-failure` — do not skip AP forever. AP does **not** wait on xorg/desktop.
 
 ## On the image
 
 | Path | Role |
 |---|---|
-| `/etc/tesla-linux/ap.env` | Factory `AP_SSID=TeslaLinux`, `AP_PSK=teslalinux`, `AP_ADDR=10.42.0.1` |
-| `/usr/local/sbin/tesla-linux-wlan` | `boot` / `ap-up` / `ap-down` / `nginx-bind` / `save-wlan` |
+| `/etc/tesla-linux/ap.env` | Factory `AP_SSID=TeslaLinux`, `AP_PSK=teslalinux`, `AP_ADDR=10.42.0.1`, `ETH_ADDR=10.42.1.1` |
+| `/etc/NetworkManager/system-connections/tesla-linux-eth.nmconnection` | Wired static **10.42.1.1/24** (no DHCP; not AP `10.42.0.1/24`) |
+| `/usr/local/sbin/tesla-linux-wlan` | `boot` / `eth-up` / `ap-up` / `ap-down` / `nginx-bind` / `maybe-ap` / `save-wlan` |
 | `/usr/local/sbin/ta_wlan_api.py` | loopback `127.0.0.1:9094` — GET scan + POST save-wlan kick |
-| `tesla-linux-wlan.service` | `After=NetworkManager.service`; oneshot `boot` |
+| `tesla-linux-wlan.service` | `After=NetworkManager.service`; oneshot `boot`; `Restart=on-failure`; `WantedBy=multi-user.target` (not desktop/X) |
 | `tesla-linux-wlan-api.service` | `Type=simple`; `TA_BIND=127.0.0.1` |
 | hostapd + dnsmasq | AP + DHCP (stock `hostapd.service` / `dnsmasq.service` stay disabled) |
 

@@ -112,18 +112,21 @@ chmod 600 /etc/netplan/01-network-manager-all.yaml
 systemctl enable NetworkManager >/dev/null 2>&1 || true
 
 # stack + units (chroot mode: no running systemd)
-# install writes nginx (AP/station binds only — never 0.0.0.0) + tesla-linux-wlan.service
+# install writes nginx (AP/station/ethernet binds only — never 0.0.0.0) + tesla-linux-wlan.service
 /tmp/tl-src/install-tesla-linux.sh --no-start
 
-# identity
+# identity — teslalinux.local via existing avahi-daemon (do not add a second mDNS stack)
 echo teslalinux > /etc/hostname
 sed -i 's/^127.0.1.1.*/127.0.1.1\tteslalinux/' /etc/hosts || echo "127.0.1.1 teslalinux" >> /etc/hosts
+systemctl enable avahi-daemon >/dev/null 2>&1 || true
 
 # first boot: per-device TLS cert + optional config from the FAT boot partition
 cat > /usr/local/sbin/tesla-linux-firstboot <<'EOF'
 #!/bin/sh
 set -e
 CONF=/boot/firmware/tesla-linux.conf
+# Static ethernet 10.42.1.1/24 before cert SAN / nginx (hostname stays teslalinux).
+/usr/local/sbin/tesla-linux-wlan eth-up >/dev/null 2>&1 || true
 # per-device self-signed cert (never ship a shared private key)
 if [ ! -f /etc/nginx/certs/tl.crt ]; then
     IP=$(hostname -I | awk '{print $1}')
