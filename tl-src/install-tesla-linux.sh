@@ -46,7 +46,11 @@ AP_ADDR=10.42.0.1
 AP_PREFIX=24
 AP_DHCP_START=10.42.0.10
 AP_DHCP_END=10.42.0.200
+ETH_ADDR=10.42.1.1
+ETH_PREFIX=24
+ETH_CONN=tesla-linux-eth
 WAIT_SEC=20
+IFACE_WAIT_SEC=60
 EOF
 fi
 install -m755 "$HERE/tesla-linux-wlan.sh" /usr/local/sbin/tesla-linux-wlan
@@ -54,30 +58,71 @@ install -m644 "$HERE/tesla-linux-wlan.service" /etc/systemd/system/tesla-linux-w
 install -m755 "$HERE/ta_wlan_api.py" /usr/local/sbin/ta_wlan_api.py
 install -m644 "$HERE/tesla-linux-wlan-api.service" /etc/systemd/system/tesla-linux-wlan-api.service
 
-# NM dispatcher: rebind nginx on station up; AP fallback on wifi down
+# NM dispatcher: wifi → maybe-ap (station else TeslaLinux AP); ethernet → nginx-bind
 install -d /etc/NetworkManager/dispatcher.d
 cat > /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan <<'EOF'
 #!/bin/sh
-# WAVE 1 — wifi only. Do not start AP if a station link is up.
+# WAVE 1 — wifi: maybe-ap. ethernet/VM tap: nginx-bind only (not 0.0.0.0).
 IFACE="$1"
 ACTION="$2"
-[ -e "/sys/class/net/$IFACE/wireless" ] || exit 0
+if [ -e "/sys/class/net/$IFACE/wireless" ]; then
+    case "$ACTION" in
+        up|connectivity-change|down)
+            /usr/local/sbin/tesla-linux-wlan maybe-ap
+            ;;
+    esac
+    exit 0
+fi
+# Wired eth0/end0/en* (or VM tap/bridge). Not lo/docker. Bind picker on that IPv4.
+case "$IFACE" in
+    lo|docker*|veth*|br-*|virbr*) exit 0 ;;
+esac
+[ -d "/sys/class/net/$IFACE" ] || exit 0
 case "$ACTION" in
     up|connectivity-change)
         /usr/local/sbin/tesla-linux-wlan nginx-bind
-        ;;
-    down)
-        /usr/local/sbin/tesla-linux-wlan maybe-ap
         ;;
 esac
 exit 0
 EOF
 chmod 755 /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan
 
+# Wired ethernet: static 10.42.1.1/24 (not DHCP, not AP 10.42.0.1/24). NM owns it.
+# shellcheck source=/dev/null
+[ -f /etc/tesla-linux/ap.env ] && . /etc/tesla-linux/ap.env
+ETH_ADDR="${ETH_ADDR:-10.42.1.1}"
+ETH_PREFIX="${ETH_PREFIX:-24}"
+ETH_CONN="${ETH_CONN:-tesla-linux-eth}"
+install -d -m700 /etc/NetworkManager/system-connections /etc/NetworkManager/conf.d
+cat > /etc/NetworkManager/conf.d/99-tesla-linux-eth.conf <<'EOF'
+# Do not auto-create DHCP ethernet profiles; tesla-linux-eth is the wired connection.
+[main]
+no-auto-default=*
+EOF
+cat > /etc/NetworkManager/system-connections/${ETH_CONN}.nmconnection <<EOF
+[connection]
+id=$ETH_CONN
+uuid=8e4c0b2a-1f42-4a11-9e01-104201010001
+type=ethernet
+autoconnect=true
+autoconnect-priority=50
+
+[ethernet]
+
+[ipv4]
+method=manual
+address1=$ETH_ADDR/$ETH_PREFIX
+never-default=true
+
+[ipv6]
+method=disabled
+EOF
+chmod 600 /etc/NetworkManager/system-connections/${ETH_CONN}.nmconnection
+
 # stock hostapd/dnsmasq units stay off — tesla-linux-wlan starts them on demand
 systemctl disable hostapd dnsmasq >/dev/null 2>&1 || true
 
-# nginx: index.html (pick/save WLAN) + desktop.html / probe.html on AP/station IPv4s only (never 0.0.0.0)
+# nginx: index.html (pick/save WLAN) + desktop.html / probe.html on AP/station/ethernet IPv4s only (never 0.0.0.0)
 install -d /etc/nginx /etc/nginx/certs /etc/nginx/sites-available /etc/nginx/sites-enabled \
            /etc/systemd/system/nginx.service.d
 rm -f /etc/nginx/sites-enabled/default
@@ -105,8 +150,8 @@ location /api/wlan {
     client_max_body_size 8k;
 }
 EOF
-# Placeholder until tesla-linux-wlan nginx-bind sees an AP/station IPv4.
-# No listen 80 / listen 0.0.0.0 — nginx stays down-bind until a WLAN address exists.
+# Placeholder until tesla-linux-wlan nginx-bind sees an AP/station/ethernet IPv4.
+# No listen 80 / listen 0.0.0.0 — nginx stays down-bind until a WLAN/ethernet address exists.
 echo "# no AP/station IPv4 yet; tesla-linux-wlan nginx-bind will rewrite" > /etc/nginx/tl-http-server.conf
 echo "# no TLS binds yet" > /etc/nginx/tl-https-server.conf
 cat > /etc/nginx/sites-available/tl <<'EOF'
@@ -142,6 +187,7 @@ XDG_RUNTIME_DIR=/run/user/$TL_UID
 EOF
 fi
 
+# BACKEND-HOLE (later SHA): virtual-display / HDMI clone if :0 stays black — do not invent Xvfb here.
 # --- Xorg on the real display (Pi: pin to the vc4 KMS node, not the v3d node) --
 install -d /etc/X11/xorg.conf.d
 cat > /etc/X11/xorg.conf.d/99-vc4.conf <<'EOF'
@@ -293,6 +339,7 @@ if [ "$START" = "1" ]; then
     systemctl enable tesla-linux-xorg tesla-linux-desktop tesla-linux-display \
                      tesla-linux-touch tesla-linux-audio >/dev/null 2>&1
     enable_wlan_nginx
+    /usr/local/sbin/tesla-linux-wlan eth-up >/dev/null 2>&1 || true
     echo "==> enabled. start with: systemctl start tesla-linux-xorg tesla-linux-desktop tesla-linux-display tesla-linux-touch tesla-linux-audio tesla-linux-wlan tesla-linux-wlan-api"
 else
     # bake-time: enable via symlink since systemctl can't talk to a running systemd
