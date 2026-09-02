@@ -18,10 +18,11 @@ canvas{max-width:100%;max-height:100%;display:block;pointer-events:none}
   border-radius:6px;background:#1b4f7a;color:#fff;cursor:pointer}
 #bar button:disabled{opacity:.5;cursor:default}
 #bar .hint{opacity:.85}
+body.chrome-off #hud,body.chrome-off #bar{display:none}
 </style>
 <div id="hud">starting…</div>
 <div id="wrap"><div id="stage"><canvas id="c" width="1280" height="720"></canvas><div id="feed"></div></div></div>
-<div id="bar"><button type="button" id="reboot">Reboot</button><span class="hint">Next boot joins that WLAN.</span></div>
+<div id="bar"><button type="button" id="reboot">Reboot</button><button type="button" id="hide">Hide</button><span class="hint">Next boot joins that WLAN.</span></div>
 <script>
 const hud=document.getElementById('hud'), canvas=document.getElementById('c'), ctx=canvas.getContext('2d');
 const feed=document.getElementById('feed');
@@ -112,6 +113,9 @@ document.getElementById('reboot').addEventListener('click', async ()=>{
   try{
     await fetch('/api/reboot',{method:'POST',credentials:'same-origin',cache:'no-store'});
   }catch(e){}
+});
+document.getElementById('hide').addEventListener('click',()=>{
+  document.body.classList.add('chrome-off');
 });
 
 /* ---------- audio: raw S16LE PCM -> Web Audio ----------
