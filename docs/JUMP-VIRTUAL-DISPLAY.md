@@ -22,8 +22,10 @@ Capture stays `ximagesrc` on `DISPLAY=:0` (`ta_display_backend.py` unchanged). T
 
 | Path | Role |
 |---|---|
-| `/etc/X11/xorg.conf.d/10-virtual.conf` | `Driver dummy`, Modes/Virtual **1088x832**, depth 24. Dummy is Screen 0 primary so X starts without HDMI. |
+| `/etc/X11/xorg.conf.d/10-virtual.conf` | `Driver dummy`, Modes/Virtual **1088x832**, depth 24. Dummy is Screen 0 primary so X starts without HDMI. `AutoAddDevices` **true**. |
+| `/etc/X11/xorg.conf.d/40-tesla-linux-hid.conf` | InputClass `libinput` for keyboard / pointer / touchpad on `:0`. USB HID does not wait on HDMI clone. |
 | `/etc/X11/xorg.conf.d/99-vc4.conf` | HDMI KMS (`modesetting` on vc4). Kept. Not a second Screen. |
+| `/etc/udev/rules.d/99-tesla-linux-hid.rules` | `TAG+="seat"` for `ID_INPUT` keyboard / mouse / touchpad so they attach to seat0 / X `:0`. Does not change `99-uinput.rules`. |
 | `/usr/local/sbin/tesla-linux-hdmi-clone` | After X is up: `DISPLAY=:0 xrandr --output HDMI-1` / `HDMI-A-1` `--auto --same-as DUMMY0` / `Dummy-0`; same for HDMI-2 / `HDMI-A-2`. Missing HDMI does not fail the unit. |
 | `tesla-linux-xorg.service` | `Xorg :0 vt1 -ac -noreset -novtswitch` + `ExecStartPost` clone. `Conflicts=getty@tty1.service`. No `After=` wlan. Missing HDMI does not fail the unit. |
 | `getty@tty1.service` | **Masked** (`/dev/null`). Not the HDMI product path. |
@@ -37,4 +39,4 @@ Bake/install runs `install-tesla-linux.sh --verify-autologin` (and the same chec
 
 Factory console / SSH: **teslalinux** / **teslalinux**. `ubuntu` is removed. HDMI product path is that same XFCE `:0` session (BACKEND-HOLE **closed**).
 
-Do not invent Xvfb. `xserver-xorg-video-dummy` is already in `PKGS`.
+Do not invent Xvfb. `xserver-xorg-video-dummy` is already in `PKGS`. USB HID on `:0` needs `xserver-xorg-input-libinput` in `PKGS` (keep `xinput`). `teslalinux` stays in group `input`.

@@ -98,8 +98,14 @@ apt-get update -q
 apt-get install -y -q --no-install-recommends network-manager avahi-daemon libnss-mdns
 
 PKGS=$(/tmp/tl-src/install-tesla-linux.sh --print-packages)
+echo "$PKGS" | grep -qw xserver-xorg-input-libinput \
+    || { echo "ERROR: xserver-xorg-input-libinput missing from --print-packages" >&2; exit 1; }
+echo "$PKGS" | grep -qw xinput \
+    || { echo "ERROR: xinput missing from --print-packages" >&2; exit 1; }
 echo "installing: $PKGS"
 apt-get install -y -q --no-install-recommends $PKGS
+dpkg-query -W -f='${Status}\n' xserver-xorg-input-libinput 2>/dev/null | grep -q 'install ok installed' \
+    || { echo "ERROR: xserver-xorg-input-libinput not installed on image" >&2; exit 1; }
 
 # hand all interfaces to NetworkManager
 rm -f /etc/netplan/*.yaml
@@ -288,6 +294,34 @@ fi
 if grep -Eq 'systemctl[[:space:]]+(restart|start)[[:space:]]+nginx' \
       "$MNT/usr/local/sbin/tesla-linux-firstboot"; then
   die "firstboot still systemctl restart/start nginx"
+fi
+
+# USB HID on XFCE :0 — fail the bake if libinput / udev / InputClass did not stick.
+log "verifying USB HID libinput / udev seat / InputClass"
+"$SRC/install-tesla-linux.sh" --print-packages | grep -qw xserver-xorg-input-libinput \
+  || die "xserver-xorg-input-libinput missing from --print-packages"
+"$SRC/install-tesla-linux.sh" --print-packages | grep -qw xinput \
+  || die "xinput missing from --print-packages"
+grep -q '^Package: xserver-xorg-input-libinput$' "$MNT/var/lib/dpkg/status" \
+  || die "xserver-xorg-input-libinput missing from image dpkg status"
+[ -f "$MNT/etc/udev/rules.d/99-tesla-linux-hid.rules" ] \
+  || die "HID udev rules file missing"
+grep -q 'TAG+="seat"' "$MNT/etc/udev/rules.d/99-tesla-linux-hid.rules" \
+  || die "HID udev rules do not TAG+= seat"
+[ -f "$MNT/etc/X11/xorg.conf.d/40-tesla-linux-hid.conf" ] \
+  || die "InputClass/libinput snippet missing"
+grep -q 'Driver[[:space:]]*"libinput"' "$MNT/etc/X11/xorg.conf.d/40-tesla-linux-hid.conf" \
+  || die "InputClass snippet is not Driver libinput"
+[ -f "$MNT/etc/udev/rules.d/99-uinput.rules" ] \
+  || die "99-uinput.rules missing after HID rules"
+grep -E '^input:' "$MNT/etc/group" | grep -q teslalinux \
+  || die "teslalinux not in group input"
+grep -q 'Option[[:space:]]*"AutoAddDevices"[[:space:]]*"true"' \
+      "$MNT/etc/X11/xorg.conf.d/10-virtual.conf" \
+  || die "AutoAddDevices is not on"
+if grep -Eiq 'Option[[:space:]]+"AutoAddDevices"[[:space:]]+"false"' \
+      "$MNT/etc/X11/xorg.conf.d/"*.conf; then
+  die "AutoAddDevices must stay on"
 fi
 
 # ------------------------------------------------------------------ pack -----
