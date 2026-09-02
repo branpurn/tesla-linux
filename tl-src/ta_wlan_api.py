@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Tesla Linux — loopback HTTP /api/wlan → tesla-linux-wlan save-wlan / nmcli scan.
+"""Tesla Linux — loopback HTTP /api/wlan + /api/reboot.
 
 Stdlib only. Binds TA_BIND (default 127.0.0.1) — never 0.0.0.0.
-nginx on the AP/station LAN proxies origin-relative /api/wlan here.
+nginx on the AP/station LAN proxies origin-relative /api/wlan and /api/reboot here.
 
 POST JSON {ssid, psk} kicks save-wlan in a background thread and returns 200
-without waiting on WAIT_SEC. GET returns {ssids:[...]} (empty list on scan fail).
+without waiting on WAIT_SEC. GET /api/wlan returns {ssids:[...]} (empty on scan fail).
+POST /api/reboot kicks a real system reboot in a background thread and returns 200.
 """
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -19,6 +21,8 @@ BIND = os.environ.get("TA_BIND") or "127.0.0.1"
 PORT = int(os.environ.get("TA_WLAN_PORT") or "9094")
 WLAN = os.environ.get("TA_WLAN_BIN") or "/usr/local/sbin/tesla-linux-wlan"
 NMCLI = os.environ.get("TA_NMCLI") or "nmcli"
+# Optional override for tests; default is systemctl reboot then /sbin/reboot.
+REBOOT_BIN = os.environ.get("TA_REBOOT_BIN") or ""
 BODY_MAX = 8192
 
 if BIND in ("0.0.0.0", "::", "*", "[::]"):
@@ -35,6 +39,9 @@ def _norm_path(raw):
 def _is_wlan_path(path):
     return path in ("/api/wlan", "/")
 
+
+def _is_reboot_path(path):
+    return path == "/api/reboot"
 
 def _ssid_ok(ssid):
     if not isinstance(ssid, str):
@@ -88,6 +95,25 @@ def _kick_save(ssid, psk):
     threading.Thread(target=run, name="save-wlan", daemon=True).start()
 
 
+def _kick_reboot():
+    """Kick a real Pi reboot after the HTTP response can flush."""
+
+    def run():
+        time.sleep(0.3)
+        cmds = []
+        if REBOOT_BIN:
+            cmds.append([REBOOT_BIN])
+        cmds.extend([["systemctl", "reboot"], ["/sbin/reboot"], ["/usr/sbin/reboot"]])
+        for cmd in cmds:
+            try:
+                subprocess.run(cmd, check=False, timeout=30)
+                return
+            except (OSError, subprocess.SubprocessError):
+                continue
+
+    threading.Thread(target=run, name="reboot", daemon=True).start()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -99,14 +125,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._method_not_allowed
         raise AttributeError(name)
 
-    def _method_not_allowed(self):
+    def _drain_body(self):
         try:
             n = int(self.headers.get("Content-Length") or "0")
             if n > 0:
                 self.rfile.read(min(n, BODY_MAX))
         except (ValueError, OSError):
             pass
-        self._json(405, {"error": "method not allowed"}, extra={"Allow": "GET, POST"})
+
+    def _method_not_allowed(self):
+        self._drain_body()
+        path = _norm_path(self.path)
+        allow = "POST" if _is_reboot_path(path) else "GET, POST"
+        self._json(405, {"error": "method not allowed"}, extra={"Allow": allow})
 
     def _json(self, code, obj, extra=None):
         body = json.dumps(obj, separators=(",", ":")).encode("utf-8")
@@ -120,19 +151,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _reject_path(self):
-        if not _is_wlan_path(_norm_path(self.path)):
-            self._json(404, {"error": "not found"})
-            return True
-        return False
-
     def do_GET(self):
-        if self._reject_path():
+        path = _norm_path(self.path)
+        if _is_reboot_path(path):
+            self._json(405, {"error": "method not allowed"}, extra={"Allow": "POST"})
+            return
+        if not _is_wlan_path(path):
+            self._json(404, {"error": "not found"})
             return
         self._json(200, {"ssids": _scan_ssids()})
 
     def do_POST(self):
-        if self._reject_path():
+        path = _norm_path(self.path)
+        if _is_reboot_path(path):
+            self._drain_body()
+            _kick_reboot()
+            self._json(200, {"ok": True})
+            return
+        if not _is_wlan_path(path):
+            self._drain_body()
+            self._json(404, {"error": "not found"})
             return
         try:
             n = int(self.headers.get("Content-Length") or "0")
@@ -164,7 +202,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         _kick_save(ssid, psk or "")
         self._json(200, {"ok": True})
-
 
 def main():
     httpd = ThreadingHTTPServer((BIND, PORT), Handler)
