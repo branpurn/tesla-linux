@@ -28,7 +28,7 @@ From FAT `current/`:
 - `-nic model=help` empty on raspi4b; use `-device usb-net`.
 - No Wi-Fi radio in qemu; product AP binds hostapd to a wireless iface only. **No wlan0 expected.**
 - QEMU picker path is ethernet: `usb-net` / `cdc_ether` → static **10.42.1.1/24**, nginx listen on that IPv4 (never 0.0.0.0). `tesla-linux-wlan` must not fail the oneshot when 10.42.1.1 is bound. nginx `After=`/`Wants=` firstboot+wlan so CLEAN-boot starts nginx after the TLS cert and listen files; firstboot and wlan do not `Before=nginx` and do not systemctl-restart nginx from the oneshot. Firstboot may still `Before=wlan` so eth-up/cert happen first.
-- Serial getty `ttyAMA0` / `ttyS0`: drop-in clears `BindsTo=dev-%i.device` so a missing udev device is not DEPEND-fail. Do not wait on wlan. HDMI `getty@tty1` stays masked.
+- Serial getty `ttyAMA0` / `ttyS0`: drop-in clears `BindsTo=dev-%i.device` so a missing udev device is not DEPEND-fail. Do not wait on wlan. HDMI `getty@tty1` is Infra on vt1 (Xorg :0 is vt7).
 - Guest kernel has `mac80211_hwsim` module (can load at runtime without rewriting image).
 
 ## Product image notes (RO inspect)
@@ -39,7 +39,7 @@ From FAT `current/`:
 - Factory user teslalinux / teslalinux (`chpasswd`); `ubuntu` userdel'd. cloud-init purged.
 - SSH: `ssh-keygen -A` in bake; `PasswordAuthentication yes`. `ssh teslalinux@guest` is the qemu path.
 - Serial getty enabled on ttyAMA0 / ttyS0 / ttyAMA1. Drop-in clears `BindsTo=dev-%i.device`. cmdline keeps `console=serial0,115200 console=tty1`.
-- HDMI / qemu VNC (tty1) is XFCE on `:0` (`Xorg vt1`), not `getty@tty1` (masked). Serial-getty remains the typed login path.
+- HDMI / qemu VNC (tty1) is getty (Infra). XFCE is dummy `:0` (`Xorg vt7`); USB KBM is grabbed by that Xorg. Serial-getty remains the typed login path.
 
 ## QA hwsim injection (work image only)
 Work copy rootfs has `qa-hwsim.service` (WantedBy=multi-user) that only runs

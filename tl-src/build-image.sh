@@ -251,26 +251,38 @@ if [ -f "$SRC/authorized_keys" ]; then
   [ -f "$MNT/home/teslalinux/.ssh/authorized_keys" ] || die "teslalinux authorized_keys missing"
 fi
 
-# Autologin XFCE on :0; getty must not own HDMI. Fail the bake if it did not stick.
-log "verifying autologin XFCE / getty-not-on-HDMI"
+# Autologin XFCE on :0; USB KBM on that session. HDMI vt1 is getty (Infra).
+log "verifying autologin XFCE / KBM-on-:0 / HDMI getty vt1"
 "$SRC/install-tesla-linux.sh" --verify-autologin "$MNT"
-grep -q '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
-  || die "Xorg is not on vt1"
-if grep -q ' vt7 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
-  die "Xorg still on vt7"
+grep -q '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
+  || die "Xorg is not on vt7"
+if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
+  die "Xorg still occupies HDMI vt1"
 fi
-[ "$(readlink "$MNT/etc/systemd/system/getty@tty1.service")" = /dev/null ] \
-  || die "getty@tty1 is not masked"
-[ ! -e "$MNT/etc/systemd/system/getty.target.wants/getty@tty1.service" ] \
-  || die "getty@tty1 still in getty.target.wants"
-grep -q '^Conflicts=getty@tty1.service$' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
-  || die "xorg missing Conflicts=getty@tty1"
+if [ -L "$MNT/etc/systemd/system/getty@tty1.service" ]; then
+  case "$(readlink "$MNT/etc/systemd/system/getty@tty1.service")" in
+    /dev/null|dev/null) die "getty@tty1 is masked" ;;
+  esac
+fi
+[ -L "$MNT/etc/systemd/system/getty.target.wants/getty@tty1.service" ] \
+  || die "getty@tty1 not enabled"
+if grep -Eq '^Conflicts=.*getty@tty1' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
+  die "xorg Conflicts=getty@tty1 would take HDMI getty down"
+fi
 grep -q '^Environment=DISPLAY=:0$' "$MNT/etc/systemd/system/tesla-linux-desktop.service" \
   || die "desktop is not DISPLAY=:0"
 grep -q 'xfce4-session' "$MNT/etc/systemd/system/tesla-linux-desktop.service" \
   || die "desktop is not xfce4-session"
-grep -q '^ReserveVT=0$' "$MNT/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf" \
-  || die "logind ReserveVT is not 0"
+grep -q '^ReserveVT=1$' "$MNT/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf" \
+  || die "logind ReserveVT is not 1"
+grep -q 'xserver-xorg-input-libinput' <<<"$("$SRC/install-tesla-linux.sh" --print-packages)" \
+  || die "PKGS missing xserver-xorg-input-libinput"
+grep -q 'GrabDevice' "$MNT/etc/X11/xorg.conf.d/20-tesla-linux-input.conf" \
+  || die "Xorg input missing GrabDevice"
+if [ ! -f "$MNT/usr/lib/xorg/modules/input/libinput_drv.so" ] \
+   && ! ls "$MNT"/usr/lib/*/xorg/modules/input/libinput_drv.so >/dev/null 2>&1; then
+  die "libinput_drv.so missing on image"
+fi
 if grep -Eiq '^After=.*tesla-linux-(xorg|desktop)|^Requires=.*tesla-linux-(xorg|desktop)' \
       "$MNT/etc/systemd/system/tesla-linux-wlan.service"; then
   die "wlan After/Requires xorg or desktop"
