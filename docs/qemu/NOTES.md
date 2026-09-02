@@ -27,7 +27,7 @@ From FAT `current/`:
 - DTB disables PCIe / GENET / rng200 / thermal → **no bcmgenet NIC**.
 - `-nic model=help` empty on raspi4b; use `-device usb-net`.
 - No Wi-Fi radio in qemu; product AP binds hostapd to a wireless iface only. **No wlan0 expected.**
-- QEMU picker path is ethernet: `usb-net` / `cdc_ether` → static **10.42.1.1/24**, nginx listen on that IPv4 (never 0.0.0.0). `tesla-linux-wlan` must not fail the oneshot when 10.42.1.1 is bound. nginx `After=`/`Wants=` wlan so CLEAN-boot starts nginx after listen files; wlan does not `Before=nginx` and does not systemctl-restart nginx from the oneshot.
+- QEMU picker path is ethernet: `usb-net` / `cdc_ether` → static **10.42.1.1/24**, nginx listen on that IPv4 (never 0.0.0.0). `tesla-linux-wlan` must not fail the oneshot when 10.42.1.1 is bound. nginx `After=`/`Wants=` firstboot+wlan so CLEAN-boot starts nginx after the TLS cert and listen files; firstboot and wlan do not `Before=nginx` and do not systemctl-restart nginx from the oneshot. Firstboot may still `Before=wlan` so eth-up/cert happen first.
 - Serial getty `ttyAMA0` / `ttyS0`: drop-in clears `BindsTo=dev-%i.device` so a missing udev device is not DEPEND-fail. Do not wait on wlan. HDMI `getty@tty1` stays masked.
 - Guest kernel has `mac80211_hwsim` module (can load at runtime without rewriting image).
 

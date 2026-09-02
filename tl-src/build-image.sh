@@ -148,7 +148,13 @@ if [ ! -f /etc/nginx/certs/tl.crt ]; then
       -subj "/CN=$(hostname)" \
       -addext "subjectAltName=DNS:$(hostname).local,DNS:$(hostname),DNS:localhost,IP:${IP:-127.0.0.1}" >/dev/null 2>&1
     chmod 600 /etc/nginx/certs/tl.key
-    systemctl restart nginx 2>/dev/null || true
+    # Never systemctl-start or systemctl-restart nginx from this oneshot —
+    # Before=nginx plus restart deadlocks with nginx After=firstboot.
+    # If nginx is already active, reload the new cert; if not, systemd
+    # starts nginx after this unit (After=/Wants= firstboot+wlan).
+    if systemctl is-active --quiet nginx 2>/dev/null; then
+        nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null || true
+    fi
 fi
 # optional per-device config dropped on the FAT partition when flashing
 if [ -f "$CONF" ]; then
@@ -180,7 +186,10 @@ chmod +x /usr/local/sbin/tesla-linux-firstboot
 cat > /etc/systemd/system/tesla-linux-firstboot.service <<'EOF'
 [Unit]
 Description=Tesla Linux first-boot provisioning
-Before=nginx.service tesla-linux-wlan.service
+# nginx After=/Wants= firstboot+wlan (install drop-in) so it starts after the cert.
+# Do not Before=nginx — a oneshot that systemctl-restarts nginx deadlocks.
+# Keep Before=wlan so eth-up/cert happen before wlan boot.
+Before=tesla-linux-wlan.service
 Wants=NetworkManager.service
 After=NetworkManager.service
 
@@ -272,6 +281,13 @@ fi
 if awk '/^reload_nginx\(\)/,/^}/' "$MNT/usr/local/sbin/tesla-linux-wlan" \
       | grep -Eq 'systemctl[[:space:]]+(restart|start)[[:space:]]+nginx'; then
   die "reload_nginx still systemctl restart nginx"
+fi
+if grep -Eiq '^Before=.*nginx\.service' "$MNT/etc/systemd/system/tesla-linux-firstboot.service"; then
+  die "firstboot still Before=nginx.service (deadlock with nginx After=firstboot)"
+fi
+if grep -Eq 'systemctl[[:space:]]+(restart|start)[[:space:]]+nginx' \
+      "$MNT/usr/local/sbin/tesla-linux-firstboot"; then
+  die "firstboot still systemctl restart/start nginx"
 fi
 
 # ------------------------------------------------------------------ pack -----
