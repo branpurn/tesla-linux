@@ -293,6 +293,14 @@ verify_autologin_hdmi() {
         echo "ERROR: tesla-linux-wlan must not After/Requires xorg or desktop" >&2
         exit 1
     fi
+    if grep -Eiq '^Before=.*nginx\.service' "$wlan"; then
+        echo "ERROR: tesla-linux-wlan must not Before=nginx.service (deadlock with nginx After=wlan)" >&2
+        exit 1
+    fi
+    if awk '/^reload_nginx\(\)/,/^}/' "$wlan_bin" | grep -Eq 'systemctl[[:space:]]+(restart|start)[[:space:]]+nginx'; then
+        echo "ERROR: reload_nginx still systemctl restart/start nginx (deadlock with nginx After=wlan)" >&2
+        exit 1
+    fi
 
     [ -L "$r/etc/systemd/system/graphical.target.wants/tesla-linux-xorg.service" ] \
         || { echo "ERROR: tesla-linux-xorg not WantedBy graphical.target" >&2; exit 1; }
