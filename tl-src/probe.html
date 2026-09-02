@@ -85,8 +85,5 @@ if(hasWC && VideoDecoder.isConfigSupported){
 }
 
 /* No reboot HTTP on this SHA (nginx: /api/wlan + /sockets/* only). Do not invent one. */
-$('reboot').addEventListener('click',()=>{
-  $('reboot').disabled=true;
-  $('reboot').textContent='Next boot joins that WLAN.';
-});
+$('reboot').addEventListener('click',()=>{ $('reboot').disabled=true; });
 </script>

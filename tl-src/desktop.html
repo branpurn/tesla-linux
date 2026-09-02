@@ -107,9 +107,7 @@ feed.addEventListener('contextmenu',e=>e.preventDefault());
 addEventListener('keydown',e=>{ if(e.key==='h') hud.classList.toggle('hide'); });
 /* No reboot HTTP on this SHA (nginx: /api/wlan + /sockets/* only). Do not invent one. */
 document.getElementById('reboot').addEventListener('click',()=>{
-  const b=document.getElementById('reboot');
-  b.disabled=true;
-  b.textContent='Next boot joins that WLAN.';
+  document.getElementById('reboot').disabled=true;
 });
 
 /* ---------- audio: raw S16LE PCM -> Web Audio ----------
