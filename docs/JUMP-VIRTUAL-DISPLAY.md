@@ -23,7 +23,9 @@ Capture stays `ximagesrc` on `DISPLAY=:0` (`ta_display_backend.py` unchanged). T
 | `/usr/local/sbin/tesla-linux-hdmi-clone` | After X is up: `DISPLAY=:0 xrandr --output HDMI-1` / `HDMI-A-1` `--auto --same-as DUMMY0` / `Dummy-0`; same for HDMI-2 / `HDMI-A-2`. Missing HDMI does not fail the unit. |
 | `tesla-linux-xorg.service` | X on `:0` + `ExecStartPost` clone. No `After=` wlan. Missing HDMI does not fail the unit. |
 | `tesla-linux-display.service` | `After=` / `Requires=` **xorg only** (not desktop). Desktop restart must not block or take down capture. |
-| `tesla-linux-desktop.service` | XFCE on `:0`. No `BindsTo`/`PartOf` xorg or display. |
+| `tesla-linux-desktop.service` | XFCE on `:0` as **teslalinux**. No `BindsTo`/`PartOf` xorg or display. |
 | `tesla-linux-wlan.service` | No `After=` xorg. AP must not wait on X. |
+
+Factory console / SSH: **teslalinux** / **teslalinux**. `ubuntu` is removed. HDMI product path is **BACKEND-HOLE** — autologin XFCE on `:0` + HDMI 1/2 slave of that session (this branch). getty on tty1 is not the product.
 
 Do not invent Xvfb. `xserver-xorg-video-dummy` is already in `PKGS`.

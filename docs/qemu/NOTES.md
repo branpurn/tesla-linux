@@ -17,7 +17,7 @@ From FAT `current/`:
 ./run-qemu.sh virt      # fallback
 ```
 
-- Serial log: `serial.log` (also `serial.sock`)
+- Serial: qemu `-serial` stdio (typeable). Log: `serial.log`. Login **teslalinux** / **teslalinux** (factory).
 - Monitor: `echo 'screendump "$ROOT/shots/x.ppm"' | socat - UNIX-CONNECT:"$ROOT/monitor.sock"`
 - VNC: `127.0.0.1:5901`
 - Host tap: `tesla0` at `10.42.0.254/24`
@@ -33,8 +33,10 @@ From FAT `current/`:
 - Services: `tesla-linux-wlan` (hostapd AP SSID TeslaLinux / PSK teslalinux @ 10.42.0.1), nginx picker `/var/www/tl/`.
 - nginx listen rewritten to AP/station IPv4 only (never 0.0.0.0 / loopback-only).
 - Pre-seed: `/boot/firmware/tesla-linux.conf` WIFI_SSID/WIFI_PSK.
-- Default target: graphical; XFCE via `tesla-linux-desktop` (User=ubuntu).
-- `/etc/cloud` absent in image at inspect time; cloud-init-base present — watch first-boot user creation.
+- Default target: `ln -sfn` graphical.target (verified `readlink`). XFCE via `tesla-linux-desktop` (User=teslalinux).
+- Factory user teslalinux / teslalinux (`chpasswd`); `ubuntu` userdel'd. cloud-init purged.
+- SSH: `ssh-keygen -A` in bake; `PasswordAuthentication yes`. `ssh teslalinux@guest` is the qemu path.
+- Serial getty enabled on ttyAMA0 / ttyS0 / ttyAMA1. cmdline keeps `console=serial0,115200 console=tty1`.
 
 ## QA hwsim injection (work image only)
 Work copy rootfs has `qa-hwsim.service` (WantedBy=multi-user) that only runs
