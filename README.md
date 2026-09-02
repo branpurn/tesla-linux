@@ -2,6 +2,8 @@
 
 Tesla-Linux — Ubuntu Server + XFCE on Raspberry Pi 4 (8 GB). KISS replacement for tesla-android-kiss.
 
+Console login **teslalinux** / **teslalinux** (factory).
+
 ## Bake
 
 ```bash
@@ -18,7 +20,7 @@ Operator-side. Image is not USB-hostile (`root=LABEL=writable`, `LABEL=` fstab).
 
 - **EEPROM USB MSD:** Raspberry Pi Imager → Choose OS → Misc utility images → Bootloader → USB boot. Write to a spare SD. Power the Pi 4 with that SD (no USB OS yet). Success = rapid green ACT blink and HDMI green screen (~10s). Power off, remove the recovery SD, then boot the tesla-linux USB stick. Official docs: [boot EEPROM](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#boot-eeprom). `BOOT_ORDER` USB-then-SD is `0xf14` (read right-to-left). Default empty EEPROM is `0xf41` (SD then USB).
 - **USB3 power:** official 5V 3A PSU. If red PWR flickers or the USB SSD/stick hangs at solid green, use a USB 2.0 port or a powered hub. Do not invent a second image.
-- **HDMI:** use HDMI0 (micro-HDMI nearest USB-C). Ubuntu KMS has no firmware splash — black until the kernel starts is expected. XFCE lives on a **1088x832 virtual** display (`:0`); HDMI 1/2 are slave clones. Web console is the product path if the monitor stays black after splash. See [docs/JUMP-VIRTUAL-DISPLAY.md](docs/JUMP-VIRTUAL-DISPLAY.md).
+- **HDMI:** use HDMI0 (micro-HDMI nearest USB-C). Ubuntu KMS has no firmware splash — black until the kernel starts is expected. teslalinux **autologin** XFCE on a **1088x832 virtual** display (`:0`); HDMI 1/2 are slave clones of that session, not getty. Web console is the product path if the monitor stays black after splash. See [docs/JUMP-VIRTUAL-DISPLAY.md](docs/JUMP-VIRTUAL-DISPLAY.md).
 
 ## WLAN (WAVE 1)
 
