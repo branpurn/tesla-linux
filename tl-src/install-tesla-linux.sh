@@ -150,55 +150,39 @@ BindsTo=
 EOF
 }
 
-# HDMI vt1 is getty (Infra SSH-banner slice). Xorg :0 must not occupy vt1.
-# USB KBM is grabbed by Xorg libinput — HDMI getty must not steal HID.
-# Do not mask getty@tty1. Do not Conflicts=getty@tty1.
+# HDMI vt1 is a write-only pinned SSH banner (not a login). Xorg :0 stays vt7.
+# USB KBM is grabbed by Xorg libinput — do not rewrite HID. Remask getty@tty1
+# so a login prompt cannot bury the pin or take the TTY.
+# Do not Conflicts=getty@tty1 on xorg (Backend owns that unit).
 ensure_hdmi_getty_vt1() {
     mkdir -p /etc/systemd/system/getty.target.wants /etc/systemd/logind.conf.d
-    # Drop leftover JUMP masks so Infra can run getty on HDMI vt1.
-    if [ -L /etc/systemd/system/getty@tty1.service ]; then
-        case "$(readlink /etc/systemd/system/getty@tty1.service)" in
-            /dev/null|dev/null) rm -f /etc/systemd/system/getty@tty1.service ;;
-        esac
-    fi
-    if [ -L /etc/systemd/system/autovt@tty1.service ]; then
-        case "$(readlink /etc/systemd/system/autovt@tty1.service)" in
-            /dev/null|dev/null) rm -f /etc/systemd/system/autovt@tty1.service ;;
-        esac
-    fi
-    rm -f /etc/systemd/system/getty@tty1.service.d/autologin.conf
-
-    local getty_src=""
-    for p in /usr/lib/systemd/system/getty@.service /lib/systemd/system/getty@.service; do
-        if [ -f "$p" ]; then
-            getty_src="$p"
-            break
-        fi
-    done
-    if [ -z "$getty_src" ]; then
-        echo "ERROR: getty@.service missing" >&2
-        exit 1
-    fi
-    ln -sfn "$getty_src" /etc/systemd/system/getty.target.wants/getty@tty1.service
+    rm -f /etc/systemd/system/getty.target.wants/getty@tty1.service \
+          /etc/systemd/system/getty.target.wants/autovt@tty1.service \
+          /etc/systemd/system/getty@tty1.service.d/autologin.conf
+    ln -sfn /dev/null /etc/systemd/system/getty@tty1.service
+    ln -sfn /dev/null /etc/systemd/system/autovt@tty1.service
 
     cat > /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf <<'EOF'
-# HDMI vt1 is getty (Infra). Xorg :0 uses vt7. Do not spawn extra VTs.
-# ReserveVT=1 keeps tty1 in text mode for that getty. NAutoVTs=0: no autovt on tty2+.
+# HDMI vt1 is the pinned SSH banner (getty masked). Xorg :0 uses vt7.
+# ReserveVT=1 keeps tty1 in text mode for that overlay. NAutoVTs=0: no extra VTs.
 [Login]
 NAutoVTs=0
 ReserveVT=1
 EOF
 
-    if [ -L /etc/systemd/system/getty@tty1.service ]; then
-        case "$(readlink /etc/systemd/system/getty@tty1.service)" in
-            /dev/null|dev/null)
-                echo "ERROR: getty@tty1 is still masked" >&2
-                exit 1
-                ;;
-        esac
+    local mask
+    mask="$(readlink /etc/systemd/system/getty@tty1.service)"
+    case "$mask" in
+        /dev/null|dev/null) ;;
+        *)
+            echo "ERROR: getty@tty1 is not masked (readlink='$mask')" >&2
+            exit 1
+            ;;
+    esac
+    if [ -e /etc/systemd/system/getty.target.wants/getty@tty1.service ]; then
+        echo "ERROR: getty@tty1 still in getty.target.wants (login would bury the pin)" >&2
+        exit 1
     fi
-    [ -L /etc/systemd/system/getty.target.wants/getty@tty1.service ] \
-        || { echo "ERROR: getty@tty1 not enabled in getty.target.wants" >&2; exit 1; }
     grep -q '^NAutoVTs=0$' /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf \
         || { echo "ERROR: logind NAutoVTs=0 did not stick" >&2; exit 1; }
     grep -q '^ReserveVT=1$' /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf \
@@ -262,16 +246,18 @@ verify_kbm_on_display0() {
         exit 1
     fi
 
-    if [ -L "$getty_mask" ]; then
-        case "$(readlink "$getty_mask")" in
-            /dev/null|dev/null)
-                echo "ERROR: getty@tty1 is masked; Infra needs HDMI getty on vt1" >&2
-                exit 1
-                ;;
-        esac
+    [ -L "$getty_mask" ] || { echo "ERROR: getty@tty1 is unmasked (not a mask symlink)" >&2; exit 1; }
+    case "$(readlink "$getty_mask")" in
+        /dev/null|dev/null) ;;
+        *)
+            echo "ERROR: getty@tty1 is unmasked; HDMI login would bury the SSH banner" >&2
+            exit 1
+            ;;
+    esac
+    if [ -e "$getty_wants" ]; then
+        echo "ERROR: getty@tty1 still in getty.target.wants (login would bury the pin)" >&2
+        exit 1
     fi
-    [ -L "$getty_wants" ] \
-        || { echo "ERROR: getty@tty1 not enabled in getty.target.wants" >&2; exit 1; }
 
     [ -f "$virt" ] || { echo "ERROR: missing 10-virtual.conf" >&2; exit 1; }
     grep -q 'AutoAddDevices' "$virt" \
@@ -348,16 +334,18 @@ verify_autologin_hdmi() {
         exit 1
     fi
 
-    if [ -L "$getty_unit" ]; then
-        case "$(readlink "$getty_unit")" in
-            /dev/null|dev/null)
-                echo "ERROR: getty@tty1 is masked; Infra needs HDMI getty on vt1" >&2
-                exit 1
-                ;;
-        esac
+    [ -L "$getty_unit" ] || { echo "ERROR: getty@tty1 is unmasked (not a mask symlink)" >&2; exit 1; }
+    case "$(readlink "$getty_unit")" in
+        /dev/null|dev/null) ;;
+        *)
+            echo "ERROR: getty@tty1 is unmasked; HDMI login would bury the SSH banner" >&2
+            exit 1
+            ;;
+    esac
+    if [ -e "$getty_wants" ]; then
+        echo "ERROR: getty@tty1 still in getty.target.wants (login would bury the pin)" >&2
+        exit 1
     fi
-    [ -L "$getty_wants" ] \
-        || { echo "ERROR: getty@tty1 not enabled in getty.target.wants" >&2; exit 1; }
     [ -f "$logind" ] || { echo "ERROR: missing logind tesla-linux-hdmi.conf" >&2; exit 1; }
     grep -q '^NAutoVTs=0$' "$logind" \
         || { echo "ERROR: logind NAutoVTs is not 0" >&2; exit 1; }
@@ -451,6 +439,70 @@ verify_autologin_hdmi() {
     fi
 
     verify_kbm_on_display0 "$r"
+    verify_hdmi_ssh_banner "$r"
+}
+
+# Pinned HDMI SSH banner (write-only). Fail the bake if the unit/script is
+# missing or does not name 10.42.1.1 and teslalinux. Getty stays masked.
+verify_hdmi_ssh_banner() {
+    local r="${1:-}"
+    local banner="$r/usr/local/sbin/tesla-linux-hdmi-banner"
+    local unit="$r/etc/systemd/system/tesla-linux-hdmi-banner.service"
+
+    [ -f "$banner" ] || { echo "ERROR: missing tesla-linux-hdmi-banner" >&2; exit 1; }
+    [ -x "$banner" ] || { echo "ERROR: tesla-linux-hdmi-banner is not executable" >&2; exit 1; }
+    grep -q '10.42.1.1' "$banner" \
+        || { echo "ERROR: tesla-linux-hdmi-banner does not mention 10.42.1.1" >&2; exit 1; }
+    grep -q 'teslalinux' "$banner" \
+        || { echo "ERROR: tesla-linux-hdmi-banner does not mention teslalinux" >&2; exit 1; }
+    grep -q 'to control the baremetal host, SSH to' "$banner" \
+        || { echo "ERROR: tesla-linux-hdmi-banner missing chairman sentence" >&2; exit 1; }
+    if grep -q 'WLAN_IP' "$banner"; then
+        echo "ERROR: tesla-linux-hdmi-banner still has a WLAN_IP token" >&2
+        exit 1
+    fi
+    if awk '/^banner_text\(\)/,/^}/' "$banner" | grep -q '0.0.0.0'; then
+        echo "ERROR: banner_text still names 0.0.0.0" >&2
+        exit 1
+    fi
+
+    [ -f "$unit" ] || { echo "ERROR: missing tesla-linux-hdmi-banner.service" >&2; exit 1; }
+    grep -q 'tesla-linux-hdmi-banner daemon' "$unit" \
+        || { echo "ERROR: hdmi-banner unit is not the pin daemon" >&2; exit 1; }
+    if grep -Eiq '^PAMName=|^TTYPath=' "$unit"; then
+        echo "ERROR: hdmi-banner unit must not take a TTY login seat (HID stays on :0)" >&2
+        exit 1
+    fi
+    if grep -Eiq '^Before=.*nginx\.service' "$unit"; then
+        echo "ERROR: tesla-linux-hdmi-banner must not Before=nginx.service" >&2
+        exit 1
+    fi
+    if grep -Eiq '^After=.*tesla-linux-(xorg|desktop)|^Requires=.*tesla-linux-(xorg|desktop)' "$unit"; then
+        echo "ERROR: tesla-linux-hdmi-banner must not After/Requires xorg or desktop" >&2
+        exit 1
+    fi
+    [ -L "$r/etc/systemd/system/multi-user.target.wants/tesla-linux-hdmi-banner.service" ] \
+        || { echo "ERROR: tesla-linux-hdmi-banner not WantedBy multi-user.target" >&2; exit 1; }
+    local disp="$r/etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan"
+    [ -f "$disp" ] || { echo "ERROR: missing NM wlan dispatcher" >&2; exit 1; }
+    grep -q 'tesla-linux-hdmi-banner once' "$disp" \
+        || { echo "ERROR: NM dispatcher does not refresh the HDMI SSH banner" >&2; exit 1; }
+
+    [ -L "$r/etc/systemd/system/getty@tty1.service" ] \
+        || { echo "ERROR: getty@tty1.service is not a mask symlink" >&2; exit 1; }
+    local mask
+    mask="$(readlink "$r/etc/systemd/system/getty@tty1.service")"
+    case "$mask" in
+        /dev/null|dev/null) ;;
+        *)
+            echo "ERROR: getty@tty1 is unmasked; HDMI login would bury the SSH banner" >&2
+            exit 1
+            ;;
+    esac
+    if [ -e "$r/etc/systemd/system/getty.target.wants/getty@tty1.service" ]; then
+        echo "ERROR: getty@tty1 still in getty.target.wants (login would bury the pin)" >&2
+        exit 1
+    fi
 }
 
 # --verify-autologin / --verify-kbm [root] checks a live box or a mounted image.
@@ -510,7 +562,9 @@ fi
 install -m755 "$HERE/tesla-linux-wlan.sh" /usr/local/sbin/tesla-linux-wlan
 # HDMI clone is DESCPE. Do not install or run tesla-linux-hdmi-clone from this path.
 rm -f /usr/local/sbin/tesla-linux-hdmi-clone
+install -m755 "$HERE/tesla-linux-hdmi-banner" /usr/local/sbin/tesla-linux-hdmi-banner
 install -m644 "$HERE/tesla-linux-wlan.service" /etc/systemd/system/tesla-linux-wlan.service
+install -m644 "$HERE/tesla-linux-hdmi-banner.service" /etc/systemd/system/tesla-linux-hdmi-banner.service
 install -m755 "$HERE/ta_wlan_api.py" /usr/local/sbin/ta_wlan_api.py
 install -m644 "$HERE/tesla-linux-wlan-api.service" /etc/systemd/system/tesla-linux-wlan-api.service
 
@@ -527,6 +581,7 @@ if [ -e "/sys/class/net/$IFACE/wireless" ]; then
             /usr/local/sbin/tesla-linux-wlan maybe-ap
             ;;
     esac
+    /usr/local/sbin/tesla-linux-hdmi-banner once >/dev/null 2>&1 || true
     exit 0
 fi
 # Wired eth0/end0/en* (or VM tap/bridge). Not lo/docker. Bind picker on that IPv4.
@@ -539,6 +594,8 @@ case "$ACTION" in
         /usr/local/sbin/tesla-linux-wlan nginx-bind
         ;;
 esac
+# Pin HDMI SSH banner to the new IPv4s. Write-only; not a login.
+/usr/local/sbin/tesla-linux-hdmi-banner once >/dev/null 2>&1 || true
 exit 0
 EOF
 chmod 755 /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan
@@ -875,7 +932,8 @@ EOF
 # --- boot into graphical.target (symlink — not systemctl set-default || true) -
 loginctl enable-linger "$TL_USER" 2>/dev/null || true
 set_graphical_default
-# Autologin XFCE on :0. HDMI vt1 is getty (Infra). USB KBM is grabbed by Xorg :0.
+# Autologin XFCE on :0. HDMI vt1 is the pinned SSH banner (getty masked).
+# USB KBM is grabbed by Xorg :0 (Backend). Do not rewrite HID here.
 ensure_hdmi_getty_vt1
 
 mkdir -p /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-user.target.wants
@@ -888,6 +946,10 @@ enable_wlan_nginx() {
        /etc/systemd/system/multi-user.target.wants/tesla-linux-wlan-api.service
 }
 
+# Write-only HDMI SSH banner. File-level enable (chroot-safe). Not a getty login.
+ln -sfn /etc/systemd/system/tesla-linux-hdmi-banner.service \
+   /etc/systemd/system/multi-user.target.wants/tesla-linux-hdmi-banner.service
+
 # File-level enable so bake/chroot and live install both leave graphical.target.wants.
 for u in xorg desktop display touch audio; do
     ln -sfn "/etc/systemd/system/tesla-linux-$u.service" \
@@ -897,10 +959,10 @@ enable_wlan_nginx
 
 if [ "$START" = "1" ]; then
     systemctl daemon-reload
-    systemctl unmask getty@tty1.service autovt@tty1.service
-    systemctl enable getty@tty1.service
+    systemctl stop getty@tty1.service
+    systemctl mask getty@tty1.service autovt@tty1.service
     systemctl enable tesla-linux-xorg tesla-linux-desktop tesla-linux-display \
-                     tesla-linux-touch tesla-linux-audio >/dev/null 2>&1
+                     tesla-linux-touch tesla-linux-audio tesla-linux-hdmi-banner >/dev/null 2>&1
     /usr/local/sbin/tesla-linux-wlan eth-up >/dev/null 2>&1 || true
     echo "==> enabled. start with: systemctl start tesla-linux-xorg tesla-linux-desktop tesla-linux-display tesla-linux-touch tesla-linux-audio tesla-linux-wlan tesla-linux-wlan-api"
 else

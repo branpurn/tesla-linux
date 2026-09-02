@@ -72,12 +72,14 @@ mkdir -p "$MNT/tmp/tl-src"
 cp "$SRC"/install-tesla-linux.sh "$SRC"/ta_*.py "$SRC"/*.html \
    "$SRC"/tesla-linux-wlan.sh "$SRC"/tesla-linux-wlan.service \
    "$SRC"/tesla-linux-wlan-api.service "$SRC"/ap.env \
+   "$SRC"/tesla-linux-hdmi-banner "$SRC"/tesla-linux-hdmi-banner.service \
    "$MNT/tmp/tl-src/" 2>/dev/null || true
 # Stage authorized_keys for teslalinux (never print the key). Not ubuntu — ubuntu is DOA.
 if [ -f "$SRC/authorized_keys" ]; then
   cp "$SRC/authorized_keys" "$MNT/tmp/tl-src/authorized_keys"
 fi
-chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh"
+chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh" \
+         "$MNT/tmp/tl-src/tesla-linux-hdmi-banner"
 # HDMI clone is DESCPE — do not stage or install tesla-linux-hdmi-clone.
 
 # ---------------------------------------------------------------- chroot -----
@@ -250,21 +252,18 @@ if [ -f "$SRC/authorized_keys" ]; then
   [ -f "$MNT/home/teslalinux/.ssh/authorized_keys" ] || die "teslalinux authorized_keys missing"
 fi
 
-# Autologin XFCE on :0; USB KBM on that session. HDMI vt1 is getty (Infra).
-log "verifying autologin XFCE / KBM-on-:0 / HDMI getty vt1"
+# Autologin XFCE on :0; USB KBM on that session. HDMI vt1 is the pinned SSH banner.
+log "verifying autologin XFCE / KBM-on-:0 / HDMI SSH banner"
 "$SRC/install-tesla-linux.sh" --verify-autologin "$MNT"
 grep -q '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
   || die "Xorg is not on vt7"
 if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
   die "Xorg still occupies HDMI vt1"
 fi
-if [ -L "$MNT/etc/systemd/system/getty@tty1.service" ]; then
-  case "$(readlink "$MNT/etc/systemd/system/getty@tty1.service")" in
-    /dev/null|dev/null) die "getty@tty1 is masked" ;;
-  esac
-fi
-[ -L "$MNT/etc/systemd/system/getty.target.wants/getty@tty1.service" ] \
-  || die "getty@tty1 not enabled"
+[ "$(readlink "$MNT/etc/systemd/system/getty@tty1.service")" = /dev/null ] \
+  || die "getty@tty1 is unmasked (login would bury the SSH banner)"
+[ ! -e "$MNT/etc/systemd/system/getty.target.wants/getty@tty1.service" ] \
+  || die "getty@tty1 still in getty.target.wants"
 if grep -Eq '^Conflicts=.*getty@tty1' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
   die "xorg Conflicts=getty@tty1 would take HDMI getty down"
 fi
@@ -306,6 +305,27 @@ if grep -Eq 'systemctl[[:space:]]+(restart|start)[[:space:]]+nginx' \
       "$MNT/usr/local/sbin/tesla-linux-firstboot"; then
   die "firstboot still systemctl restart/start nginx"
 fi
+
+# Pinned HDMI SSH banner. Fail if missing or does not name 10.42.1.1 / teslalinux.
+log "verifying HDMI SSH banner"
+[ -x "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" ] \
+  || die "tesla-linux-hdmi-banner missing or not executable"
+grep -q '10.42.1.1' "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" \
+  || die "hdmi-banner does not mention 10.42.1.1"
+grep -q 'teslalinux' "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" \
+  || die "hdmi-banner does not mention teslalinux"
+[ -f "$MNT/etc/systemd/system/tesla-linux-hdmi-banner.service" ] \
+  || die "tesla-linux-hdmi-banner.service missing"
+[ -L "$MNT/etc/systemd/system/multi-user.target.wants/tesla-linux-hdmi-banner.service" ] \
+  || die "tesla-linux-hdmi-banner not WantedBy multi-user.target"
+if grep -Eiq '^PAMName=|^TTYPath=' "$MNT/etc/systemd/system/tesla-linux-hdmi-banner.service"; then
+  die "hdmi-banner unit must not take a TTY login seat"
+fi
+if grep -Eiq '^Before=.*nginx\.service' "$MNT/etc/systemd/system/tesla-linux-hdmi-banner.service"; then
+  die "hdmi-banner still Before=nginx.service"
+fi
+"$MNT/usr/local/sbin/tesla-linux-hdmi-banner" selftest \
+  || die "hdmi-banner selftest failed"
 
 # ------------------------------------------------------------------ pack -----
 log "packing"

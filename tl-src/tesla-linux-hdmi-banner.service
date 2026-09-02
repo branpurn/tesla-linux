@@ -1,0 +1,17 @@
+[Unit]
+Description=Tesla Linux — pinned HDMI SSH banner (not a login)
+# Write-only on tty1. getty@tty1 stays masked so HDMI is this sentence, not getty.
+# Do not After/Requires xorg or desktop. Do not Before=nginx. Do not rewrite HID.
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/tesla-linux-hdmi-banner daemon
+Restart=always
+RestartSec=2
+StandardInput=null
+# No PAMName / no TTYPath login session — do not steal a seat or USB KBM.
+
+[Install]
+WantedBy=multi-user.target
