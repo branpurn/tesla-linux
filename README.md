@@ -22,6 +22,10 @@ Operator-side. Image is not USB-hostile (`root=LABEL=writable`, `LABEL=` fstab).
 
 ## WLAN (WAVE 1)
 
+### Ethernet
+
+Cable to the Pi ethernet jack. Pi is static **10.42.1.1/24** (not DHCP; not the TeslaLinux AP **10.42.0.1/24**). Peer may need **10.42.1.2/24**. Open `http://10.42.1.1/`. Also `http://teslalinux.local/` if avahi is up.
+
 Preferred: Pi is a station on a saved Tesla (or other) WLAN (NetworkManager autoconnect).
 
 Pre-seed when flashing — `/boot/firmware/tesla-linux.conf` on the FAT partition:
@@ -33,7 +37,7 @@ WIFI_PSK=yourpsk
 
 Fallback when no saved WLAN / associate fails: **hostapd** AP SSID **TeslaLinux**, WPA2-PSK password **teslalinux** (documented factory default; operators change it later). Do not invent a second SSID.
 
-Web GUI on that AP: `http://10.42.0.1/` (pick/save station WLAN), `http://10.42.0.1/desktop.html` (in-car stream), `http://10.42.0.1/probe.html` — reachable by other devices on the Pi WLAN. Bind is AP LAN (and station IP when associated), not loopback-only, not `0.0.0.0` world.
+Web GUI: `http://10.42.0.1/` on the TeslaLinux AP (pick/save station WLAN), `http://10.42.1.1/` on the ethernet static, plus the station IP when associated. Same paths: `/`, `/desktop.html`, `/probe.html`. Bind is those IPv4s only — not loopback-only, not `0.0.0.0`.
 
 Factory AP password is also in `/etc/tesla-linux/ap.env` on the image.
 
