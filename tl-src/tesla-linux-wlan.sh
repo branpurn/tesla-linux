@@ -117,6 +117,34 @@ wait_wifi_iface() {
     return 1
 }
 
+# usb-net / cdc_ether / virtio can appear after this oneshot first runs (qemu).
+wait_wired_iface() {
+    local i=0 iface
+    while :; do
+        if iface="$(primary_wired_iface)"; then
+            printf '%s\n' "$iface"
+            return 0
+        fi
+        [ "$i" -ge "$IFACE_WAIT_SEC" ] && break
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# True when factory ethernet static is on a wired iface (nginx-bind path without AP).
+eth_static_bound() {
+    local n
+    is_bindable_ipv4 "$ETH_ADDR" || return 1
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        if iface_ipv4s "$n" | grep -qx "$ETH_ADDR"; then
+            return 0
+        fi
+    done < <(wired_ifaces)
+    return 1
+}
+
 is_ap_conn() {
     local name="$1" mode
     [ -n "$name" ] || return 1
@@ -472,10 +500,11 @@ cmd_save_wlan() {
 }
 
 # Static 10.42.1.1/24 on the primary wired iface. No DHCP client. Not the AP subnet.
+# Wait for delayed usb-net/cdc_ether/eth0/end0/en* — skip-if-none immediately is an operator hangup.
 cmd_eth_up() {
     local iface name type
-    if ! iface="$(primary_wired_iface)"; then
-        log "no wired iface; skip $ETH_CONN"
+    if ! iface="$(wait_wired_iface)"; then
+        log "no wired iface after ${IFACE_WAIT_SEC}s; skip $ETH_CONN"
         return 0
     fi
     log "wired $iface -> $ETH_ADDR/$ETH_PREFIX ($ETH_CONN, not DHCP, not $AP_ADDR/$AP_PREFIX)"
@@ -513,24 +542,35 @@ cmd_eth_up() {
 
 cmd_boot() {
     local iface
-    # Ethernet (or leftover AP/station) bind first — do not wait on X/desktop.
+    # Ethernet + nginx-bind first — do not wait on X/desktop. qemu has no wlan0.
+    cmd_eth_up
     cmd_nginx_bind
-    if ! iface="$(wait_wifi_iface)"; then
-        log "no Wi-Fi iface after ${IFACE_WAIT_SEC}s; fail so the unit can restart"
-        return 1
-    fi
-    if has_saved_infra; then
-        log "saved infra WLAN present; waiting ${WAIT_SEC}s for NM autoconnect"
-        if wait_station "$iface"; then
-            log "associated as station"
-            cmd_nginx_bind
+    if iface="$(wait_wifi_iface)"; then
+        if has_saved_infra; then
+            log "saved infra WLAN present; waiting ${WAIT_SEC}s for NM autoconnect"
+            if wait_station "$iface"; then
+                log "associated as station"
+                cmd_nginx_bind
+                return 0
+            fi
+            log "saved WLAN did not associate within ${WAIT_SEC}s"
+        else
+            log "no saved infra WLAN"
+        fi
+        if cmd_ap_up; then
             return 0
         fi
-        log "saved WLAN did not associate within ${WAIT_SEC}s"
+        log "AP did not start"
     else
-        log "no saved infra WLAN"
+        log "no Wi-Fi iface after ${IFACE_WAIT_SEC}s (eth GUI is the qemu path)"
     fi
-    cmd_ap_up
+    if eth_static_bound; then
+        log "ethernet $ETH_ADDR bound; nginx-bind without AP (unit success)"
+        cmd_nginx_bind
+        return 0
+    fi
+    log "neither wired $ETH_ADDR nor wifi/AP; fail so the unit can restart"
+    return 1
 }
 
 cmd_maybe_ap() {
@@ -597,13 +637,33 @@ cmd_selftest() {
     if wait_wifi_iface >/dev/null; then
         echo "FAIL: wait_wifi_iface succeeded with no iface"; fail=1
     fi
+    primary_wired_iface() { return 1; }
+    if wait_wired_iface >/dev/null; then
+        echo "FAIL: wait_wired_iface succeeded with no iface"; fail=1
+    fi
+    if ! cmd_eth_up; then
+        echo "FAIL: eth-up after wait timeout should skip (0)"; fail=1
+    fi
+    primary_wired_iface() { printf '%s\n' usb0; }
+    out="$(wait_wired_iface)"
+    [ "$out" = usb0 ] || { echo "FAIL: wait_wired_iface usb0"; fail=1; }
     if cmd_ap_up; then
         echo "FAIL: ap-up without iface returned 0"; fail=1
     fi
+    wait_wifi_iface() { return 1; }
+    wait_wired_iface() { return 1; }
+    primary_wired_iface() { return 1; }
+    wired_ifaces() { return 0; }
+    NGINX_HTTP="$dir/boot-none-http.conf"
+    NGINX_HTTPS="$dir/boot-none-https.conf"
     if cmd_boot; then
-        echo "FAIL: boot without iface/station returned 0"; fail=1
+        echo "FAIL: boot without wired/wifi returned 0"; fail=1
     fi
 
+    # No wifi / no hostapd: 10.42.1.1 bound → unit success + nginx listen (not 0.0.0.0).
+    cmd_eth_up() { return 0; }
+    wait_wifi_iface() { return 1; }
+    wifi_iface() { return 1; }
     wired_ifaces() { printf '%s\n' eth0; }
     iface_ipv4s() {
         case "$1" in
@@ -612,8 +672,20 @@ cmd_selftest() {
             *) ;;
         esac
     }
-    hostapd_running() { return 0; }
+    hostapd_running() { return 1; }
     ETH_ADDR=10.42.1.1
+    NGINX_HTTP="$dir/boot-eth-http.conf"
+    NGINX_HTTPS="$dir/boot-eth-https.conf"
+    if ! cmd_boot; then
+        echo "FAIL: boot with 10.42.1.1 and no wifi must return 0"; fail=1
+    fi
+    grep -q 'listen 10.42.1.1:80;' "$dir/boot-eth-http.conf" || { echo "FAIL: nginx-bind missing 10.42.1.1 without AP"; fail=1; }
+    grep -Eq '0\.0\.0\.0|listen 80;|listen \[::\]' "$dir/boot-eth-http.conf" && { echo "FAIL: world listen after eth-only boot"; fail=1; }
+    out="$(collect_bind_ips "")"
+    echo "$out" | grep -qx '10.42.1.1' || { echo "FAIL: eth static in collect without AP"; fail=1; }
+    echo "$out" | grep -qx '10.42.0.1' && { echo "FAIL: AP ip without hostapd"; fail=1; }
+
+    hostapd_running() { return 0; }
     out="$(collect_bind_ips wlan0)"
     echo "$out" | grep -qx '10.8.0.4' || { echo "FAIL: station ip in collect"; fail=1; }
     echo "$out" | grep -qx '10.42.1.1' || { echo "FAIL: eth static in collect"; fail=1; }
@@ -637,8 +709,8 @@ cmd_selftest() {
 usage() {
     cat <<EOF
 usage: tesla-linux-wlan <boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan|selftest>
-  boot         wait ~${IFACE_WAIT_SEC}s for wifi iface; saved infra (~${WAIT_SEC}s) else AP
-  eth-up       static ${ETH_ADDR}/${ETH_PREFIX} on primary wired iface (no DHCP)
+  boot         eth-up + nginx-bind; wifi/AP if present; success if ${ETH_ADDR} bound or AP/station
+  eth-up       wait ~${IFACE_WAIT_SEC}s for wired iface; static ${ETH_ADDR}/${ETH_PREFIX} (no DHCP)
   ap-up        TeslaLinux hostapd AP + dnsmasq (never if station is up)
   ap-down      stop AP; return iface to NetworkManager
   nginx-bind   listen on current AP/station/ethernet IPv4s only

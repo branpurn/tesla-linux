@@ -120,11 +120,22 @@ ensure_serial_console() {
         echo "ERROR: serial-getty@.service missing" >&2
         exit 1
     fi
-    mkdir -p /etc/systemd/system/getty.target.wants
+    mkdir -p /etc/systemd/system/getty.target.wants \
+             /etc/systemd/system/serial-getty@.service.d
     local tty
     for tty in ttyAMA0 ttyS0 ttyAMA1; do
         ln -sfn "$unit_src" "/etc/systemd/system/getty.target.wants/serial-getty@${tty}.service"
     done
+    # Stock serial-getty@.service BindsTo=dev-%i.device. qemu raspi4b often never
+    # activates that udev unit → DEPEND-fail, no guest shell. Empty BindsTo= clears it.
+    # Do not After= tesla-linux-wlan. HDMI getty@tty1 stays masked (not this unit).
+    cat > /etc/systemd/system/serial-getty@.service.d/tl-no-binds-to-dev.conf <<'EOF'
+# qemu: udev may never activate dev-ttyAMA0.device / dev-ttyS0.device.
+# Stock BindsTo=dev-%i.device then DEPEND-fails the getty. Empty BindsTo= clears it.
+# Do not wait on tesla-linux-wlan. Do not put HDMI getty back on tty1.
+[Unit]
+BindsTo=
+EOF
 }
 
 # HDMI / tty1 is Xorg :0 + tesla-linux-desktop (teslalinux), not getty.
@@ -229,6 +240,41 @@ verify_autologin_hdmi() {
         || { echo "ERROR: serial-getty@ttyS0 not enabled" >&2; exit 1; }
     [ -L "$r/etc/systemd/system/getty.target.wants/serial-getty@ttyAMA1.service" ] \
         || { echo "ERROR: serial-getty@ttyAMA1 not enabled" >&2; exit 1; }
+
+    local serial_dropin="$r/etc/systemd/system/serial-getty@.service.d/tl-no-binds-to-dev.conf"
+    [ -f "$serial_dropin" ] \
+        || { echo "ERROR: missing serial-getty BindsTo drop-in" >&2; exit 1; }
+    grep -q '^BindsTo=$' "$serial_dropin" \
+        || { echo "ERROR: serial-getty drop-in does not clear BindsTo" >&2; exit 1; }
+    if grep -Eq '^BindsTo=dev-' "$serial_dropin"; then
+        echo "ERROR: serial-getty still BindsTo the device unit" >&2
+        exit 1
+    fi
+    if grep -Eiq '^After=.*tesla-linux-wlan|^Requires=.*tesla-linux-wlan|^Wants=.*tesla-linux-wlan' "$serial_dropin"; then
+        echo "ERROR: serial-getty drop-in must not wait on wlan" >&2
+        exit 1
+    fi
+    local serial_override
+    for serial_override in \
+        "$r/etc/systemd/system/serial-getty@.service" \
+        "$r/etc/systemd/system/serial-getty@ttyAMA0.service" \
+        "$r/etc/systemd/system/serial-getty@ttyS0.service"; do
+        if [ -f "$serial_override" ] && grep -Eq '^BindsTo=dev-' "$serial_override"; then
+            echo "ERROR: serial-getty still BindsTo the device unit ($serial_override)" >&2
+            exit 1
+        fi
+    done
+
+    local wlan_bin="$r/usr/local/sbin/tesla-linux-wlan"
+    [ -f "$wlan_bin" ] || { echo "ERROR: missing tesla-linux-wlan helper" >&2; exit 1; }
+    if grep -Eq 'no Wi-Fi iface after .*fail so the unit can restart' "$wlan_bin"; then
+        echo "ERROR: tesla-linux-wlan boot still fails the unit solely for missing wifi" >&2
+        exit 1
+    fi
+    grep -q 'wait_wired_iface' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing wait_wired_iface" >&2; exit 1; }
+    grep -q 'eth_static_bound' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing eth_static_bound" >&2; exit 1; }
 
     [ -x "$clone" ] || { echo "ERROR: tesla-linux-hdmi-clone missing or not executable" >&2; exit 1; }
     grep -q -- '--same-as' "$clone" \
