@@ -2,7 +2,7 @@
 
 Tool for baking a flashable Ubuntu Server 26.04 + XFCE image for Raspberry Pi 4 (8 GB only). 
 
-Product path is the Tesla-browser web console (`desktop.html`), not HDMI XFCE.
+HDMI and the Tesla-browser web console (`desktop.html`) show the same XFCE session.
 
 ## Components:
 
@@ -48,27 +48,25 @@ WIFI_PSK=yourpsk
   - Fallback: hostapd AP SSID **TeslaLinux**, WPA2-PSK **teslalinux**, gateway **10.42.0.1**
   - Ethernet: Pi is static **10.42.1.1/24** (peer may need **10.42.1.2/24**)
 - Open the console: `http://10.42.0.1/desktop.html` on the AP, `http://10.42.1.1/desktop.html` on ethernet, or the station IPv4 / `http://teslalinux.local/desktop.html` when associated. Same host also serves `/` (Wi-Fi picker) and `/probe.html`
-- SSH as teslalinux attaches tmux session `tl` (`/run/tesla-linux/tmux.sock`): MOTD pane + shell pane
+- SSH as `teslalinux` opens a normal shell
 
 ## Primary Tools:
 
-- Tesla-browser `desktop.html` for the in-car XFCE console (1088x832 virtual `:0`)
-- USB keyboard/mouse drive that same XFCE session (`Xorg :0 vt1`)
+- HDMI and Tesla-browser `desktop.html` show the same hard-coded 1088x832 XFCE session (`Xorg :0`, vt1; KMS `HDMI-A-1`)
+- USB keyboard/mouse drive that same visible and broadcast XFCE session
 - `index.html` to pick/save a station WLAN from the TeslaLinux AP
 - `hostapd` AP **TeslaLinux** / **teslalinux** at **10.42.0.1** when no saved station associates
 - NetworkManager station autoconnect when a WLAN is saved
 - nginx serving the console on AP / ethernet / station IPv4
-- `tmux` SSH MOTD (live WLAN IPv4 or `10.42.0.1` in AP mode, ethernet `10.42.1.1`)
 - Misc. from Ubuntu Server 26.04 + XFCE (standard GNU tools, etc.)
 
 ## What/Why?:
 
 - Rapidly image a single-purpose Pi for Tesla-browser access to an XFCE desktop
 - Ubuntu Server 26.04 + XFCE on Raspberry Pi 4 (8 GB only) for a KISS path off tesla-android-kiss
-- Product is the Tesla-browser web console, not a HDMI login desktop
-- Dummy virtual `:0` so XFCE stays up whether HDMI is present or black
-- USB HID grabbed on that Xorg so a plugged keyboard/mouse drives the same session the car sees
-- SSH MOTD lives in tmux (not tty1) so the kernel console does not steal HID from `:0`
+- One vc4/modesetting Xorg screen: HDMI shows exactly the XFCE desktop captured for the web console
+- Hard-coded 1088x832 geometry matches the Tesla-browser canvas and touch mapping
+- Standard seat0/libinput discovery lets a directly connected keyboard and mouse drive that session
 - Saved station WLAN when possible; TeslaLinux AP only as fallback (K.I.S.S.)
 - Same image flashes SD or USB (`root=LABEL=writable`)
 - Factory defaults are documented operator defaults (`teslalinux` / AP **teslalinux**); change them later (`/etc/tesla-linux/ap.env`)
@@ -76,6 +74,6 @@ WIFI_PSK=yourpsk
 ### Notes:
 
 - Pi 4 USB boot may need EEPROM USB MSD first (Raspberry Pi Imager → Misc utility images → Bootloader → USB boot on a spare SD). Official 5V 3A PSU; USB 2.0 or a powered hub if a USB SSD hangs
-- HDMI0 (micro-HDMI nearest USB-C) is not a login; `getty@tty1` is masked. Ubuntu KMS has no firmware splash — black until the kernel starts is expected
+- Use HDMI0 (micro-HDMI nearest USB-C). `getty@tty1` is masked because Xorg owns vt1. Ubuntu KMS has no firmware splash — black until the kernel starts is expected
 - Wired ethernet is static **10.42.1.1/24**, not DHCP, not the AP subnet **10.42.0.1/24**
 - `http://teslalinux.local/` via existing avahi when mDNS is up
