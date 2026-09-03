@@ -56,11 +56,13 @@ else
     pass "Xorg uses normal VT switching and seat0 discovery"
 fi
 grep -q 'Driver[[:space:]]*"modesetting"' "$INSTALL" \
-    && pass "vc4 modesetting is Screen 0" || bad "modesetting driver missing"
-grep -q 'Modeline[[:space:]]*"1088x832"' "$INSTALL" \
-    && pass "HDMI mode is hard-coded 1088x832" || bad "1088x832 Modeline missing"
-grep -q 'video=HDMI-A-1:1088x832M@60D' "$INSTALL" \
-    && pass "KMS forces HDMI0 to 1088x832" || bad "KMS HDMI0 mode missing"
+    && pass "vc4 modesetting is configured" || bad "modesetting driver missing"
+grep -q 'PreferredMode".*"1920x1080"' "$INSTALL" \
+    && pass "HDMI uses standard 1920x1080 timing" || bad "1080p PreferredMode missing"
+grep -q 'video=HDMI-A-1:1920x1080@60D' "$INSTALL" \
+    && pass "KMS forces HDMI0 to 1080p60" || bad "KMS HDMI0 1080p60 missing"
+grep -q 'xrandr --fb 1088x832 --output HDMI-1 --mode 1920x1080 --scale-from 1088x832 --primary' "$INSTALL" \
+    && pass "RandR scales logical 1088x832 to HDMI 1080p" || bad "RandR scaling missing"
 grep -q 'MatchDriver[[:space:]]*"vc4"' "$INSTALL" \
     && pass "Xorg selects the vc4 DRM device" || bad "vc4 MatchDriver missing"
 grep -q 'PrimaryGPU".*"true"' "$INSTALL" \
@@ -127,7 +129,7 @@ Requires=tesla-linux-xorg.service
 [Service]
 User=teslalinux
 Environment=DISPLAY=:0
-ExecStartPre=/bin/sh -c 'DISPLAY=:0 xrandr --output HDMI-1 --mode 1088x832 --primary'
+ExecStartPre=/bin/sh -c 'DISPLAY=:0 xrandr --fb 1088x832 --output HDMI-1 --mode 1920x1080 --scale-from 1088x832 --primary'
 ExecStart=/usr/bin/dbus-launch --exit-with-session /usr/bin/xfce4-session
 [Install]
 WantedBy=graphical.target
@@ -157,7 +159,7 @@ Section "OutputClass"
 EndSection
 Section "Monitor"
     Identifier "TeslaLinuxHDMI"
-    Modeline "1088x832" 73.75 1088 1144 1256 1424 832 835 845 864
+    Option "PreferredMode" "1920x1080"
 EndSection
 EOF
     cat > "$t/etc/X11/xorg.conf.d/20-tesla-linux-input.conf" <<'EOF'

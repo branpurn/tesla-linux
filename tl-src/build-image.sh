@@ -321,12 +321,12 @@ grep -q 'MatchDriver[[:space:]]*"vc4"' "$MNT/etc/X11/xorg.conf.d/10-tesla-linux-
   || die "Xorg does not select the vc4 DRM device"
 grep -q 'PrimaryGPU".*"true"' "$MNT/etc/X11/xorg.conf.d/10-tesla-linux-display.conf" \
   || die "vc4 is not the primary Xorg GPU"
-grep -q 'Modeline[[:space:]]*"1088x832"' "$MNT/etc/X11/xorg.conf.d/10-tesla-linux-display.conf" \
-  || die "HDMI is not hard-coded to 1088x832"
+grep -q 'PreferredMode".*"1920x1080"' "$MNT/etc/X11/xorg.conf.d/10-tesla-linux-display.conf" \
+  || die "HDMI physical mode is not standard 1920x1080"
 CMDLINE="$MNT/boot/firmware/current/cmdline.txt"
 [ -f "$CMDLINE" ] || CMDLINE="$MNT/boot/firmware/cmdline.txt"
-grep -q 'video=HDMI-A-1:1088x832M@60D' "$CMDLINE" \
-  || die "kernel HDMI0 mode is not hard-coded to 1088x832"
+grep -q 'video=HDMI-A-1:1920x1080@60D' "$CMDLINE" \
+  || die "kernel HDMI0 mode is not standard 1080p60"
 if grep -q 'GrabDevice' "$MNT/etc/X11/xorg.conf.d/20-tesla-linux-input.conf"; then
   die "Xorg input still uses GrabDevice"
 fi
