@@ -1,6 +1,6 @@
 # Tesla Linux
 
-Tool for baking a flashable Ubuntu Server 26.04 + XFCE image for Raspberry Pi 4 (8 GB only). KISS replacement for tesla-android-kiss (kiss stays private).
+Tool for baking a flashable Ubuntu Server 26.04 + XFCE image for Raspberry Pi 4 (8 GB only). 
 
 Product path is the Tesla-browser web console (`desktop.html`), not HDMI XFCE.
 
