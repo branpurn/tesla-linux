@@ -47,13 +47,16 @@ echo "$pkgs" | grep -q 'python3-evdev' \
     && pass "PKGS still has python3-evdev (uinput touch, not Xorg HID)" \
     || bad "PKGS dropped python3-evdev"
 
-grep -q '^ExecStart=/usr/bin/Xorg :0 vt7 -seat seat0 -ac -noreset -novtswitch$' "$INSTALL" \
-    && pass "Xorg unit is :0 vt7 -seat seat0" \
-    || bad "Xorg ExecStart is not :0 vt7 -seat seat0"
-if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$INSTALL"; then
-    bad "install script still starts Xorg on vt1"
+echo "$pkgs" | grep -q 'tmux' \
+    && pass "PKGS includes tmux" \
+    || bad "PKGS missing tmux"
+grep -q '^ExecStart=/usr/bin/Xorg :0 vt1 -seat seat0 -ac -noreset -novtswitch$' "$INSTALL" \
+    && pass "Xorg unit is :0 vt1 -seat seat0" \
+    || bad "Xorg ExecStart is not :0 vt1 -seat seat0"
+if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$INSTALL"; then
+    bad "install script still starts Xorg on vt7"
 else
-    pass "install script does not start Xorg on vt1"
+    pass "install script does not start Xorg on vt7"
 fi
 if grep -Eq '^Conflicts=getty@tty1' "$INSTALL"; then
     bad "install script still Conflicts=getty@tty1"
@@ -61,7 +64,7 @@ else
     pass "install script does not Conflicts=getty@tty1"
 fi
 if grep -q 'systemctl mask getty@tty1' "$INSTALL"; then
-    pass "install remasks getty@tty1 (HDMI is pinned SSH banner, not login)"
+    pass "install remasks getty@tty1 (HDMI is not a login; MOTD is tmux)"
 else
     bad "install script does not remask getty@tty1"
 fi
@@ -102,6 +105,8 @@ plant() {
              "$t/etc/X11/xorg.conf.d" \
              "$t/etc/udev/rules.d" \
              "$t/etc/NetworkManager/dispatcher.d" \
+             "$t/etc/update-motd.d" \
+             "$t/etc/profile.d" \
              "$t/usr/lib/systemd/system" \
              "$t/usr/lib/xorg/modules/input" \
              "$t/usr/local/sbin" \
@@ -110,7 +115,7 @@ plant() {
     : > "$t/usr/lib/xorg/modules/input/libinput_drv.so"
     : > "$t/usr/bin/Xorg"
     ln -sfn /usr/lib/systemd/system/graphical.target "$t/etc/systemd/system/default.target"
-    # HDMI is a write-only pinned SSH banner — getty@tty1 stays masked.
+    # HDMI getty stays masked. SSH MOTD is tmux. Xorg :0 is vt1.
     ln -sfn /dev/null "$t/etc/systemd/system/getty@tty1.service"
     ln -sfn /dev/null "$t/etc/systemd/system/autovt@tty1.service"
     ln -sfn /usr/lib/systemd/system/serial-getty@.service \
@@ -131,7 +136,7 @@ After=systemd-user-sessions.service systemd-udevd.service
 Before=tesla-linux-desktop.service
 
 [Service]
-ExecStart=/usr/bin/Xorg :0 vt7 -seat seat0 -ac -noreset -novtswitch
+ExecStart=/usr/bin/Xorg :0 vt1 -seat seat0 -ac -noreset -novtswitch
 
 [Install]
 WantedBy=graphical.target
@@ -161,7 +166,7 @@ EOF
     cat > "$t/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf" <<'EOF'
 [Login]
 NAutoVTs=0
-ReserveVT=1
+ReserveVT=0
 EOF
     cat > "$t/etc/systemd/system/serial-getty@.service.d/tl-no-binds-to-dev.conf" <<'EOF'
 [Unit]
@@ -172,6 +177,7 @@ Section "ServerFlags"
     Option "AllowEmptyInitialConfiguration" "true"
     Option "AutoAddDevices" "true"
     Option "AutoEnableDevices" "true"
+    Option "DontVTSwitch" "true"
 EndSection
 Section "Screen"
     Identifier "VirtualScreen"
@@ -217,6 +223,14 @@ EOF
     cp "$HERE/tesla-linux-hdmi-banner.service" "$t/etc/systemd/system/tesla-linux-hdmi-banner.service"
     ln -sfn /etc/systemd/system/tesla-linux-hdmi-banner.service \
         "$t/etc/systemd/system/multi-user.target.wants/tesla-linux-hdmi-banner.service"
+    cat > "$t/etc/update-motd.d/99-tesla-linux" <<'EOF'
+#!/bin/sh
+/usr/local/sbin/tesla-linux-hdmi-banner once
+EOF
+    chmod +x "$t/etc/update-motd.d/99-tesla-linux"
+    cat > "$t/etc/profile.d/99-tesla-linux-tmux.sh" <<'EOF'
+exec tmux -S /run/tesla-linux/tmux.sock attach -t tl
+EOF
     cat > "$t/etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan" <<'EOF'
 #!/bin/sh
 /usr/local/sbin/tesla-linux-wlan maybe-ap
@@ -228,10 +242,10 @@ plant "$TREE"
 expect_ok "verify-kbm good tree" "$INSTALL" --verify-kbm "$TREE"
 expect_ok "verify-autologin good tree" "$INSTALL" --verify-autologin "$TREE"
 
-# Negative: X back on vt1
-sed -i 's/:0 vt7 /:0 vt1 /' "$TREE/etc/systemd/system/tesla-linux-xorg.service"
-expect_fail "Xorg on vt1 fails gate" "vt1" "$INSTALL" --verify-kbm "$TREE"
+# Negative: X back on vt7 (HID would stay on the kernel console)
 sed -i 's/:0 vt1 /:0 vt7 /' "$TREE/etc/systemd/system/tesla-linux-xorg.service"
+expect_fail "Xorg on vt7 fails gate" "vt1" "$INSTALL" --verify-kbm "$TREE"
+sed -i 's/:0 vt7 /:0 vt1 /' "$TREE/etc/systemd/system/tesla-linux-xorg.service"
 
 # Negative: Conflicts=getty
 sed -i '/Before=tesla-linux-desktop.service/a Conflicts=getty@tty1.service' \
@@ -246,7 +260,7 @@ expect_fail "ExecStartPost hdmi-clone fails gate" "hdmi-clone" "$INSTALL" --veri
 sed -i '/^ExecStartPost=\/usr\/local\/sbin\/tesla-linux-hdmi-clone$/d' \
     "$TREE/etc/systemd/system/tesla-linux-xorg.service"
 
-# Negative: getty unmasked (login would bury the pinned SSH banner)
+# Negative: getty unmasked (login would steal USB KBM)
 rm -f "$TREE/etc/systemd/system/getty@tty1.service"
 ln -sfn /usr/lib/systemd/system/getty@.service \
     "$TREE/etc/systemd/system/getty.target.wants/getty@tty1.service"

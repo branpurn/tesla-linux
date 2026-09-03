@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# Tesla Linux — pinned SSH banner on the HDMI TTY (tty1).
+# Tesla Linux — "manage from SSH" MOTD in a tmux pane (not HDMI tty1).
 #
-# Write-only overlay. HDMI is not a login. getty@tty1 stays masked so a
-# login prompt cannot bury the pin. StandardInput=null / no PAMName.
-# Xorg :0 vt7 + libinput GrabDevice stay Backend's (do not rewrite here).
+# Opening the HDMI console TTY for a write-only overlay kept that VT
+# foreground and stole USB KBM from XFCE :0. The sentence lives in tmux
+# (MOTD pane + SSH motd). HDMI getty stays masked. Xorg :0 owns vt1 + HID.
 #
 # Sentence: to control the baremetal host, SSH to <wlan> or 10.42.1.1 as teslalinux
 # Live WLAN IPv4 = station address, or 10.42.0.1 in AP mode. Never all-zeros,
 # never a placeholder token. Ethernet factory is 10.42.1.1. Username teslalinux.
-#
-# Pin: redraw at VT home (not lost in scrollback). Refresh when the IPv4 changes.
 set -euo pipefail
 
 AP_ENV="${AP_ENV:-/etc/tesla-linux/ap.env}"
@@ -20,8 +18,10 @@ AP_ADDR="${AP_ADDR:-10.42.0.1}"
 ETH_ADDR="${ETH_ADDR:-10.42.1.1}"
 TL_USER="${TL_USER:-teslalinux}"
 HOSTAPD_PID="${HOSTAPD_PID:-/run/tesla-linux-hostapd.pid}"
-HDMI_TTY="${HDMI_TTY:-/dev/tty1}"
 BANNER_FILE="${BANNER_FILE:-/run/tesla-linux/hdmi-banner}"
+TMUX_SOCK="${TMUX_SOCK:-/run/tesla-linux/tmux.sock}"
+TMUX_SESSION="${TMUX_SESSION:-tl}"
+SELF="${TL_BANNER_SELF:-/usr/local/sbin/tesla-linux-hdmi-banner}"
 
 is_bindable_ipv4() {
     local ip="$1"
@@ -106,33 +106,68 @@ banner_text() {
         "$ETH_ADDR" "$TL_USER"
 }
 
-# Pin at the top of the HDMI TTY. Write-only, no controlling tty, no login.
-pin_banner() {
+write_motd_file() {
     local msg="$1"
-    mkdir -p "$(dirname "$BANNER_FILE")"
+    local dir
+    dir="$(dirname "$BANNER_FILE")"
+    [ -d "$dir" ] || return 0
+    [ -w "$dir" ] || return 0
     printf '%s\n' "$msg" > "$BANNER_FILE"
-    [ -c "$HDMI_TTY" ] || return 0
-    # Open write-only; do not become a session leader on this TTY (HID stays on :0).
-    if ! { true >>"$HDMI_TTY"; } 2>/dev/null; then
+}
+
+tmux_bin() {
+    command -v tmux >/dev/null 2>&1 || return 1
+    tmux -S "$TMUX_SOCK" "$@"
+}
+
+ensure_tmux() {
+    mkdir -p "$(dirname "$TMUX_SOCK")"
+    command -v tmux >/dev/null 2>&1 || return 0
+    if tmux_bin has-session -t "$TMUX_SESSION" 2>/dev/null; then
+        chmod 770 "$(dirname "$TMUX_SOCK")" 2>/dev/null || true
+        chmod 660 "$TMUX_SOCK" 2>/dev/null || true
         return 0
     fi
-    {
-        printf '\033[?25l\033[H\033[J%s\n' "$msg"
-    } >"$HDMI_TTY" 2>/dev/null || true
+    # Pane 0: MOTD (read-only loop). Pane 1: operator shell. Focus the shell.
+    tmux_bin new-session -d -s "$TMUX_SESSION" -n ssh \
+        "$SELF pane" || return 0
+    tmux_bin split-window -v -p 80 -t "${TMUX_SESSION}:ssh" \
+        "exec bash -l" || true
+    tmux_bin select-pane -t "${TMUX_SESSION}:ssh.1" || true
+    tmux_bin set-option -t "$TMUX_SESSION" mouse off || true
+    tmux_bin set-option -t "$TMUX_SESSION" status-left ' Tesla Linux ' || true
+    chmod 770 "$(dirname "$TMUX_SOCK")" 2>/dev/null || true
+    chmod 660 "$TMUX_SOCK" 2>/dev/null || true
 }
 
 cmd_once() {
-    pin_banner "$(banner_text)"
+    local msg
+    msg="$(banner_text)"
+    write_motd_file "$msg"
+    printf '%s\n' "$msg"
+    # motd/dispatcher run as root — do not spawn a root tmux (HID/SSH attach stay teslalinux).
+    if [ "$(id -un 2>/dev/null)" = "$TL_USER" ]; then
+        ensure_tmux || true
+    fi
+}
+
+# MOTD pane: redraw the sentence. Do not attach this pane to the HDMI TTY.
+cmd_pane() {
+    while true; do
+        printf '\033[H\033[J'
+        banner_text
+        printf '\n(MOTD pane — USB keyboard/mouse drive XFCE :0; shell is the other pane)\n'
+        sleep 2 || true
+    done
 }
 
 cmd_daemon() {
-    local now
     trap ':' USR1 HUP
+    mkdir -p "$(dirname "$BANNER_FILE")" "$(dirname "$TMUX_SOCK")"
+    ensure_tmux || true
     while true; do
-        now="$(banner_text)"
-        # Redraw every pass so kernel printk / scrollback cannot bury the pin.
-        # Sleep is interrupted by USR1 when NetworkManager/wlan IPv4 changes.
-        pin_banner "$now"
+        write_motd_file "$(banner_text)"
+        ensure_tmux || true
         sleep 2 || true
     done
 }
@@ -145,6 +180,8 @@ cmd_selftest() {
     is_bindable_ipv4 169.254.1.1 && { echo "FAIL: link-local bindable"; fail=1; }
     is_bindable_ipv4 10.42.1.1 || { echo "FAIL: eth factory not bindable"; fail=1; }
     is_bindable_ipv4 10.42.0.1 || { echo "FAIL: AP addr not bindable"; fail=1; }
+
+    grep -q 'tmux' "$0" || { echo "FAIL: script is not tmux MOTD"; fail=1; }
 
     # AP mode: hostapd up → 10.42.0.1 even if the wifi iface is empty.
     hostapd_running() { return 0; }
@@ -204,10 +241,11 @@ cmd_selftest() {
 
 usage() {
     cat <<EOF
-usage: tesla-linux-hdmi-banner <once|daemon|selftest>
-  once      write the pinned HDMI SSH banner now
-  daemon    redraw / refresh when the WLAN or ethernet IPv4 changes
-  selftest  sentence + placeholder checks (no hardware)
+usage: tesla-linux-hdmi-banner <once|daemon|pane|selftest>
+  once      print the MOTD sentence; refresh the tmux session if present
+  daemon    keep a tmux session (MOTD pane + shell pane)
+  pane      MOTD redraw loop (tmux pane 0)
+  selftest  sentence + tmux-not-tty1 checks (no hardware)
 EOF
 }
 
@@ -215,6 +253,7 @@ main() {
     case "${1:-}" in
         once) cmd_once ;;
         daemon) cmd_daemon ;;
+        pane) cmd_pane ;;
         selftest) cmd_selftest ;;
         -h|--help|help|'') usage ;;
         *) usage >&2; exit 2 ;;
