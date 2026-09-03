@@ -323,7 +323,9 @@ grep -q 'PrimaryGPU".*"true"' "$MNT/etc/X11/xorg.conf.d/10-tesla-linux-display.c
   || die "vc4 is not the primary Xorg GPU"
 grep -q 'Modeline[[:space:]]*"1088x832"' "$MNT/etc/X11/xorg.conf.d/10-tesla-linux-display.conf" \
   || die "HDMI is not hard-coded to 1088x832"
-grep -q 'video=HDMI-A-1:1088x832M@60D' "$MNT/boot/firmware/cmdline.txt" \
+CMDLINE="$MNT/boot/firmware/current/cmdline.txt"
+[ -f "$CMDLINE" ] || CMDLINE="$MNT/boot/firmware/cmdline.txt"
+grep -q 'video=HDMI-A-1:1088x832M@60D' "$CMDLINE" \
   || die "kernel HDMI0 mode is not hard-coded to 1088x832"
 if grep -q 'GrabDevice' "$MNT/etc/X11/xorg.conf.d/20-tesla-linux-input.conf"; then
   die "Xorg input still uses GrabDevice"
