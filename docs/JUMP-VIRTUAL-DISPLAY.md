@@ -33,7 +33,7 @@ The unified path removes:
 
 | Path | Role |
 |---|---|
-| `/boot/firmware/cmdline.txt` | Forces KMS HDMI0 (`HDMI-A-1`) to **1088x832** |
+| `/boot/firmware/current/cmdline.txt` | Ubuntu 26.04 boot cmdline; forces KMS HDMI0 (`HDMI-A-1`) to **1088x832** |
 | `/etc/X11/xorg.conf.d/10-tesla-linux-display.conf` | Selects vc4 as the primary `modesetting` GPU; HDMI-1 preferred mode **1088x832** |
 | `/etc/X11/xorg.conf.d/20-tesla-linux-input.conf` | Keyboard, pointer, and touchpad through `libinput` |
 | `tesla-linux-xorg.service` | `Xorg :0 vt1 -keeptty`; owns `/dev/tty1` and switches to the graphical VT |

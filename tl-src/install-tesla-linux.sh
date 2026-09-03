@@ -191,9 +191,18 @@ EOF
 # Force Pi HDMI0 (KMS HDMI-A-1 / Xrandr HDMI-1) to the Tesla canvas geometry.
 # M asks KMS to generate CVT timings; D forces the connector on.
 ensure_hdmi_mode() {
-    local cmdline=/boot/firmware/cmdline.txt line
-    [ -f "$cmdline" ] || {
-        echo "ERROR: missing $cmdline; cannot force HDMI0 to 1088x832" >&2
+    local cmdline="" candidate line
+    for candidate in \
+        /boot/firmware/current/cmdline.txt \
+        /boot/firmware/cmdline.txt \
+        /boot/cmdline.txt; do
+        if [ -f "$candidate" ]; then
+            cmdline="$candidate"
+            break
+        fi
+    done
+    [ -n "$cmdline" ] || {
+        echo "ERROR: missing Pi cmdline.txt; cannot force HDMI0 to 1088x832" >&2
         exit 1
     }
     line="$(tr '\n' ' ' < "$cmdline")"
