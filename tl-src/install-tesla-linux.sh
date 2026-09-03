@@ -188,8 +188,8 @@ EOF
         || { echo "ERROR: logind ReserveVT=0 did not stick" >&2; exit 1; }
 }
 
-# Force Pi HDMI0 (KMS HDMI-A-1 / Xrandr HDMI-1) to the Tesla canvas geometry.
-# M asks KMS to generate CVT timings; D forces the connector on.
+# Give Pi HDMI0 a standard timing monitors accept. Xrandr scales the logical
+# 1088x832 Tesla framebuffer onto this 1920x1080@60 physical signal.
 ensure_hdmi_mode() {
     local cmdline="" candidate line
     for candidate in \
@@ -202,14 +202,14 @@ ensure_hdmi_mode() {
         fi
     done
     [ -n "$cmdline" ] || {
-        echo "ERROR: missing Pi cmdline.txt; cannot force HDMI0 to 1088x832" >&2
+        echo "ERROR: missing Pi cmdline.txt; cannot force HDMI0 to 1080p60" >&2
         exit 1
     }
     line="$(tr '\n' ' ' < "$cmdline")"
     line="$(printf '%s\n' "$line" \
         | sed -E 's/(^| )video=HDMI-A-1:[^ ]+//g; s/[[:space:]]+/ /g; s/^ //; s/ $//')"
-    printf '%s video=HDMI-A-1:1088x832M@60D\n' "$line" > "$cmdline"
-    grep -q 'video=HDMI-A-1:1088x832M@60D' "$cmdline" \
+    printf '%s video=HDMI-A-1:1920x1080@60D\n' "$line" > "$cmdline"
+    grep -q 'video=HDMI-A-1:1920x1080@60D' "$cmdline" \
         || { echo "ERROR: HDMI0 kernel mode did not stick" >&2; exit 1; }
 }
 
@@ -295,8 +295,8 @@ verify_kbm_on_display0() {
         || { echo "ERROR: HDMI display does not select the vc4 DRM device" >&2; exit 1; }
     grep -q 'PrimaryGPU".*"true"' "$display" \
         || { echo "ERROR: vc4 is not the primary Xorg GPU" >&2; exit 1; }
-    grep -q 'Modeline[[:space:]]*"1088x832"' "$display" \
-        || { echo "ERROR: HDMI display is not hard-coded to 1088x832" >&2; exit 1; }
+    grep -q 'PreferredMode".*"1920x1080"' "$display" \
+        || { echo "ERROR: HDMI display is not standard 1920x1080" >&2; exit 1; }
     if grep -q 'Driver[[:space:]]*"dummy"' "$display" \
        || [ -e "$r/etc/X11/xorg.conf.d/10-virtual.conf" ]; then
         echo "ERROR: dummy Xorg screen still installed (HDMI and web would differ)" >&2
@@ -372,8 +372,8 @@ verify_autologin_hdmi() {
         || { echo "ERROR: tesla-linux-desktop is not DISPLAY=:0" >&2; exit 1; }
     grep -q 'xfce4-session' "$desk" \
         || { echo "ERROR: tesla-linux-desktop is not xfce4-session" >&2; exit 1; }
-    grep -q 'xrandr --output HDMI-1 --mode 1088x832 --primary' "$desk" \
-        || { echo "ERROR: tesla-linux-desktop does not enforce HDMI-1 at 1088x832" >&2; exit 1; }
+    grep -q 'xrandr --fb 1088x832 --output HDMI-1 --mode 1920x1080 --scale-from 1088x832 --primary' "$desk" \
+        || { echo "ERROR: desktop does not scale logical 1088x832 to HDMI 1080p" >&2; exit 1; }
     if grep -Eq '^(BindsTo|PartOf)=' "$desk"; then
         echo "ERROR: tesla-linux-desktop must not BindsTo/PartOf xorg or display" >&2
         exit 1
@@ -440,8 +440,8 @@ verify_autologin_hdmi() {
         || { echo "ERROR: tesla-linux-wlan missing eth_static_bound" >&2; exit 1; }
 
     [ -f "$display" ] || { echo "ERROR: missing 10-tesla-linux-display.conf" >&2; exit 1; }
-    grep -q '1088x832' "$display" \
-        || { echo "ERROR: HDMI screen is not 1088x832" >&2; exit 1; }
+    grep -q 'PreferredMode".*"1920x1080"' "$display" \
+        || { echo "ERROR: HDMI physical mode is not 1920x1080" >&2; exit 1; }
     grep -q 'Driver[[:space:]]*"modesetting"' "$display" \
         || { echo "ERROR: HDMI screen is not vc4/modesetting" >&2; exit 1; }
     grep -q 'PrimaryGPU".*"true"' "$display" \
@@ -694,9 +694,8 @@ if [ -f /etc/tesla-linux/tesla-linux.env ]; then
     grep -q '^TA_HEIGHT=' /etc/tesla-linux/tesla-linux.env || echo 'TA_HEIGHT=832' >> /etc/tesla-linux/tesla-linux.env
 fi
 
-# One display: vc4 HDMI is Xorg Screen 0 and is captured by the web backend.
-# The physical screen and Tesla browser therefore show the same XFCE session.
-# Resolution is the Tesla-browser geometry, hard-coded to 1088x832.
+# One display: vc4 HDMI is the Xorg :0 screen captured by the web backend.
+# HDMI uses standard 1080p60 timing; RandR scales the logical 1088x832 desktop.
 install -d /etc/X11/xorg.conf.d
 rm -f /etc/X11/xorg.conf.d/10-virtual.conf /etc/X11/xorg.conf.d/99-vc4.conf
 cat > /etc/X11/xorg.conf.d/10-tesla-linux-display.conf <<'EOF'
@@ -717,8 +716,7 @@ Section "Monitor"
     Identifier  "TeslaLinuxHDMI"
     HorizSync   28.0-80.0
     VertRefresh 48.0-75.0
-    Modeline "1088x832" 73.75 1088 1144 1256 1424 832 835 845 864 -hsync +vsync
-    Option "PreferredMode" "1088x832"
+    Option "PreferredMode" "1920x1080"
 EndSection
 
 EOF
@@ -821,7 +819,7 @@ PAMName=login
 EnvironmentFile=/etc/tesla-linux/tesla-linux.env
 Environment=DISPLAY=:0
 ExecStartPre=/bin/sh -c 'for i in \$(seq 1 30); do DISPLAY=:0 xdpyinfo >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
-ExecStartPre=/bin/sh -c 'DISPLAY=:0 xrandr --output HDMI-1 --mode 1088x832 --primary'
+ExecStartPre=/bin/sh -c 'DISPLAY=:0 xrandr --fb 1088x832 --output HDMI-1 --mode 1920x1080 --scale-from 1088x832 --primary'
 ExecStart=/usr/bin/dbus-launch --exit-with-session /usr/bin/xfce4-session
 Restart=always
 RestartSec=3

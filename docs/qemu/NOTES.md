@@ -39,7 +39,7 @@ From FAT `current/`:
 - Factory user teslalinux / teslalinux (`chpasswd`); `ubuntu` userdel'd. cloud-init purged.
 - SSH: `ssh-keygen -A` in bake; `PasswordAuthentication yes`. `ssh teslalinux@guest` is the qemu path.
 - Serial getty enabled on ttyAMA0 / ttyS0 / ttyAMA1. Drop-in clears `BindsTo=dev-%i.device`. cmdline keeps `console=serial0,115200 console=tty1`.
-- HDMI / qemu VNC and web capture show the same vc4/modesetting XFCE `:0` (`Xorg vt1`) at 1088x832. USB KBM uses normal seat0/libinput discovery. Serial-getty remains the typed recovery path.
+- HDMI / qemu VNC and web capture show the same vc4/modesetting XFCE `:0` (`Xorg vt1`). Logical/web geometry is 1088x832; HDMI uses standard 1920x1080@60 timing with RandR scaling. USB KBM uses normal seat0/libinput discovery. Serial-getty remains the typed recovery path.
 
 ## QA hwsim injection (work image only)
 Work copy rootfs has `qa-hwsim.service` (WantedBy=multi-user) that only runs

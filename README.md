@@ -52,7 +52,8 @@ WIFI_PSK=yourpsk
 
 ## Primary Tools:
 
-- HDMI and Tesla-browser `desktop.html` show the same hard-coded 1088x832 XFCE session (`Xorg :0`, vt1; KMS `HDMI-A-1`)
+- HDMI and Tesla-browser `desktop.html` show the same XFCE session (`Xorg :0`, vt1)
+- HDMI uses standard 1920x1080@60 timing; the logical desktop/web/touch geometry remains 1088x832 and is scaled to HDMI
 - USB keyboard/mouse drive that same visible and broadcast XFCE session
 - `index.html` to pick/save a station WLAN from the TeslaLinux AP
 - `hostapd` AP **TeslaLinux** / **teslalinux** at **10.42.0.1** when no saved station associates
@@ -65,7 +66,7 @@ WIFI_PSK=yourpsk
 - Rapidly image a single-purpose Pi for Tesla-browser access to an XFCE desktop
 - Ubuntu Server 26.04 + XFCE on Raspberry Pi 4 (8 GB only) for a KISS path off tesla-android-kiss
 - One vc4/modesetting Xorg screen: HDMI shows exactly the XFCE desktop captured for the web console
-- Hard-coded 1088x832 geometry matches the Tesla-browser canvas and touch mapping
+- Logical 1088x832 geometry matches the Tesla-browser canvas and touch mapping; HDMI scales it to monitor-compatible 1080p60
 - Standard seat0/libinput discovery lets a directly connected keyboard and mouse drive that session
 - Saved station WLAN when possible; TeslaLinux AP only as fallback (K.I.S.S.)
 - Same image flashes SD or USB (`root=LABEL=writable`)
