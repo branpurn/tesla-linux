@@ -50,21 +50,59 @@ if [ ! -f "$BASE_IMG" ]; then
 fi
 cp --reflink=auto "$BASE_IMG" "$WORK/$IMGNAME"
 
+# Docker Desktop / udev-less hosts: losetup -P may not emit ${LOOP}pN.
+# Prefer ${LOOP}pN; fall back to kpartx /dev/mapper/loopNpN.
+loop_part() {
+  local loop="$1" n="$2" base
+  base="$(basename "$loop")"
+  if [ -b "${loop}p${n}" ]; then
+    printf '%s\n' "${loop}p${n}"
+    return 0
+  fi
+  if [ -b "/dev/mapper/${base}p${n}" ]; then
+    printf '%s\n' "/dev/mapper/${base}p${n}"
+    return 0
+  fi
+  return 1
+}
+
+ensure_loop_parts() {
+  local loop="$1" i
+  for i in $(seq 1 20); do
+    partx -u "$loop" 2>/dev/null || true
+    kpartx -u "$loop" 2>/dev/null || true
+    kpartx -av "$loop" 2>/dev/null || true
+    if loop_part "$loop" 1 >/dev/null && loop_part "$loop" 2 >/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
 # --------------------------------------------------------------- grow fs -----
 log "growing image by ${GROW_GB}G"
 truncate -s "+${GROW_GB}G" "$WORK/$IMGNAME"
 LOOP=$(losetup --show -fP "$WORK/$IMGNAME")
 parted -s "$LOOP" resizepart 2 100%
-e2fsck -fy "${LOOP}p2" >/dev/null 2>&1 || true
-resize2fs "${LOOP}p2" >/dev/null
+ensure_loop_parts "$LOOP" || die "loop partitions missing after losetup ($LOOP)"
+ROOTDEV="$(loop_part "$LOOP" 2)"
+BOOTDEV="$(loop_part "$LOOP" 1)"
+e2fsck -fy "$ROOTDEV" >/dev/null 2>&1 || true
+resize2fs "$ROOTDEV" >/dev/null
 
 # ----------------------------------------------------------------- mount -----
 log "mounting"
-mount "${LOOP}p2" "$MNT"
+mount "$ROOTDEV" "$MNT"
 mkdir -p "$MNT/boot/firmware"
-mount "${LOOP}p1" "$MNT/boot/firmware"
+mount "$BOOTDEV" "$MNT/boot/firmware"
 for m in dev dev/pts proc sys run; do mount --bind "/$m" "$MNT/$m"; done
 cp /etc/resolv.conf "$MNT/etc/resolv.conf"
+# qemu-user chroot: binfmt F-flag uses the host binary; copy anyway for non-F.
+if [ -x /usr/bin/qemu-aarch64-static ]; then
+  mkdir -p "$MNT/usr/bin"
+  cp -a /usr/bin/qemu-aarch64-static "$MNT/usr/bin/qemu-aarch64-static"
+fi
 
 # --------------------------------------------------------------- payload -----
 log "staging payload"
@@ -216,6 +254,8 @@ CHROOT
 
 chmod +x "$MNT/tmp/provision.sh"
 chroot "$MNT" /bin/bash /tmp/provision.sh
+# Do not ship the host qemu-user binary on the Pi image.
+rm -f "$MNT/usr/bin/qemu-aarch64-static"
 
 # Image-on-disk gates (not paper). Fail the bake if any of these are missing.
 log "verifying teslalinux / graphical.target / ssh / serial-getty on image"
