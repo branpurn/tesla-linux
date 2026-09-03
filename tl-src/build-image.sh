@@ -14,7 +14,7 @@ UBUNTU_REL="${UBUNTU_REL:-26.04}"
 BASE_URL="https://cdimage.ubuntu.com/releases/${UBUNTU_REL}/release"
 BASE_IMG="ubuntu-${UBUNTU_REL}-preinstalled-server-arm64+raspi.img"
 WORK="${WORK:-$HOME/tl-build}"
-SRC="${SRC:-$HOME/tl-src}"          # install-tesla-linux.sh + backends + html
+SRC="${SRC:-$(cd "$(dirname "$0")" && pwd)}"          # install-tesla-linux.sh + backends + html
 OUT="${OUT:-$WORK/out}"
 STAMP="$(date +%Y%m%d)"
 IMGNAME="tesla-linux-${STAMP}-pi.img"
@@ -252,13 +252,13 @@ if [ -f "$SRC/authorized_keys" ]; then
   [ -f "$MNT/home/teslalinux/.ssh/authorized_keys" ] || die "teslalinux authorized_keys missing"
 fi
 
-# Autologin XFCE on :0; USB KBM on that session. HDMI vt1 is the pinned SSH banner.
-log "verifying autologin XFCE / KBM-on-:0 / HDMI SSH banner"
+# Autologin XFCE on :0; USB KBM on that session. SSH MOTD is tmux (not HDMI tty1).
+log "verifying autologin XFCE / KBM-on-:0 / tmux SSH MOTD"
 "$SRC/install-tesla-linux.sh" --verify-autologin "$MNT"
-grep -q '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
-  || die "Xorg is not on vt7"
-if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
-  die "Xorg still occupies HDMI vt1"
+grep -q '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
+  || die "Xorg is not on vt1"
+if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
+  die "Xorg still on vt7 (USB KBM would stay on the kernel console)"
 fi
 [ "$(readlink "$MNT/etc/systemd/system/getty@tty1.service")" = /dev/null ] \
   || die "getty@tty1 is unmasked (login would bury the SSH banner)"
@@ -277,8 +277,8 @@ grep -q '^Environment=DISPLAY=:0$' "$MNT/etc/systemd/system/tesla-linux-desktop.
   || die "desktop is not DISPLAY=:0"
 grep -q 'xfce4-session' "$MNT/etc/systemd/system/tesla-linux-desktop.service" \
   || die "desktop is not xfce4-session"
-grep -q '^ReserveVT=1$' "$MNT/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf" \
-  || die "logind ReserveVT is not 1"
+grep -q '^ReserveVT=0$' "$MNT/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf" \
+  || die "logind ReserveVT is not 0"
 grep -q 'xserver-xorg-input-libinput' <<<"$("$SRC/install-tesla-linux.sh" --print-packages)" \
   || die "PKGS missing xserver-xorg-input-libinput"
 grep -q 'GrabDevice' "$MNT/etc/X11/xorg.conf.d/20-tesla-linux-input.conf" \
@@ -306,18 +306,26 @@ if grep -Eq 'systemctl[[:space:]]+(restart|start)[[:space:]]+nginx' \
   die "firstboot still systemctl restart/start nginx"
 fi
 
-# Pinned HDMI SSH banner. Fail if missing or does not name 10.42.1.1 / teslalinux.
-log "verifying HDMI SSH banner"
+# tmux SSH MOTD. Fail if missing or does not name 10.42.1.1 / teslalinux.
+log "verifying tmux SSH MOTD"
 [ -x "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" ] \
   || die "tesla-linux-hdmi-banner missing or not executable"
+grep -q 'tmux' "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" \
+  || die "hdmi-banner is not tmux MOTD"
 grep -q '10.42.1.1' "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" \
   || die "hdmi-banner does not mention 10.42.1.1"
 grep -q 'teslalinux' "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" \
   || die "hdmi-banner does not mention teslalinux"
 [ -f "$MNT/etc/systemd/system/tesla-linux-hdmi-banner.service" ] \
   || die "tesla-linux-hdmi-banner.service missing"
+grep -q '^User=teslalinux$' "$MNT/etc/systemd/system/tesla-linux-hdmi-banner.service" \
+  || die "hdmi-banner unit is not User=teslalinux"
 [ -L "$MNT/etc/systemd/system/multi-user.target.wants/tesla-linux-hdmi-banner.service" ] \
   || die "tesla-linux-hdmi-banner not WantedBy multi-user.target"
+[ -f "$MNT/etc/update-motd.d/99-tesla-linux" ] \
+  || die "SSH motd missing"
+[ -f "$MNT/etc/profile.d/99-tesla-linux-tmux.sh" ] \
+  || die "SSH tmux attach profile.d missing"
 if grep -Eiq '^PAMName=|^TTYPath=' "$MNT/etc/systemd/system/tesla-linux-hdmi-banner.service"; then
   die "hdmi-banner unit must not take a TTY login seat"
 fi
