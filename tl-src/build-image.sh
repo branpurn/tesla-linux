@@ -110,15 +110,12 @@ mkdir -p "$MNT/tmp/tl-src"
 cp "$SRC"/install-tesla-linux.sh "$SRC"/ta_*.py "$SRC"/*.html \
    "$SRC"/tesla-linux-wlan.sh "$SRC"/tesla-linux-wlan.service \
    "$SRC"/tesla-linux-wlan-api.service "$SRC"/ap.env \
-   "$SRC"/tesla-linux-hdmi-banner "$SRC"/tesla-linux-hdmi-banner.service \
    "$MNT/tmp/tl-src/" 2>/dev/null || true
 # Stage authorized_keys for teslalinux (never print the key). Not ubuntu — ubuntu is DOA.
 if [ -f "$SRC/authorized_keys" ]; then
   cp "$SRC/authorized_keys" "$MNT/tmp/tl-src/authorized_keys"
 fi
-chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh" \
-         "$MNT/tmp/tl-src/tesla-linux-hdmi-banner"
-# HDMI clone is DESCPE — do not stage or install tesla-linux-hdmi-clone.
+chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh"
 
 # ---------------------------------------------------------------- chroot -----
 log "provisioning inside chroot (qemu-aarch64)"
@@ -165,7 +162,7 @@ id ubuntu >/dev/null 2>&1 && { echo "ERROR: ubuntu user still present" >&2; exit
 rl="$(readlink /etc/systemd/system/default.target)"
 case "$rl" in */graphical.target|graphical.target) ;; *) echo "ERROR: default.target is $rl" >&2; exit 1;; esac
 ls /etc/ssh/ssh_host_*_key >/dev/null
-# cmdline stays console=serial0,115200 console=tty1 — do not rewrite it.
+# Installer preserves console arguments and appends the fixed HDMI-A-1 mode.
 
 # identity — teslalinux.local via existing avahi-daemon (do not add a second mDNS stack)
 echo teslalinux > /etc/hostname
@@ -292,26 +289,23 @@ if [ -f "$SRC/authorized_keys" ]; then
   [ -f "$MNT/home/teslalinux/.ssh/authorized_keys" ] || die "teslalinux authorized_keys missing"
 fi
 
-# Autologin XFCE on :0; USB KBM on that session. SSH MOTD is tmux (not HDMI tty1).
-log "verifying autologin XFCE / KBM-on-:0 / tmux SSH MOTD"
+# HDMI, web capture, and USB KBM use the same 1088x832 XFCE on Xorg :0.
+log "verifying unified HDMI / web / KBM Xorg :0"
 "$SRC/install-tesla-linux.sh" --verify-autologin "$MNT"
 grep -q '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
   || die "Xorg is not on vt1"
 if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
-  die "Xorg still on vt7 (USB KBM would stay on the kernel console)"
+  die "Xorg still on vt7 (HDMI would not show XFCE)"
+fi
+if grep -q -- '-novtswitch' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
+  die "Xorg still has -novtswitch"
 fi
 [ "$(readlink "$MNT/etc/systemd/system/getty@tty1.service")" = /dev/null ] \
-  || die "getty@tty1 is unmasked (login would bury the SSH banner)"
+  || die "getty@tty1 is unmasked (login would replace XFCE)"
 [ ! -e "$MNT/etc/systemd/system/getty.target.wants/getty@tty1.service" ] \
   || die "getty@tty1 still in getty.target.wants"
 if grep -Eq '^Conflicts=.*getty@tty1' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
   die "xorg Conflicts=getty@tty1 would take HDMI getty down"
-fi
-if grep -Eq '^ExecStartPost=.*tesla-linux-hdmi-clone' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
-  die "xorg still ExecStartPost tesla-linux-hdmi-clone"
-fi
-if [ -e "$MNT/usr/local/sbin/tesla-linux-hdmi-clone" ]; then
-  die "tesla-linux-hdmi-clone still installed on image"
 fi
 grep -q '^Environment=DISPLAY=:0$' "$MNT/etc/systemd/system/tesla-linux-desktop.service" \
   || die "desktop is not DISPLAY=:0"
@@ -321,8 +315,22 @@ grep -q '^ReserveVT=0$' "$MNT/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf" \
   || die "logind ReserveVT is not 0"
 grep -q 'xserver-xorg-input-libinput' <<<"$("$SRC/install-tesla-linux.sh" --print-packages)" \
   || die "PKGS missing xserver-xorg-input-libinput"
-grep -q 'GrabDevice' "$MNT/etc/X11/xorg.conf.d/20-tesla-linux-input.conf" \
-  || die "Xorg input missing GrabDevice"
+grep -q 'Driver[[:space:]]*"modesetting"' "$MNT/etc/X11/xorg.conf.d/10-tesla-linux-display.conf" \
+  || die "HDMI is not using vc4 modesetting"
+grep -q 'MatchDriver[[:space:]]*"vc4"' "$MNT/etc/X11/xorg.conf.d/10-tesla-linux-display.conf" \
+  || die "Xorg does not select the vc4 DRM device"
+grep -q 'PrimaryGPU".*"true"' "$MNT/etc/X11/xorg.conf.d/10-tesla-linux-display.conf" \
+  || die "vc4 is not the primary Xorg GPU"
+grep -q 'Modeline[[:space:]]*"1088x832"' "$MNT/etc/X11/xorg.conf.d/10-tesla-linux-display.conf" \
+  || die "HDMI is not hard-coded to 1088x832"
+grep -q 'video=HDMI-A-1:1088x832M@60D' "$MNT/boot/firmware/cmdline.txt" \
+  || die "kernel HDMI0 mode is not hard-coded to 1088x832"
+if grep -q 'GrabDevice' "$MNT/etc/X11/xorg.conf.d/20-tesla-linux-input.conf"; then
+  die "Xorg input still uses GrabDevice"
+fi
+if [ -e "$MNT/etc/udev/rules.d/60-tesla-linux-kbm-seat0.rules" ]; then
+  die "custom KBM seat rule still installed"
+fi
 if [ ! -f "$MNT/usr/lib/xorg/modules/input/libinput_drv.so" ] \
    && ! ls "$MNT"/usr/lib/*/xorg/modules/input/libinput_drv.so >/dev/null 2>&1; then
   die "libinput_drv.so missing on image"
@@ -346,34 +354,13 @@ if grep -Eq 'systemctl[[:space:]]+(restart|start)[[:space:]]+nginx' \
   die "firstboot still systemctl restart/start nginx"
 fi
 
-# tmux SSH MOTD. Fail if missing or does not name 10.42.1.1 / teslalinux.
-log "verifying tmux SSH MOTD"
-[ -x "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" ] \
-  || die "tesla-linux-hdmi-banner missing or not executable"
-grep -q 'tmux' "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" \
-  || die "hdmi-banner is not tmux MOTD"
-grep -q '10.42.1.1' "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" \
-  || die "hdmi-banner does not mention 10.42.1.1"
-grep -q 'teslalinux' "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" \
-  || die "hdmi-banner does not mention teslalinux"
-[ -f "$MNT/etc/systemd/system/tesla-linux-hdmi-banner.service" ] \
-  || die "tesla-linux-hdmi-banner.service missing"
-grep -q '^User=teslalinux$' "$MNT/etc/systemd/system/tesla-linux-hdmi-banner.service" \
-  || die "hdmi-banner unit is not User=teslalinux"
-[ -L "$MNT/etc/systemd/system/multi-user.target.wants/tesla-linux-hdmi-banner.service" ] \
-  || die "tesla-linux-hdmi-banner not WantedBy multi-user.target"
-[ -f "$MNT/etc/update-motd.d/99-tesla-linux" ] \
-  || die "SSH motd missing"
-[ -f "$MNT/etc/profile.d/99-tesla-linux-tmux.sh" ] \
-  || die "SSH tmux attach profile.d missing"
-if grep -Eiq '^PAMName=|^TTYPath=' "$MNT/etc/systemd/system/tesla-linux-hdmi-banner.service"; then
-  die "hdmi-banner unit must not take a TTY login seat"
-fi
-if grep -Eiq '^Before=.*nginx\.service' "$MNT/etc/systemd/system/tesla-linux-hdmi-banner.service"; then
-  die "hdmi-banner still Before=nginx.service"
-fi
-"$MNT/usr/local/sbin/tesla-linux-hdmi-banner" selftest \
-  || die "hdmi-banner selftest failed"
+for stale in \
+  "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" \
+  "$MNT/etc/systemd/system/tesla-linux-hdmi-banner.service" \
+  "$MNT/etc/update-motd.d/99-tesla-linux" \
+  "$MNT/etc/profile.d/99-tesla-linux-tmux.sh"; do
+  [ ! -e "$stale" ] || die "stale tmux/banner path remains: $stale"
+done
 
 # ------------------------------------------------------------------ pack -----
 log "packing"

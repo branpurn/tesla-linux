@@ -13,15 +13,15 @@ START=1
 
 # Canonical package list — single source of truth for both the live box and the
 # image bake. `install-tesla-linux.sh --print-packages` emits it for the chroot.
-# xserver-xorg-input-libinput is required so USB HID attaches to dummy Xorg :0.
+# xserver-xorg-input-libinput is required so USB HID attaches to Xorg :0.
 # python3-evdev is the uinput touch backend, not the Xorg HID driver.
-PKGS="xserver-xorg-core xserver-xorg-video-dummy xserver-xorg-input-libinput \
+PKGS="xserver-xorg-core xserver-xorg-input-libinput \
 xinit x11-utils x11-xserver-utils xinput \
 gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
 python3-gi python3-gst-1.0 python3-websockets python3-evdev \
 xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar dbus-x11 \
 pipewire pipewire-pulse pipewire-audio wireplumber pulseaudio-utils gstreamer1.0-pipewire \
-nginx openssl network-manager hostapd iw dnsmasq rfkill tmux"
+nginx openssl network-manager hostapd iw dnsmasq rfkill"
 
 # Factory console user (documented like AP PSK teslalinux). chpasswd must stick.
 # Fail the bake/install if the password is not written — no `|| true`.
@@ -140,7 +140,7 @@ ensure_serial_console() {
     done
     # Stock serial-getty@.service BindsTo=dev-%i.device. qemu raspi4b often never
     # activates that udev unit → DEPEND-fail, no guest shell. Empty BindsTo= clears it.
-    # Do not After= tesla-linux-wlan. HDMI getty@tty1 is Infra on vt1 (not this unit).
+    # Do not After= tesla-linux-wlan. HDMI is the XFCE Xorg session on vt1.
     cat > /etc/systemd/system/serial-getty@.service.d/tl-no-binds-to-dev.conf <<'EOF'
 # qemu: udev may never activate dev-ttyAMA0.device / dev-ttyS0.device.
 # Stock BindsTo=dev-%i.device then DEPEND-fails the getty. Empty BindsTo= clears it.
@@ -150,10 +150,10 @@ BindsTo=
 EOF
 }
 
-# HDMI getty stays masked so it cannot steal USB KBM. SSH MOTD is tmux, not tty1.
-# Xorg :0 uses vt1 (foreground console) + libinput GrabDevice.
+# HDMI and the web stream are the same Xorg :0 session on vt1.
+# Getty stays masked so it cannot steal USB KBM.
 # Do not Conflicts=getty@tty1 on xorg (getty is already masked).
-ensure_hdmi_getty_vt1() {
+ensure_graphical_vt1() {
     mkdir -p /etc/systemd/system/getty.target.wants /etc/systemd/logind.conf.d
     rm -f /etc/systemd/system/getty.target.wants/getty@tty1.service \
           /etc/systemd/system/getty.target.wants/autovt@tty1.service \
@@ -162,8 +162,8 @@ ensure_hdmi_getty_vt1() {
     ln -sfn /dev/null /etc/systemd/system/autovt@tty1.service
 
     cat > /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf <<'EOF'
-# Do not reserve tty1 for a text overlay — Xorg :0 needs vt1 for USB KBM.
-# MOTD is tmux (SSH). NAutoVTs=0: no extra VTs. getty@tty1 stays masked.
+# Xorg :0 owns tty1 and displays the same 1088x832 desktop captured for the web.
+# NAutoVTs=0: no extra VTs. getty@tty1 stays masked.
 [Login]
 NAutoVTs=0
 ReserveVT=0
@@ -179,13 +179,29 @@ EOF
             ;;
     esac
     if [ -e /etc/systemd/system/getty.target.wants/getty@tty1.service ]; then
-        echo "ERROR: getty@tty1 still in getty.target.wants (login would bury the pin)" >&2
+        echo "ERROR: getty@tty1 still in getty.target.wants (login would replace XFCE)" >&2
         exit 1
     fi
     grep -q '^NAutoVTs=0$' /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf \
         || { echo "ERROR: logind NAutoVTs=0 did not stick" >&2; exit 1; }
     grep -q '^ReserveVT=0$' /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf \
         || { echo "ERROR: logind ReserveVT=0 did not stick" >&2; exit 1; }
+}
+
+# Force Pi HDMI0 (KMS HDMI-A-1 / Xrandr HDMI-1) to the Tesla canvas geometry.
+# M asks KMS to generate CVT timings; D forces the connector on.
+ensure_hdmi_mode() {
+    local cmdline=/boot/firmware/cmdline.txt line
+    [ -f "$cmdline" ] || {
+        echo "ERROR: missing $cmdline; cannot force HDMI0 to 1088x832" >&2
+        exit 1
+    }
+    line="$(tr '\n' ' ' < "$cmdline")"
+    line="$(printf '%s\n' "$line" \
+        | sed -E 's/(^| )video=HDMI-A-1:[^ ]+//g; s/[[:space:]]+/ /g; s/^ //; s/ $//')"
+    printf '%s video=HDMI-A-1:1088x832M@60D\n' "$line" > "$cmdline"
+    grep -q 'video=HDMI-A-1:1088x832M@60D' "$cmdline" \
+        || { echo "ERROR: HDMI0 kernel mode did not stick" >&2; exit 1; }
 }
 
 # libinput_drv.so must exist on a real install (live / chroot / mounted bake).
@@ -205,15 +221,14 @@ libinput_driver_present() {
     return 1
 }
 
-# Fail the bake/install if autologin XFCE / KBM-on-:0 did not stick.
+# Fail the bake/install unless HDMI, web capture, and USB KBM share Xorg :0.
 # Optional prefix ($1) is an image root (host-side check of a mounted bake).
 # No `|| true` — any miss exits 1.
 verify_kbm_on_display0() {
     local r="${1:-}"
     local xorg="$r/etc/systemd/system/tesla-linux-xorg.service"
-    local virt="$r/etc/X11/xorg.conf.d/10-virtual.conf"
+    local display="$r/etc/X11/xorg.conf.d/10-tesla-linux-display.conf"
     local inp="$r/etc/X11/xorg.conf.d/20-tesla-linux-input.conf"
-    local udev="$r/etc/udev/rules.d/60-tesla-linux-kbm-seat0.rules"
     local getty_mask="$r/etc/systemd/system/getty@tty1.service"
     local getty_wants="$r/etc/systemd/system/getty.target.wants/getty@tty1.service"
 
@@ -227,17 +242,23 @@ verify_kbm_on_display0() {
 
     [ -f "$xorg" ] || { echo "ERROR: missing tesla-linux-xorg.service" >&2; exit 1; }
     grep -q '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$xorg" \
-        || { echo "ERROR: tesla-linux-xorg is not Xorg :0 vt1 (USB KBM needs the console VT)" >&2; exit 1; }
+        || { echo "ERROR: tesla-linux-xorg is not Xorg :0 vt1 (HDMI and USB KBM need the console VT)" >&2; exit 1; }
     if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$xorg"; then
-        echo "ERROR: tesla-linux-xorg still on vt7 (HID would stay on the kernel console)" >&2
+        echo "ERROR: tesla-linux-xorg still on vt7 (HDMI would not show XFCE)" >&2
         exit 1
     fi
-    grep -q -- '-seat seat0' "$xorg" \
-        || { echo "ERROR: tesla-linux-xorg missing -seat seat0" >&2; exit 1; }
-    grep -q -- '-novtswitch' "$xorg" \
-        || { echo "ERROR: tesla-linux-xorg missing -novtswitch" >&2; exit 1; }
+    if grep -q -- '-novtswitch' "$xorg"; then
+        echo "ERROR: tesla-linux-xorg still has -novtswitch (HDMI may stay on the kernel VT)" >&2
+        exit 1
+    fi
+    if grep -q -- '-seat ' "$xorg"; then
+        echo "ERROR: tesla-linux-xorg still overrides the standard seat0 input path" >&2
+        exit 1
+    fi
+    grep -q '^TTYPath=/dev/tty1$' "$xorg" \
+        || { echo "ERROR: tesla-linux-xorg does not own /dev/tty1" >&2; exit 1; }
     if grep -Eq '^Conflicts=.*getty@tty1' "$xorg"; then
-        echo "ERROR: tesla-linux-xorg Conflicts=getty@tty1 would take HDMI getty down" >&2
+        echo "ERROR: tesla-linux-xorg must not Conflicts=getty@tty1" >&2
         exit 1
     fi
     if grep -Eq '^ExecStartPost=.*tesla-linux-hdmi-clone' "$xorg"; then
@@ -249,38 +270,49 @@ verify_kbm_on_display0() {
     case "$(readlink "$getty_mask")" in
         /dev/null|dev/null) ;;
         *)
-            echo "ERROR: getty@tty1 is unmasked; HDMI login would bury the SSH banner" >&2
+            echo "ERROR: getty@tty1 is unmasked; HDMI login would replace XFCE" >&2
             exit 1
             ;;
     esac
     if [ -e "$getty_wants" ]; then
-        echo "ERROR: getty@tty1 still in getty.target.wants (login would bury the pin)" >&2
+        echo "ERROR: getty@tty1 still in getty.target.wants (login would replace XFCE)" >&2
         exit 1
     fi
 
-    [ -f "$virt" ] || { echo "ERROR: missing 10-virtual.conf" >&2; exit 1; }
-    grep -q 'AutoAddDevices' "$virt" \
-        || { echo "ERROR: 10-virtual.conf missing AutoAddDevices" >&2; exit 1; }
-    grep -q 'AutoEnableDevices' "$virt" \
-        || { echo "ERROR: 10-virtual.conf missing AutoEnableDevices" >&2; exit 1; }
+    [ -f "$display" ] || { echo "ERROR: missing 10-tesla-linux-display.conf" >&2; exit 1; }
+    grep -q 'Driver[[:space:]]*"modesetting"' "$display" \
+        || { echo "ERROR: HDMI display is not using the vc4 modesetting driver" >&2; exit 1; }
+    grep -q 'MatchDriver[[:space:]]*"vc4"' "$display" \
+        || { echo "ERROR: HDMI display does not select the vc4 DRM device" >&2; exit 1; }
+    grep -q 'PrimaryGPU".*"true"' "$display" \
+        || { echo "ERROR: vc4 is not the primary Xorg GPU" >&2; exit 1; }
+    grep -q 'Modeline[[:space:]]*"1088x832"' "$display" \
+        || { echo "ERROR: HDMI display is not hard-coded to 1088x832" >&2; exit 1; }
+    if grep -q 'Driver[[:space:]]*"dummy"' "$display" \
+       || [ -e "$r/etc/X11/xorg.conf.d/10-virtual.conf" ]; then
+        echo "ERROR: dummy Xorg screen still installed (HDMI and web would differ)" >&2
+        exit 1
+    fi
 
     [ -f "$inp" ] || { echo "ERROR: missing 20-tesla-linux-input.conf" >&2; exit 1; }
     grep -q 'Driver[[:space:]]*"libinput"' "$inp" \
         || { echo "ERROR: 20-tesla-linux-input.conf is not Driver libinput" >&2; exit 1; }
-    grep -q 'GrabDevice' "$inp" \
-        || { echo "ERROR: 20-tesla-linux-input.conf missing GrabDevice (kernel VT would steal HID)" >&2; exit 1; }
+    if grep -q 'GrabDevice' "$inp"; then
+        echo "ERROR: 20-tesla-linux-input.conf still uses nonstandard GrabDevice" >&2
+        exit 1
+    fi
     grep -q 'MatchIsKeyboard' "$inp" \
         || { echo "ERROR: 20-tesla-linux-input.conf missing MatchIsKeyboard" >&2; exit 1; }
     grep -q 'MatchIsPointer' "$inp" \
         || { echo "ERROR: 20-tesla-linux-input.conf missing MatchIsPointer" >&2; exit 1; }
-    if grep -Eiq 'Driver[[:space:]]*"kbd"' "$inp" "$virt"; then
+    if grep -Eiq 'Driver[[:space:]]*"kbd"' "$inp" "$display"; then
         echo "ERROR: Xorg input uses Driver kbd (binds to the console VT)" >&2
         exit 1
     fi
-
-    [ -f "$udev" ] || { echo "ERROR: missing 60-tesla-linux-kbm-seat0.rules" >&2; exit 1; }
-    grep -q 'ENV{ID_SEAT}="seat0"' "$udev" \
-        || { echo "ERROR: kbm udev rule does not assign ID_SEAT=seat0" >&2; exit 1; }
+    if [ -e "$r/etc/udev/rules.d/60-tesla-linux-kbm-seat0.rules" ]; then
+        echo "ERROR: custom KBM seat rule still installed; use standard seat0 discovery" >&2
+        exit 1
+    fi
 
     # Require the driver when this looks like a real Xorg install (or a planted test file).
     if [ -e "$r/usr/bin/Xorg" ] || [ -d "$r/usr/lib/xorg" ] || [ -z "$r" ]; then
@@ -294,8 +326,7 @@ verify_autologin_hdmi() {
     local xorg="$r/etc/systemd/system/tesla-linux-xorg.service"
     local desk="$r/etc/systemd/system/tesla-linux-desktop.service"
     local wlan="$r/etc/systemd/system/tesla-linux-wlan.service"
-    local virt="$r/etc/X11/xorg.conf.d/10-virtual.conf"
-    local vc4="$r/etc/X11/xorg.conf.d/99-vc4.conf"
+    local display="$r/etc/X11/xorg.conf.d/10-tesla-linux-display.conf"
     local getty_unit="$r/etc/systemd/system/getty@tty1.service"
     local getty_wants="$r/etc/systemd/system/getty.target.wants/getty@tty1.service"
     local logind="$r/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf"
@@ -303,9 +334,13 @@ verify_autologin_hdmi() {
 
     [ -f "$xorg" ] || { echo "ERROR: missing tesla-linux-xorg.service" >&2; exit 1; }
     grep -q '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$xorg" \
-        || { echo "ERROR: tesla-linux-xorg is not Xorg :0 vt1 (USB KBM needs the console VT)" >&2; exit 1; }
+        || { echo "ERROR: tesla-linux-xorg is not Xorg :0 vt1 (HDMI and USB KBM need the console VT)" >&2; exit 1; }
     if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$xorg"; then
-        echo "ERROR: tesla-linux-xorg still on vt7 (HID would stay on the kernel console)" >&2
+        echo "ERROR: tesla-linux-xorg still on vt7 (HDMI would not show XFCE)" >&2
+        exit 1
+    fi
+    if grep -q -- '-novtswitch' "$xorg"; then
+        echo "ERROR: tesla-linux-xorg still has -novtswitch" >&2
         exit 1
     fi
     if grep -Eq '^Conflicts=.*getty@tty1' "$xorg"; then
@@ -328,6 +363,8 @@ verify_autologin_hdmi() {
         || { echo "ERROR: tesla-linux-desktop is not DISPLAY=:0" >&2; exit 1; }
     grep -q 'xfce4-session' "$desk" \
         || { echo "ERROR: tesla-linux-desktop is not xfce4-session" >&2; exit 1; }
+    grep -q 'xrandr --output HDMI-1 --mode 1088x832 --primary' "$desk" \
+        || { echo "ERROR: tesla-linux-desktop does not enforce HDMI-1 at 1088x832" >&2; exit 1; }
     if grep -Eq '^(BindsTo|PartOf)=' "$desk"; then
         echo "ERROR: tesla-linux-desktop must not BindsTo/PartOf xorg or display" >&2
         exit 1
@@ -337,12 +374,12 @@ verify_autologin_hdmi() {
     case "$(readlink "$getty_unit")" in
         /dev/null|dev/null) ;;
         *)
-            echo "ERROR: getty@tty1 is unmasked; HDMI login would bury the SSH banner" >&2
+            echo "ERROR: getty@tty1 is unmasked; HDMI login would replace XFCE" >&2
             exit 1
             ;;
     esac
     if [ -e "$getty_wants" ]; then
-        echo "ERROR: getty@tty1 still in getty.target.wants (login would bury the pin)" >&2
+        echo "ERROR: getty@tty1 still in getty.target.wants (login would replace XFCE)" >&2
         exit 1
     fi
     [ -f "$logind" ] || { echo "ERROR: missing logind tesla-linux-hdmi.conf" >&2; exit 1; }
@@ -393,14 +430,13 @@ verify_autologin_hdmi() {
     grep -q 'eth_static_bound' "$wlan_bin" \
         || { echo "ERROR: tesla-linux-wlan missing eth_static_bound" >&2; exit 1; }
 
-    [ -f "$virt" ] || { echo "ERROR: missing 10-virtual.conf" >&2; exit 1; }
-    grep -q '1088x832' "$virt" \
-        || { echo "ERROR: 10-virtual.conf is not 1088x832" >&2; exit 1; }
-    grep -q 'Screen 0 "VirtualScreen"' "$virt" \
-        || { echo "ERROR: dummy is not Screen 0" >&2; exit 1; }
-    [ -f "$vc4" ] || { echo "ERROR: missing 99-vc4.conf" >&2; exit 1; }
-    grep -q 'PrimaryGPU" "false"' "$vc4" \
-        || { echo "ERROR: 99-vc4.conf must not be a second Screen / primary GPU" >&2; exit 1; }
+    [ -f "$display" ] || { echo "ERROR: missing 10-tesla-linux-display.conf" >&2; exit 1; }
+    grep -q '1088x832' "$display" \
+        || { echo "ERROR: HDMI screen is not 1088x832" >&2; exit 1; }
+    grep -q 'Driver[[:space:]]*"modesetting"' "$display" \
+        || { echo "ERROR: HDMI screen is not vc4/modesetting" >&2; exit 1; }
+    grep -q 'PrimaryGPU".*"true"' "$display" \
+        || { echo "ERROR: vc4 is not the primary Xorg GPU" >&2; exit 1; }
 
     [ -f "$wlan" ] || { echo "ERROR: missing tesla-linux-wlan.service" >&2; exit 1; }
     if grep -Eiq '^After=.*tesla-linux-(xorg|desktop)|^Requires=.*tesla-linux-(xorg|desktop)' "$wlan"; then
@@ -438,91 +474,6 @@ verify_autologin_hdmi() {
     fi
 
     verify_kbm_on_display0 "$r"
-    verify_hdmi_ssh_banner "$r"
-}
-
-# tmux SSH MOTD (not HDMI tty1). Fail the bake if the unit/script is
-# missing or does not name 10.42.1.1 and teslalinux. Getty stays masked.
-verify_hdmi_ssh_banner() {
-    local r="${1:-}"
-    local banner="$r/usr/local/sbin/tesla-linux-hdmi-banner"
-    local unit="$r/etc/systemd/system/tesla-linux-hdmi-banner.service"
-    local motd="$r/etc/update-motd.d/99-tesla-linux"
-    local profile="$r/etc/profile.d/99-tesla-linux-tmux.sh"
-
-    case "$PKGS" in
-        *tmux*) ;;
-        *)
-            echo "ERROR: PKGS missing tmux" >&2
-            exit 1
-            ;;
-    esac
-
-    [ -f "$banner" ] || { echo "ERROR: missing tesla-linux-hdmi-banner" >&2; exit 1; }
-    [ -x "$banner" ] || { echo "ERROR: tesla-linux-hdmi-banner is not executable" >&2; exit 1; }
-    grep -q '10.42.1.1' "$banner" \
-        || { echo "ERROR: tesla-linux-hdmi-banner does not mention 10.42.1.1" >&2; exit 1; }
-    grep -q 'teslalinux' "$banner" \
-        || { echo "ERROR: tesla-linux-hdmi-banner does not mention teslalinux" >&2; exit 1; }
-    grep -q 'to control the baremetal host, SSH to' "$banner" \
-        || { echo "ERROR: tesla-linux-hdmi-banner missing chairman sentence" >&2; exit 1; }
-    grep -q 'tmux' "$banner" \
-        || { echo "ERROR: tesla-linux-hdmi-banner is not tmux MOTD" >&2; exit 1; }
-    if grep -q 'WLAN_IP' "$banner"; then
-        echo "ERROR: tesla-linux-hdmi-banner still has a WLAN_IP token" >&2
-        exit 1
-    fi
-    if awk '/^banner_text\(\)/,/^}/' "$banner" | grep -q '0.0.0.0'; then
-        echo "ERROR: banner_text still names 0.0.0.0" >&2
-        exit 1
-    fi
-
-    [ -f "$unit" ] || { echo "ERROR: missing tesla-linux-hdmi-banner.service" >&2; exit 1; }
-    grep -q 'tesla-linux-hdmi-banner daemon' "$unit" \
-        || { echo "ERROR: hdmi-banner unit is not the tmux MOTD daemon" >&2; exit 1; }
-    grep -q '^User=teslalinux$' "$unit" \
-        || { echo "ERROR: hdmi-banner unit must run as teslalinux (tmux attach)" >&2; exit 1; }
-    if grep -Eiq '^PAMName=|^TTYPath=' "$unit"; then
-        echo "ERROR: hdmi-banner unit must not take a TTY login seat (HID stays on :0)" >&2
-        exit 1
-    fi
-    if grep -Eiq '^Before=.*nginx\.service' "$unit"; then
-        echo "ERROR: tesla-linux-hdmi-banner must not Before=nginx.service" >&2
-        exit 1
-    fi
-    if grep -Eiq '^After=.*tesla-linux-(xorg|desktop)|^Requires=.*tesla-linux-(xorg|desktop)' "$unit"; then
-        echo "ERROR: tesla-linux-hdmi-banner must not After/Requires xorg or desktop" >&2
-        exit 1
-    fi
-    [ -L "$r/etc/systemd/system/multi-user.target.wants/tesla-linux-hdmi-banner.service" ] \
-        || { echo "ERROR: tesla-linux-hdmi-banner not WantedBy multi-user.target" >&2; exit 1; }
-    local disp="$r/etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan"
-    [ -f "$disp" ] || { echo "ERROR: missing NM wlan dispatcher" >&2; exit 1; }
-    grep -q 'tesla-linux-hdmi-banner once' "$disp" \
-        || { echo "ERROR: NM dispatcher does not refresh the SSH MOTD" >&2; exit 1; }
-
-    [ -f "$motd" ] || { echo "ERROR: missing /etc/update-motd.d/99-tesla-linux" >&2; exit 1; }
-    grep -q 'tesla-linux-hdmi-banner once' "$motd" \
-        || { echo "ERROR: motd does not print the SSH sentence" >&2; exit 1; }
-    [ -f "$profile" ] || { echo "ERROR: missing /etc/profile.d/99-tesla-linux-tmux.sh" >&2; exit 1; }
-    grep -q 'tmux -S' "$profile" \
-        || { echo "ERROR: profile.d does not tmux-attach over SSH" >&2; exit 1; }
-
-    [ -L "$r/etc/systemd/system/getty@tty1.service" ] \
-        || { echo "ERROR: getty@tty1.service is not a mask symlink" >&2; exit 1; }
-    local mask
-    mask="$(readlink "$r/etc/systemd/system/getty@tty1.service")"
-    case "$mask" in
-        /dev/null|dev/null) ;;
-        *)
-            echo "ERROR: getty@tty1 is unmasked; HDMI login would steal USB KBM" >&2
-            exit 1
-            ;;
-    esac
-    if [ -e "$r/etc/systemd/system/getty.target.wants/getty@tty1.service" ]; then
-        echo "ERROR: getty@tty1 still in getty.target.wants (login would steal USB KBM)" >&2
-        exit 1
-    fi
 }
 
 # --verify-autologin / --verify-kbm [root] checks a live box or a mounted image.
@@ -538,7 +489,8 @@ ensure_factory_user
 purge_cloud_init_ubuntu
 ensure_sshd_qemu
 ensure_serial_console
-ensure_hdmi_getty_vt1
+ensure_graphical_vt1
+ensure_hdmi_mode
 set_graphical_default
 TL_UID="$(id -u "$TL_USER")"
 
@@ -580,31 +532,14 @@ IFACE_WAIT_SEC=60
 EOF
 fi
 install -m755 "$HERE/tesla-linux-wlan.sh" /usr/local/sbin/tesla-linux-wlan
-# HDMI clone is DESCPE. Do not install or run tesla-linux-hdmi-clone from this path.
-rm -f /usr/local/sbin/tesla-linux-hdmi-clone
-install -m755 "$HERE/tesla-linux-hdmi-banner" /usr/local/sbin/tesla-linux-hdmi-banner
+# Remove the old dummy/clone/tmux display experiments. HDMI is Xorg Screen 0.
+rm -f /usr/local/sbin/tesla-linux-hdmi-clone \
+      /usr/local/sbin/tesla-linux-hdmi-banner \
+      /etc/systemd/system/tesla-linux-hdmi-banner.service \
+      /etc/systemd/system/multi-user.target.wants/tesla-linux-hdmi-banner.service \
+      /etc/update-motd.d/99-tesla-linux \
+      /etc/profile.d/99-tesla-linux-tmux.sh
 install -m644 "$HERE/tesla-linux-wlan.service" /etc/systemd/system/tesla-linux-wlan.service
-install -m644 "$HERE/tesla-linux-hdmi-banner.service" /etc/systemd/system/tesla-linux-hdmi-banner.service
-install -d /etc/update-motd.d /etc/profile.d
-cat > /etc/update-motd.d/99-tesla-linux <<'EOF'
-#!/bin/sh
-# SSH MOTD: same sentence as the tmux MOTD pane. Not HDMI tty1.
-echo
-/usr/local/sbin/tesla-linux-hdmi-banner once 2>/dev/null || true
-echo
-echo "tmux: tmux -S /run/tesla-linux/tmux.sock attach -t tl"
-EOF
-chmod 755 /etc/update-motd.d/99-tesla-linux
-cat > /etc/profile.d/99-tesla-linux-tmux.sh <<'EOF'
-# Interactive SSH only — attach the MOTD+shell tmux. Serial/qemu stay a normal shell.
-# Do not exec for scp/sftp (non-interactive).
-[ -n "${PS1:-}" ] || return 0
-[ -z "${TMUX:-}" ] || return 0
-[ -n "${SSH_TTY:-}" ] || return 0
-[ -S /run/tesla-linux/tmux.sock ] || return 0
-exec tmux -S /run/tesla-linux/tmux.sock attach -t tl
-EOF
-chmod 644 /etc/profile.d/99-tesla-linux-tmux.sh
 install -m755 "$HERE/ta_wlan_api.py" /usr/local/sbin/ta_wlan_api.py
 install -m644 "$HERE/tesla-linux-wlan-api.service" /etc/systemd/system/tesla-linux-wlan-api.service
 
@@ -621,7 +556,6 @@ if [ -e "/sys/class/net/$IFACE/wireless" ]; then
             /usr/local/sbin/tesla-linux-wlan maybe-ap
             ;;
     esac
-    /usr/local/sbin/tesla-linux-hdmi-banner once >/dev/null 2>&1 || true
     exit 0
 fi
 # Wired eth0/end0/en* (or VM tap/bridge). Not lo/docker. Bind picker on that IPv4.
@@ -634,8 +568,6 @@ case "$ACTION" in
         /usr/local/sbin/tesla-linux-wlan nginx-bind
         ;;
 esac
-# Pin SSH MOTD (tmux) to the new IPv4s. Do not write the HDMI TTY (HID stays on :0).
-/usr/local/sbin/tesla-linux-hdmi-banner once >/dev/null 2>&1 || true
 exit 0
 EOF
 chmod 755 /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan
@@ -753,60 +685,42 @@ if [ -f /etc/tesla-linux/tesla-linux.env ]; then
     grep -q '^TA_HEIGHT=' /etc/tesla-linux/tesla-linux.env || echo 'TA_HEIGHT=832' >> /etc/tesla-linux/tesla-linux.env
 fi
 
-# Virtual display (this SHA): dummy is Screen 0 primary so X starts without HDMI.
-# Do not invent Xvfb. HDMI clone is DESCPE — do not ExecStartPost tesla-linux-hdmi-clone.
-# --- Xorg: dummy 1088x832 (Tesla-browser) — no HDMI slave/clone this path ------
+# One display: vc4 HDMI is Xorg Screen 0 and is captured by the web backend.
+# The physical screen and Tesla browser therefore show the same XFCE session.
+# Resolution is the Tesla-browser geometry, hard-coded to 1088x832.
 install -d /etc/X11/xorg.conf.d
-cat > /etc/X11/xorg.conf.d/10-virtual.conf <<'EOF'
-# Dummy is Screen 0 primary so X starts with no HDMI. Tesla-browser 1088x832.
+rm -f /etc/X11/xorg.conf.d/10-virtual.conf /etc/X11/xorg.conf.d/99-vc4.conf
+cat > /etc/X11/xorg.conf.d/10-tesla-linux-display.conf <<'EOF'
 Section "ServerFlags"
-    Option "AllowEmptyInitialConfiguration" "true"
     Option "AutoAddDevices" "true"
     Option "AutoEnableDevices" "true"
-    Option "DontVTSwitch" "true"
 EndSection
 
-Section "Device"
-    Identifier "Virtual"
-    Driver     "dummy"
-    VideoRam   256000
+Section "OutputClass"
+    Identifier  "TeslaLinuxVC4"
+    MatchDriver "vc4"
+    Driver      "modesetting"
+    Option      "PrimaryGPU" "true"
+    Option      "Monitor-HDMI-1" "TeslaLinuxHDMI"
 EndSection
 
 Section "Monitor"
-    Identifier "VirtualMonitor"
+    Identifier  "TeslaLinuxHDMI"
     HorizSync   28.0-80.0
     VertRefresh 48.0-75.0
-    Modeline "1088x832" 74.75 1088 1152 1264 1440 832 835 845 862 -hsync +vsync
+    Modeline "1088x832" 73.75 1088 1144 1256 1424 832 835 845 864 -hsync +vsync
+    Option "PreferredMode" "1088x832"
 EndSection
 
-Section "Screen"
-    Identifier "VirtualScreen"
-    Device     "Virtual"
-    Monitor    "VirtualMonitor"
-    DefaultDepth 24
-    SubSection "Display"
-        Depth   24
-        Modes   "1088x832"
-        Virtual 1088 832
-    EndSubSection
-EndSection
-
-Section "ServerLayout"
-    Identifier "TeslaLinux"
-    Screen 0 "VirtualScreen"
-    Option "AutoAddDevices" "true"
-    Option "AutoEnableDevices" "true"
-EndSection
 EOF
-# USB / evdev HID -> libinput on dummy Xorg :0. GrabDevice so a leftover
-# kernel VT cannot steal keys/pointer. Do not use Driver "kbd" (console VT).
+# USB HID follows normal seat0 discovery into the same visible Xorg :0.
+# Do not force a custom udev seat and do not use the old GrabDevice experiment.
 cat > /etc/X11/xorg.conf.d/20-tesla-linux-input.conf <<'EOF'
 Section "InputClass"
     Identifier "TeslaLinux keyboard"
     MatchIsKeyboard "on"
     MatchDevicePath "/dev/input/event*"
     Driver "libinput"
-    Option "GrabDevice" "true"
 EndSection
 
 Section "InputClass"
@@ -814,7 +728,6 @@ Section "InputClass"
     MatchIsPointer "on"
     MatchDevicePath "/dev/input/event*"
     Driver "libinput"
-    Option "GrabDevice" "true"
 EndSection
 
 Section "InputClass"
@@ -822,16 +735,6 @@ Section "InputClass"
     MatchIsTouchpad "on"
     MatchDevicePath "/dev/input/event*"
     Driver "libinput"
-    Option "GrabDevice" "true"
-EndSection
-EOF
-# Keep 99-vc4.conf for HDMI KMS (not a second Screen). Do not fold HDMI clone here.
-cat > /etc/X11/xorg.conf.d/99-vc4.conf <<'EOF'
-Section "OutputClass"
-    Identifier  "vc4"
-    MatchDriver "vc4"
-    Driver      "modesetting"
-    Option      "PrimaryGPU" "false"
 EndSection
 EOF
 
@@ -841,16 +744,7 @@ echo 'KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput
     > /etc/udev/rules.d/99-uinput.rules
 usermod -aG input "$TL_USER"
 
-# USB HID -> seat0 so dummy Xorg :0 owns keyboards/mice (not a getty).
-# Lexical 60- so ID_SEAT is set before systemd 71-seat.rules.
-cat > /etc/udev/rules.d/60-tesla-linux-kbm-seat0.rules <<'EOF'
-# Tesla-Linux: USB HID keyboards/mice/touchpads belong to seat0 (Xorg :0).
-# getty@tty1 stays masked. Xorg GrabDevice + vt1 own HID.
-# Do not invent a second install stack.
-ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="seat", ENV{ID_SEAT}="seat0"
-ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", TAG+="seat", ENV{ID_SEAT}="seat0"
-ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_TOUCHPAD}=="1", TAG+="seat", ENV{ID_SEAT}="seat0"
-EOF
+rm -f /etc/udev/rules.d/60-tesla-linux-kbm-seat0.rules
 
 # --- PipeWire: always-present virtual sink so headless audio has a target -----
 install -d /etc/pipewire/pipewire.conf.d
@@ -880,18 +774,22 @@ EOF
 # --- systemd units ------------------------------------------------------------
 cat > /etc/systemd/system/tesla-linux-xorg.service <<EOF
 [Unit]
-Description=Tesla Linux — X server on virtual display
-After=systemd-user-sessions.service systemd-udevd.service
+Description=Tesla Linux — HDMI and web X server
+After=systemd-user-sessions.service systemd-udevd.service systemd-logind.service
 Before=tesla-linux-desktop.service
-# HDMI getty stays masked. Xorg :0 is vt1 so USB KBM hits the foreground console.
-# MOTD is tmux (SSH), not tty1. Do not Conflicts=getty@tty1.
-# Do not ExecStartPost tesla-linux-hdmi-clone — HDMI XFCE is DESCPE.
+# HDMI, web capture, and USB KBM share Xorg :0 on vt1.
+# getty@tty1 is masked; no dummy display, clone, tmux, or second seat.
 # X and AP stay independent. Do not wait on tesla-linux-wlan.
 
 [Service]
 # teslalinux session dir so xfce4-session has XDG_RUNTIME_DIR if linger is late.
 ExecStartPre=/bin/sh -c 'install -d -m700 -o $TL_USER -g $TL_USER /run/user/$TL_UID'
-ExecStart=/usr/bin/Xorg :0 vt1 -seat seat0 -ac -noreset -novtswitch
+ExecStart=/usr/bin/Xorg :0 vt1 -keeptty -ac -noreset -nolisten tcp
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
 Restart=always
 RestartSec=2
 TimeoutStopSec=5
@@ -914,6 +812,7 @@ PAMName=login
 EnvironmentFile=/etc/tesla-linux/tesla-linux.env
 Environment=DISPLAY=:0
 ExecStartPre=/bin/sh -c 'for i in \$(seq 1 30); do DISPLAY=:0 xdpyinfo >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+ExecStartPre=/bin/sh -c 'DISPLAY=:0 xrandr --output HDMI-1 --mode 1088x832 --primary'
 ExecStart=/usr/bin/dbus-launch --exit-with-session /usr/bin/xfce4-session
 Restart=always
 RestartSec=3
@@ -979,8 +878,8 @@ EOF
 # --- boot into graphical.target (symlink — not systemctl set-default || true) -
 loginctl enable-linger "$TL_USER" 2>/dev/null || true
 set_graphical_default
-# Autologin XFCE on :0. HDMI getty masked. SSH MOTD is tmux. USB KBM on Xorg vt1.
-ensure_hdmi_getty_vt1
+# HDMI, web capture, and USB KBM share XFCE on Xorg :0 / vt1.
+ensure_graphical_vt1
 
 mkdir -p /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-user.target.wants
 
@@ -991,10 +890,6 @@ enable_wlan_nginx() {
     ln -sfn /etc/systemd/system/tesla-linux-wlan-api.service \
        /etc/systemd/system/multi-user.target.wants/tesla-linux-wlan-api.service
 }
-
-# Write-only HDMI SSH banner. File-level enable (chroot-safe). Not a getty login.
-ln -sfn /etc/systemd/system/tesla-linux-hdmi-banner.service \
-   /etc/systemd/system/multi-user.target.wants/tesla-linux-hdmi-banner.service
 
 # File-level enable so bake/chroot and live install both leave graphical.target.wants.
 for u in xorg desktop display touch audio; do
@@ -1008,7 +903,7 @@ if [ "$START" = "1" ]; then
     systemctl stop getty@tty1.service
     systemctl mask getty@tty1.service autovt@tty1.service
     systemctl enable tesla-linux-xorg tesla-linux-desktop tesla-linux-display \
-                     tesla-linux-touch tesla-linux-audio tesla-linux-hdmi-banner >/dev/null 2>&1
+                     tesla-linux-touch tesla-linux-audio >/dev/null 2>&1
     /usr/local/sbin/tesla-linux-wlan eth-up >/dev/null 2>&1 || true
     echo "==> enabled. start with: systemctl start tesla-linux-xorg tesla-linux-desktop tesla-linux-display tesla-linux-touch tesla-linux-audio tesla-linux-wlan tesla-linux-wlan-api"
 else

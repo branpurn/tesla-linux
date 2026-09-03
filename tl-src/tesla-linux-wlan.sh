@@ -7,7 +7,7 @@
 # (never 0.0.0.0, never loopback-only). teslalinux.local is existing avahi.
 #
 # FRONTEND-HOLE (this SHA): pick/save WLAN UI — do not invent a settings maze.
-# Virtual XFCE is dummy Screen 0 + HDMI slave clone (JUMP). AP must not wait on X.
+# HDMI and web capture share XFCE on Xorg :0. AP must not wait on X.
 set -euo pipefail
 
 AP_ENV="${AP_ENV:-/etc/tesla-linux/ap.env}"
