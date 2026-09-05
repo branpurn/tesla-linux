@@ -22,3 +22,5 @@ Copy lock: never "the car's Wi-Fi" / "the car's WiFi". The car does not broadcas
 Footer stays `Desktop` · `Probe`. Dark KISS, one column. No AP-password editor. No fake SSIDs.
 
 Wiring (Frontend): origin-relative `GET`/`POST` `/api/wlan`, 15s abort, 501 is a hard error. Typed SSID if scan is missing; dropdown only if `GET` returns a list.
+
+Mode switch (Frontend): **Join** (station — helper above) vs **WAN rebroadcast** (ethernet uplink; TeslaLinux AP stays up at 10.42.0.1/24; no Network/Password). Origin-relative `GET`/`POST` `/api/mode`. Missing/404 → station.
