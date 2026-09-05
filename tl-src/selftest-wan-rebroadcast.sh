@@ -34,10 +34,10 @@ expect_fail() {
     fi
 }
 
-grep -q 'wan-ap|wan-up' "$HELPER" && pass "helper exposes wan-ap/wan-up" \
-    || bad "helper missing wan-ap/wan-up"
-grep -q 'wan-off|wan-down' "$HELPER" && pass "helper exposes wan-off/wan-down" \
-    || bad "helper missing wan-off/wan-down"
+grep -q 'wan-ap|wan-rebroadcast|wan-up' "$HELPER" && pass "helper exposes wan-ap/wan-rebroadcast" \
+    || bad "helper missing wan-ap/wan-rebroadcast"
+grep -q 'wan-off|wan-down' "$HELPER" && pass "helper exposes wan-off" \
+    || bad "helper missing wan-off"
 grep -q 'mode.json' "$HELPER" && pass "helper honors mode.json" \
     || bad "helper missing mode.json"
 grep -Eq 'masquerade|MASQUERADE' "$HELPER" && pass "helper has NAT/masquerade" \

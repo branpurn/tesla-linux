@@ -15,26 +15,26 @@ SSID **TeslaLinux** stays visible. Operators use documented **10.42.0.1** (AP) a
 
 USB LTE dongles are out of scope. Ethernet uplink first.
 
-## Enable
+## Backend kick — exact helper names
 
-Backend persist (picker / `POST /api/mode`) writes the file; the helper applies NAT when that mode is selected:
+API mode string is **`wan_rebroadcast`** (`GET|POST /api/mode`). Do not invent `wan` or `lte`. Helper CLI Backend should kick:
+
+| `/api/mode` | Helper (exact argv) | Also accepted |
+|---|---|---|
+| `POST {mode:wan_rebroadcast}` | `tesla-linux-wlan wan-ap` | `wan-rebroadcast`, `wan-up` |
+| `POST {mode:station}` | `tesla-linux-wlan wan-off` | `wan-down` |
 
 ```
-# persist (Backend). Helper reads this on boot / maybe-ap / ethernet-up.
+# persist (Backend). Helper also reads this on boot / maybe-ap / ethernet-up.
 echo '{"mode":"wan_rebroadcast"}' > /etc/tesla-linux/mode.json
 
-# or kick the helper now (both names are the same action):
+# enter AP-stays-up + NAT (preferred kick):
 tesla-linux-wlan wan-ap
-tesla-linux-wlan wan-up
-```
+# same action:
+tesla-linux-wlan wan-rebroadcast
 
-Leave mode (station-else-AP again). Both names are the same action:
-
-```
+# leave WAN; back to maybe-ap / station (preferred kick):
 tesla-linux-wlan wan-off
-tesla-linux-wlan wan-down
-# Backend persist for next boot:
-echo '{"mode":"station"}' > /etc/tesla-linux/mode.json
 ```
 
 ## Verify NAT
