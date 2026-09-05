@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Tesla Linux — loopback HTTP /api/wlan + /api/reboot.
+"""Tesla Linux — loopback HTTP /api/wlan + /api/reboot + /api/mode.
 
 Stdlib only. Binds TA_BIND (default 127.0.0.1) — never 0.0.0.0.
-nginx on the AP/station LAN proxies origin-relative /api/wlan and /api/reboot here.
+nginx on the AP/station LAN proxies origin-relative /api/wlan, /api/reboot,
+and /api/mode here.
 
 POST JSON {ssid, psk} kicks save-wlan in a background thread and returns 200
 without waiting on WAIT_SEC. GET /api/wlan returns {ssids:[...]} (empty on scan fail).
 POST /api/reboot kicks a real system reboot in a background thread and returns 200.
+
+GET|POST /api/mode is the WAN-rebroadcast intent skeleton. Persist only —
+Infra owns AP-stays-up + NAT. Default mode is station. Skeleton reports
+nat:false and uplink none until Infra lands NAT.
 """
 import json
 import os
@@ -24,6 +29,14 @@ NMCLI = os.environ.get("TA_NMCLI") or "nmcli"
 # Optional override for tests; default is systemctl reboot then /sbin/reboot.
 REBOOT_BIN = os.environ.get("TA_REBOOT_BIN") or ""
 BODY_MAX = 8192
+# Persist WAN-rebroadcast intent. Override in tests; default is on-image.
+MODE_FILE = os.environ.get("TA_MODE_FILE") or "/etc/tesla-linux/mode.json"
+# Factory AP lock until a later lock moves it. Skeleton does not probe hostapd.
+AP_SSID = os.environ.get("TA_AP_SSID") or "TeslaLinux"
+AP_ADDR = os.environ.get("TA_AP_ADDR") or "10.42.0.1/24"
+MODES = ("station", "wan_rebroadcast")
+DEFAULT_MODE = "station"
+_MODE_LOCK = threading.Lock()
 
 if BIND in ("0.0.0.0", "::", "*", "[::]"):
     raise SystemExit("ta_wlan_api: TA_BIND must be loopback, not %s" % BIND)
@@ -42,6 +55,45 @@ def _is_wlan_path(path):
 
 def _is_reboot_path(path):
     return path == "/api/reboot"
+
+
+def _is_mode_path(path):
+    return path == "/api/mode"
+
+
+def _read_mode():
+    """Persisted intent, else station. Corrupt/missing file is station."""
+    try:
+        with open(MODE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("mode") in MODES:
+            return data["mode"]
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return DEFAULT_MODE
+
+
+def _write_mode(mode):
+    directory = os.path.dirname(MODE_FILE) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp = MODE_FILE + ".tmp"
+    body = json.dumps({"mode": mode}, separators=(",", ":")) + "\n"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(body)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, MODE_FILE)
+
+
+def _mode_status():
+    with _MODE_LOCK:
+        mode = _read_mode()
+    return {
+        "mode": mode,
+        "ap": {"up": True, "ssid": AP_SSID, "addr": AP_ADDR},
+        "uplink": {"kind": "none", "iface": None, "addr": None},
+        "nat": False,
+    }
 
 def _ssid_ok(ssid):
     if not isinstance(ssid, str):
@@ -156,6 +208,9 @@ class Handler(BaseHTTPRequestHandler):
         if _is_reboot_path(path):
             self._json(405, {"error": "method not allowed"}, extra={"Allow": "POST"})
             return
+        if _is_mode_path(path):
+            self._json(200, _mode_status())
+            return
         if not _is_wlan_path(path):
             self._json(404, {"error": "not found"})
             return
@@ -167,6 +222,9 @@ class Handler(BaseHTTPRequestHandler):
             self._drain_body()
             _kick_reboot()
             self._json(200, {"ok": True})
+            return
+        if _is_mode_path(path):
+            self._post_mode()
             return
         if not _is_wlan_path(path):
             self._drain_body()
@@ -203,11 +261,172 @@ class Handler(BaseHTTPRequestHandler):
         _kick_save(ssid, psk or "")
         self._json(200, {"ok": True})
 
+    def _post_mode(self):
+        try:
+            n = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            self._json(400, {"error": "invalid Content-Length"})
+            return
+        if n <= 0 or n > BODY_MAX:
+            self._json(400, {"error": "expected JSON {mode}"})
+            return
+        raw = self.rfile.read(n)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._json(400, {"error": "expected JSON {mode}"})
+            return
+        if not isinstance(data, dict):
+            self._json(400, {"error": "expected JSON {mode}"})
+            return
+        if "mode" not in data:
+            self._json(400, {"error": "missing mode"})
+            return
+        mode = data.get("mode")
+        if not isinstance(mode, str) or mode not in MODES:
+            self._json(400, {"error": "mode must be station or wan_rebroadcast"})
+            return
+        try:
+            with _MODE_LOCK:
+                _write_mode(mode)
+        except OSError:
+            self._json(500, {"error": "could not persist mode"})
+            return
+        self._json(200, {"ok": True, "mode": mode})
+
 def main():
     httpd = ThreadingHTTPServer((BIND, PORT), Handler)
     sys.stderr.write("ta_wlan_api: listen %s:%s\n" % (BIND, PORT))
     httpd.serve_forever()
 
 
+def _selftest():
+    """Contract checks. No hardware. Bind stays loopback."""
+    import http.client
+    import shutil
+    import tempfile
+
+    fail = 0
+
+    def check(ok, msg):
+        nonlocal fail
+        if not ok:
+            sys.stderr.write("FAIL: %s\n" % msg)
+            fail += 1
+
+    # TA_BIND=0.0.0.0 must refuse to start (import-time guard).
+    env = os.environ.copy()
+    env["TA_BIND"] = "0.0.0.0"
+    env["TA_WLAN_PORT"] = "0"
+    refuse = subprocess.run(
+        [sys.executable, os.path.abspath(__file__)],
+        env=env, capture_output=True, text=True, timeout=8,
+    )
+    check(refuse.returncode != 0, "TA_BIND=0.0.0.0 must exit non-zero")
+    check("loopback" in (refuse.stderr or ""), "0.0.0.0 refusal mentions loopback")
+
+    tmp = tempfile.mkdtemp(prefix="tl-mode-")
+    mode_path = os.path.join(tmp, "mode.json")
+    wlan_bin = os.path.join(tmp, "wlan-bin")
+    with open(wlan_bin, "w", encoding="utf-8") as f:
+        f.write("#!/bin/sh\nexit 0\n")
+    os.chmod(wlan_bin, 0o755)
+
+    global MODE_FILE, REBOOT_BIN, WLAN
+    MODE_FILE = mode_path
+    REBOOT_BIN = "/bin/true"
+    WLAN = wlan_bin
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    host, port = httpd.server_address
+    thread = threading.Thread(target=httpd.serve_forever, name="selftest-httpd", daemon=True)
+    thread.start()
+
+    def req(method, path, body=None, headers=None):
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        hdrs = headers or {}
+        payload = None
+        if body is not None:
+            payload = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
+            hdrs = dict(hdrs)
+            hdrs.setdefault("Content-Type", "application/json")
+            hdrs["Content-Length"] = str(len(payload))
+        conn.request(method, path, body=payload, headers=hdrs)
+        resp = conn.getresponse()
+        raw = resp.read()
+        conn.close()
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            obj = None
+        return resp.status, obj, raw, resp.getheader("Allow")
+
+    try:
+        status, obj, _, _ = req("GET", "/api/mode")
+        check(status == 200, "GET /api/mode default status")
+        check(obj == {
+            "mode": "station",
+            "ap": {"up": True, "ssid": "TeslaLinux", "addr": "10.42.0.1/24"},
+            "uplink": {"kind": "none", "iface": None, "addr": None},
+            "nat": False,
+        }, "GET /api/mode default JSON")
+        check(not os.path.exists(mode_path), "default station does not write mode.json")
+
+        status, obj, _, _ = req("POST", "/api/mode", {"mode": "wan_rebroadcast"})
+        check(status == 200, "POST wan_rebroadcast status")
+        check(obj == {"ok": True, "mode": "wan_rebroadcast"}, "POST wan_rebroadcast JSON")
+        with open(mode_path, encoding="utf-8") as f:
+            persisted = json.load(f)
+        check(persisted == {"mode": "wan_rebroadcast"}, "persist wan_rebroadcast")
+
+        status, obj, _, _ = req("GET", "/api/mode")
+        check(status == 200, "GET after persist status")
+        check(obj["mode"] == "wan_rebroadcast", "GET reports persisted mode")
+        check(obj["ap"]["up"] is True and obj["ap"]["ssid"] == "TeslaLinux", "factory AP lock")
+        check(obj["ap"]["addr"] == "10.42.0.1/24", "factory AP addr")
+        check(obj["uplink"] == {"kind": "none", "iface": None, "addr": None}, "skeleton uplink none")
+        check(obj["nat"] is False, "skeleton nat false")
+
+        status, obj, _, _ = req("POST", "/api/mode", {"mode": "station"})
+        check(status == 200 and obj == {"ok": True, "mode": "station"}, "POST station")
+        status, obj, _, _ = req("GET", "/api/mode")
+        check(obj["mode"] == "station", "GET after station persist")
+
+        status, obj, _, _ = req("POST", "/api/mode", {"mode": "lte"})
+        check(status == 400, "invalid mode 400")
+        check(obj and "error" in obj, "invalid mode error")
+        status, obj, _, _ = req("GET", "/api/mode")
+        check(obj["mode"] == "station", "invalid POST does not change mode")
+
+        status, obj, _, _ = req("POST", "/api/mode", {"ssid": "x"})
+        check(status == 400 and obj.get("error") == "missing mode", "missing mode")
+        status, obj, _, _ = req("POST", "/api/mode", b"not-json")
+        check(status == 400, "non-JSON POST 400")
+        status, obj, _, allow = req("PUT", "/api/mode")
+        check(status == 405 and allow == "GET, POST", "PUT /api/mode 405")
+
+        status, obj, _, _ = req("GET", "/api/wlan")
+        check(status == 200 and isinstance(obj, dict) and "ssids" in obj, "GET /api/wlan kept")
+        status, obj, _, _ = req("POST", "/api/wlan", {"ssid": "DemoNet", "psk": "password1"})
+        check(status == 200 and obj == {"ok": True}, "POST /api/wlan kept")
+        status, obj, _, _ = req("POST", "/api/reboot", {})
+        check(status == 200 and obj == {"ok": True}, "POST /api/reboot kept")
+        status, obj, _, allow = req("GET", "/api/reboot")
+        check(status == 405 and allow == "POST", "GET /api/reboot still 405")
+        status, obj, _, _ = req("GET", "/api/nope")
+        check(status == 404, "unknown path 404")
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if fail:
+        sys.stderr.write("ta_wlan_api selftest FAILED (%s)\n" % fail)
+        return 1
+    sys.stderr.write("ta_wlan_api selftest OK\n")
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in ("--selftest", "selftest"):
+        sys.exit(_selftest())
     main()
