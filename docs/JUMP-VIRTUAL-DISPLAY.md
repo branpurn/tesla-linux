@@ -10,7 +10,7 @@ There is one desktop: XFCE on `DISPLAY=:0`, with a logical **1088x832** framebuf
 - `MatchDriver "vc4"` selects the Pi DRM device as Xorg’s primary GPU, regardless of whether it enumerates as `card0` or `card1`.
 - vc4/modesetting renders Xorg `:0` to HDMI0 (`HDMI-1` in Xrandr).
 - RandR scales the logical 1088x832 framebuffer to the physical 1920x1080 output.
-- `ta_display_backend.py` captures that same `DISPLAY=:0` for `desktop.html`.
+- `ta_display_backend.py` captures that same `DISPLAY=:0` for `desktop.html`, and pins encode to `TA_WIDTH`×`TA_HEIGHT` (default 1088×832) so the Tesla-browser stream stays native even if `:0` root is still 1920×1080.
 - USB keyboards, mice, and touchpads use normal seat0/libinput discovery on that X server.
 - Browser touch is injected into the same session by `ta_touch_backend.py`.
 
