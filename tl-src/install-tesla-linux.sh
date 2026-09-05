@@ -485,10 +485,107 @@ verify_autologin_hdmi() {
     verify_kbm_on_display0 "$r"
 }
 
+# Host-side plantable WAN rebroadcast skeleton (like --verify-kbm).
+# Fail-hard: factory AP addr missing, nginx listen 0.0.0.0, NAT helper missing
+# when WAN_REBROADCAST is selected. Optional prefix ($1) is an image / plant root.
+verify_wan_rebroadcast() {
+    local r="${1:-}"
+    local wlan_bin apenv nginx_http nginx_https wlan_svc dispatcher src_helper
+    src_helper="$(cd "$(dirname "$0")" && pwd)/tesla-linux-wlan.sh"
+
+    if [ -n "$r" ]; then
+        wlan_bin="$r/usr/local/sbin/tesla-linux-wlan"
+        apenv="$r/etc/tesla-linux/ap.env"
+        nginx_http="$r/etc/nginx/tl-http-server.conf"
+        nginx_https="$r/etc/nginx/tl-https-server.conf"
+        wlan_svc="$r/etc/systemd/system/tesla-linux-wlan.service"
+        dispatcher="$r/etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan"
+    else
+        wlan_bin="/usr/local/sbin/tesla-linux-wlan"
+        [ -f "$wlan_bin" ] || wlan_bin="$src_helper"
+        apenv="/etc/tesla-linux/ap.env"
+        [ -f "$apenv" ] || apenv="$(cd "$(dirname "$0")" && pwd)/ap.env"
+        nginx_http="/etc/nginx/tl-http-server.conf"
+        nginx_https="/etc/nginx/tl-https-server.conf"
+        wlan_svc="/etc/systemd/system/tesla-linux-wlan.service"
+        [ -f "$wlan_svc" ] || wlan_svc="$(cd "$(dirname "$0")" && pwd)/tesla-linux-wlan.service"
+        dispatcher="/etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan"
+    fi
+
+    [ -f "$wlan_bin" ] || { echo "ERROR: missing tesla-linux-wlan helper ($wlan_bin)" >&2; exit 1; }
+    [ -f "$apenv" ] || { echo "ERROR: missing ap.env ($apenv)" >&2; exit 1; }
+
+    grep -q '^AP_ADDR=10.42.0.1' "$apenv" \
+        || { echo "ERROR: AP factory addr missing (expected AP_ADDR=10.42.0.1)" >&2; exit 1; }
+    grep -q '^ETH_ADDR=10.42.1.1' "$apenv" \
+        || { echo "ERROR: ethernet factory addr missing (expected ETH_ADDR=10.42.1.1)" >&2; exit 1; }
+    grep -q '^AP_SSID=TeslaLinux' "$apenv" \
+        || { echo "ERROR: AP_SSID is not TeslaLinux" >&2; exit 1; }
+
+    grep -q 'apply_wan_nat' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing apply_wan_nat" >&2; exit 1; }
+    grep -Eq 'masquerade|MASQUERADE' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing NAT/masquerade helper" >&2; exit 1; }
+    grep -q 'cmd_wan_up' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing wan-up" >&2; exit 1; }
+    grep -q 'wan-ap|wan-up' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing wan-ap alias" >&2; exit 1; }
+    grep -q 'wan-off|wan-down' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing wan-off alias" >&2; exit 1; }
+    grep -q 'mode.json' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan does not honor /etc/tesla-linux/mode.json" >&2; exit 1; }
+    grep -q 'wan_mode_on' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing wan_mode_on" >&2; exit 1; }
+    grep -q 'ignore_broadcast_ssid=0' "$wlan_bin" \
+        || { echo "ERROR: TeslaLinux SSID would be hidden" >&2; exit 1; }
+    if grep -Eq 'listen 0\.0\.0\.0' "$wlan_bin"; then
+        echo "ERROR: tesla-linux-wlan would bind nginx to 0.0.0.0" >&2
+        exit 1
+    fi
+
+    if grep -q '^WAN_REBROADCAST=1' "$apenv" \
+       || { [ -f "${r}/etc/tesla-linux/mode.json" ] && grep -q 'wan_rebroadcast' "${r}/etc/tesla-linux/mode.json"; }; then
+        grep -Eq 'masquerade|MASQUERADE' "$wlan_bin" \
+            || { echo "ERROR: WAN mode selected but NAT/masquerade helper missing" >&2; exit 1; }
+    fi
+
+    if [ -f "$nginx_http" ] && grep -Eq '0\.0\.0\.0|listen[[:space:]]+80;|listen[[:space:]]+\[::\]' "$nginx_http"; then
+        echo "ERROR: nginx listen includes 0.0.0.0 / world bind ($nginx_http)" >&2
+        exit 1
+    fi
+    if [ -f "$nginx_https" ] && grep -Eq '0\.0\.0\.0|listen[[:space:]]+443' "$nginx_https"; then
+        if grep -Eq '0\.0\.0\.0|listen[[:space:]]+443;|listen[[:space:]]+\[::\]' "$nginx_https"; then
+            echo "ERROR: nginx TLS listen includes 0.0.0.0 / world bind ($nginx_https)" >&2
+            exit 1
+        fi
+    fi
+
+    if [ -f "$wlan_svc" ]; then
+        if grep -Eiq '^Before=.*nginx\.service' "$wlan_svc"; then
+            echo "ERROR: tesla-linux-wlan must not Before=nginx.service" >&2
+            exit 1
+        fi
+        if grep -Eiq '^After=.*tesla-linux-(xorg|desktop)|^Requires=.*tesla-linux-(xorg|desktop)' "$wlan_svc"; then
+            echo "ERROR: tesla-linux-wlan must not After/Requires xorg or desktop" >&2
+            exit 1
+        fi
+    fi
+
+    if [ -f "$dispatcher" ]; then
+        grep -q 'tesla-linux-wlan' "$dispatcher" \
+            || { echo "ERROR: NM dispatcher missing tesla-linux-wlan" >&2; exit 1; }
+    fi
+}
+
 # --verify-autologin / --verify-kbm [root] checks a live box or a mounted image.
 # Do not run ensure_*. KBM-on-:0 is part of the same fail-hard gate.
 if [ "${1:-}" = "--verify-autologin" ] || [ "${1:-}" = "--verify-kbm" ]; then
     verify_autologin_hdmi "${2:-}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--verify-wan" ]; then
+    verify_wan_rebroadcast "${2:-}"
     exit 0
 fi
 
@@ -538,6 +635,7 @@ ETH_PREFIX=24
 ETH_CONN=tesla-linux-eth
 WAIT_SEC=20
 IFACE_WAIT_SEC=60
+WAN_REBROADCAST=0
 EOF
 fi
 install -m755 "$HERE/tesla-linux-wlan.sh" /usr/local/sbin/tesla-linux-wlan
@@ -553,10 +651,12 @@ install -m755 "$HERE/ta_wlan_api.py" /usr/local/sbin/ta_wlan_api.py
 install -m644 "$HERE/tesla-linux-wlan-api.service" /etc/systemd/system/tesla-linux-wlan-api.service
 
 # NM dispatcher: wifi → maybe-ap (station else TeslaLinux AP); ethernet → nginx-bind
+# WAN rebroadcast: ethernet up may bring a DHCP WAN — refresh wan-up (AP stays, NAT).
 install -d /etc/NetworkManager/dispatcher.d
 cat > /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan <<'EOF'
 #!/bin/sh
 # WAVE 1 — wifi: maybe-ap. ethernet/VM tap: nginx-bind only (not 0.0.0.0).
+# WAN mode: maybe-ap → wan-up; ethernet up refreshes NAT when the uplink appears.
 IFACE="$1"
 ACTION="$2"
 if [ -e "/sys/class/net/$IFACE/wireless" ]; then
@@ -575,6 +675,11 @@ esac
 case "$ACTION" in
     up|connectivity-change)
         /usr/local/sbin/tesla-linux-wlan nginx-bind
+        if [ -f /run/tesla-linux-wan ] \
+           || grep -q '^WAN_REBROADCAST=1' /etc/tesla-linux/ap.env 2>/dev/null \
+           || grep -q 'wan_rebroadcast' /etc/tesla-linux/mode.json 2>/dev/null; then
+            /usr/local/sbin/tesla-linux-wlan wan-ap
+        fi
         ;;
 esac
 exit 0
@@ -926,3 +1031,5 @@ fi
 
 # Fail the bake/install if autologin XFCE / KBM-on-:0 did not stick.
 verify_autologin_hdmi
+# Fail the bake/install if WAN rebroadcast skeleton (AP factory / nginx / NAT) did not stick.
+verify_wan_rebroadcast
