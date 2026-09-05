@@ -20,6 +20,8 @@ Env:
   TA_BIND      bind address              (default 127.0.0.1)
   TA_BITRATE   bitrate kbps              (default 8000)
   TA_FPS       framerate                 (default 30)
+  TA_WIDTH     encode width              (default 1088; Tesla-browser native)
+  TA_HEIGHT    encode height             (default 832; Tesla-browser native)
   TA_ENCODER   x264enc | v4l2h264enc     (default: v4l2h264enc if /dev/video11 else x264enc)
 """
 import asyncio, os, threading
@@ -33,6 +35,8 @@ PORT    = int(os.environ.get("TA_PORT", "9091"))
 BIND    = os.environ.get("TA_BIND", "127.0.0.1")
 BITRATE = int(os.environ.get("TA_BITRATE", "8000"))
 FPS     = int(os.environ.get("TA_FPS", "30"))
+WIDTH   = int(os.environ.get("TA_WIDTH", "1088"))
+HEIGHT  = int(os.environ.get("TA_HEIGHT", "832"))
 ENCODER = os.environ.get("TA_ENCODER") or ("v4l2h264enc" if os.path.exists("/dev/video11") else "x264enc")
 
 QUEUE_MAX = 8          # frames buffered per client before we start dropping
@@ -49,15 +53,57 @@ def build_pipeline():
     else:
         enc = ("x264enc tune=zerolatency speed-preset=ultrafast bitrate=%d key-int-max=%d "
                "! video/x-h264,profile=constrained-baseline" % (BITRATE, FPS))
+    # Capture unit is After=xorg only, so :0 root may still be the HDMI
+    # PreferredMode (1920x1080) when encode starts. tesla-linux.env / touch
+    # mapping stay on TA_WIDTH x TA_HEIGHT — pin that here, do not follow root.
     return (
         "ximagesrc use-damage=0 remote=1 ! "
-        "video/x-raw,framerate=%d/1 ! videoconvert ! video/x-raw,format=I420 ! "
+        "video/x-raw,framerate=%d/1 ! "
+        "videoscale ! videoconvert ! "
+        "capsfilter name=geom caps=video/x-raw,width=%d,height=%d,format=I420 ! "
         "%s ! "
         "h264parse config-interval=-1 ! "
         "video/x-h264,stream-format=byte-stream,alignment=au ! "
         "appsink name=sink emit-signals=true max-buffers=2 drop=true sync=false"
-        % (FPS, enc)
+        % (FPS, WIDTH, HEIGHT, enc)
     )
+
+
+def _caps_wh(caps):
+    """Return (width, height) from negotiated caps, or (None, None)."""
+    if caps is None or caps.get_size() < 1:
+        return None, None
+    s = caps.get_structure(0)
+    w = s.get_value("width") if s.has_field("width") else None
+    h = s.get_value("height") if s.has_field("height") else None
+    try:
+        w = int(w) if w is not None else None
+    except (TypeError, ValueError):
+        w = None
+    try:
+        h = int(h) if h is not None else None
+    except (TypeError, ValueError):
+        h = None
+    return w, h
+
+
+def log_negotiated_geom(pipeline):
+    """Print measured width/height once at PLAYING; fail loudly on mismatch."""
+    w = h = None
+    geom = pipeline.get_by_name("geom")
+    if geom is not None:
+        pad = geom.get_static_pad("src")
+        if pad is not None:
+            w, h = _caps_wh(pad.get_current_caps())
+    if w is None or h is None:
+        print("CAPTURE GEOM FAIL: negotiated unknown (required %dx%d)"
+              % (WIDTH, HEIGHT), flush=True)
+        return
+    print("CAPTURE GEOM: measured %dx%d (required %dx%d)"
+          % (w, h, WIDTH, HEIGHT), flush=True)
+    if w != WIDTH or h != HEIGHT:
+        print("CAPTURE GEOM FAIL: negotiated %dx%d (required %dx%d)"
+              % (w, h, WIDTH, HEIGHT), flush=True)
 
 
 def nal_types(buf):
@@ -148,7 +194,10 @@ def gst_thread():
     bus.add_signal_watch()
     bus.connect("message", on_msg)
     pipeline.set_state(Gst.State.PLAYING)
-    print("pipeline PLAYING (encoder=%s display=%s)" % (ENCODER, DISPLAY), flush=True)
+    _ret, state, _pending = pipeline.get_state(5 * Gst.SECOND)
+    print("pipeline PLAYING (encoder=%s display=%s geom=%dx%d state=%s)"
+          % (ENCODER, DISPLAY, WIDTH, HEIGHT, state), flush=True)
+    log_negotiated_geom(pipeline)
     GLib.MainLoop().run()
 
 
