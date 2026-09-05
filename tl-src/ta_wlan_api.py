@@ -9,9 +9,10 @@ POST JSON {ssid, psk} kicks save-wlan in a background thread and returns 200
 without waiting on WAIT_SEC. GET /api/wlan returns {ssids:[...]} (empty on scan fail).
 POST /api/reboot kicks a real system reboot in a background thread and returns 200.
 
-GET|POST /api/mode is the WAN-rebroadcast intent skeleton. Persist only —
-Infra owns AP-stays-up + NAT. Default mode is station. Skeleton reports
-nat:false and uplink none until Infra lands NAT.
+GET|POST /api/mode persists WAN-rebroadcast intent then kicks tesla-linux-wlan
+wan-ap / wan-off in a background thread (200 after persist+kick-started).
+Default mode is station. GET still reports nat:false and uplink none until
+Infra status is readable without dual-writing the helper.
 """
 import json
 import os
@@ -36,6 +37,8 @@ AP_SSID = os.environ.get("TA_AP_SSID") or "TeslaLinux"
 AP_ADDR = os.environ.get("TA_AP_ADDR") or "10.42.0.1/24"
 MODES = ("station", "wan_rebroadcast")
 DEFAULT_MODE = "station"
+# Primary helper names (not aliases wan-rebroadcast / wan-up / wan-down).
+MODE_KICK = {"wan_rebroadcast": "wan-ap", "station": "wan-off"}
 _MODE_LOCK = threading.Lock()
 
 if BIND in ("0.0.0.0", "::", "*", "[::]"):
@@ -166,6 +169,27 @@ def _kick_reboot():
     threading.Thread(target=run, name="reboot", daemon=True).start()
 
 
+def _kick_wan(mode):
+    """Kick wan-ap / wan-off after persist. Do not wait on NAT."""
+    cmd = [WLAN, MODE_KICK[mode]]
+
+    def run():
+        try:
+            out = subprocess.run(
+                cmd, check=False, timeout=120, capture_output=True, text=True,
+            )
+            if out.returncode != 0:
+                sys.stderr.write(
+                    "ta_wlan_api: %s exited %s\n" % (" ".join(cmd), out.returncode)
+                )
+                if out.stderr:
+                    sys.stderr.write(out.stderr if out.stderr.endswith("\n") else out.stderr + "\n")
+        except (OSError, subprocess.SubprocessError) as exc:
+            sys.stderr.write("ta_wlan_api: %s failed: %s\n" % (" ".join(cmd), exc))
+
+    threading.Thread(target=run, name="wan-mode", daemon=True).start()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -292,6 +316,7 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self._json(500, {"error": "could not persist mode"})
             return
+        _kick_wan(mode)
         self._json(200, {"ok": True, "mode": mode})
 
 def main():
@@ -327,10 +352,26 @@ def _selftest():
 
     tmp = tempfile.mkdtemp(prefix="tl-mode-")
     mode_path = os.path.join(tmp, "mode.json")
+    argv_log = os.path.join(tmp, "wlan-argv.log")
     wlan_bin = os.path.join(tmp, "wlan-bin")
     with open(wlan_bin, "w", encoding="utf-8") as f:
-        f.write("#!/bin/sh\nexit 0\n")
+        f.write("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '%s'\nexit 0\n" % argv_log)
     os.chmod(wlan_bin, 0o755)
+
+    def argv_lines():
+        if not os.path.exists(argv_log):
+            return []
+        with open(argv_log, encoding="utf-8") as f:
+            return [ln.strip() for ln in f if ln.strip()]
+
+    def wait_argv(n, timeout=2.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            lines = argv_lines()
+            if len(lines) >= n:
+                return lines
+            time.sleep(0.02)
+        return argv_lines()
 
     global MODE_FILE, REBOOT_BIN, WLAN
     MODE_FILE = mode_path
@@ -378,6 +419,7 @@ def _selftest():
         with open(mode_path, encoding="utf-8") as f:
             persisted = json.load(f)
         check(persisted == {"mode": "wan_rebroadcast"}, "persist wan_rebroadcast")
+        check(wait_argv(1) == ["wan-ap"], "POST wan_rebroadcast kicks wan-ap")
 
         status, obj, _, _ = req("GET", "/api/mode")
         check(status == 200, "GET after persist status")
@@ -391,12 +433,35 @@ def _selftest():
         check(status == 200 and obj == {"ok": True, "mode": "station"}, "POST station")
         status, obj, _, _ = req("GET", "/api/mode")
         check(obj["mode"] == "station", "GET after station persist")
+        check(wait_argv(2) == ["wan-ap", "wan-off"], "POST station kicks wan-off")
+        check(all(line in ("wan-ap", "wan-off") for line in argv_lines()), "primary names, not aliases")
 
         status, obj, _, _ = req("POST", "/api/mode", {"mode": "lte"})
         check(status == 400, "invalid mode 400")
         check(obj and "error" in obj, "invalid mode error")
         status, obj, _, _ = req("GET", "/api/mode")
         check(obj["mode"] == "station", "invalid POST does not change mode")
+        time.sleep(0.1)
+        check(argv_lines() == ["wan-ap", "wan-off"], "invalid POST does not kick")
+
+        missing = os.path.join(tmp, "missing-wlan")
+        WLAN = missing
+        status, obj, _, _ = req("POST", "/api/mode", {"mode": "wan_rebroadcast"})
+        check(status == 200 and obj == {"ok": True, "mode": "wan_rebroadcast"}, "missing helper still 200")
+        with open(mode_path, encoding="utf-8") as f:
+            check(json.load(f) == {"mode": "wan_rebroadcast"}, "persist when helper missing")
+
+        sleeper = os.path.join(tmp, "wlan-sleep")
+        with open(sleeper, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nsleep 3\nexit 0\n")
+        os.chmod(sleeper, 0o755)
+        WLAN = sleeper
+        t0 = time.monotonic()
+        status, obj, _, _ = req("POST", "/api/mode", {"mode": "station"})
+        elapsed = time.monotonic() - t0
+        check(status == 200 and obj == {"ok": True, "mode": "station"}, "slow helper still 200")
+        check(elapsed < 1.0, "POST returns before helper finishes")
+        WLAN = wlan_bin
 
         status, obj, _, _ = req("POST", "/api/mode", {"ssid": "x"})
         check(status == 400 and obj.get("error") == "missing mode", "missing mode")
