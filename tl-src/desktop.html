@@ -5,20 +5,23 @@
 <style>
 html,body{margin:0;height:100%;background:#000;overflow:hidden;display:flex;flex-direction:column;
   font:13px ui-monospace,Consolas,monospace;color:#9f9}
-#wrap{position:relative;flex:1 1 auto;min-height:0;width:100%}
-#stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
+#wrap{position:relative;flex:1 1 auto;min-height:0;width:100%;overflow:hidden;z-index:0}
+#stage{position:absolute;inset:0;top:0;right:0;bottom:0;left:0;display:flex;align-items:center;justify-content:center}
 canvas{max-width:100%;max-height:100%;display:block;pointer-events:none}
-#feed{position:absolute;inset:0;z-index:1;touch-action:none;cursor:crosshair;
+#feed{position:absolute;inset:0;top:0;right:0;bottom:0;left:0;z-index:1;touch-action:none;cursor:crosshair;
   pointer-events:auto;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 #hud{flex:0 0 auto;padding:4px 8px;background:rgba(0,0,0,.65);font-size:12px;
-  -webkit-user-select:none;user-select:none}
+  -webkit-user-select:none;user-select:none;position:relative;z-index:2}
 #hud.hide{display:none}
-#bar{flex:0 0 auto;padding:6px 8px;display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.65)}
+#bar{flex:0 0 auto;padding:6px 8px;display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.65);
+  position:relative;z-index:2}
 #bar button{font:inherit;padding:6px 12px;border:1px solid #2a6ea8;
-  border-radius:6px;background:#1b4f7a;color:#fff;cursor:pointer}
+  border-radius:6px;background:#1b4f7a;color:#fff;cursor:pointer;position:relative;z-index:3}
 #bar button:disabled{opacity:.5;cursor:default}
 #bar .hint{opacity:.85}
-body.chrome-off #hud,body.chrome-off #bar{display:none}
+body.chrome-off #hud,body.chrome-off #bar{display:none!important}
+body.chrome-off #wrap{position:fixed;inset:0;top:0;right:0;bottom:0;left:0;width:100%;height:100%;flex:none}
+body.chrome-off #stage,body.chrome-off #feed{inset:0;top:0;right:0;bottom:0;left:0;width:100%;height:100%}
 </style>
 <div id="hud">starting…</div>
 <div id="wrap"><div id="stage"><canvas id="c" width="1280" height="720"></canvas><div id="feed"></div></div></div>
@@ -104,8 +107,12 @@ feed.addEventListener('pointermove',e=>{if(dragging)send('move',e);e.preventDefa
 feed.addEventListener('pointerup',  e=>{dragging=false;send('up',e);e.preventDefault();});
 feed.addEventListener('pointercancel',e=>{dragging=false;send('up',e);});
 feed.addEventListener('contextmenu',e=>e.preventDefault());
-// tap the HUD area to toggle it
-addEventListener('keydown',e=>{ if(e.key==='h') hud.classList.toggle('hide'); });
+function chromeOff(e){
+  if(document.body.classList.contains('chrome-off')) return;
+  if(e){ try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } }
+  document.body.classList.add('chrome-off');
+}
+addEventListener('keydown',e=>{ if(e.key==='h'||e.key==='H') chromeOff(e); });
 document.getElementById('reboot').addEventListener('click', async ()=>{
   const b=document.getElementById('reboot');
   if(b.disabled) return;
@@ -114,9 +121,8 @@ document.getElementById('reboot').addEventListener('click', async ()=>{
     await fetch('/api/reboot',{method:'POST',credentials:'same-origin',cache:'no-store'});
   }catch(e){}
 });
-document.getElementById('hide').addEventListener('click',()=>{
-  document.body.classList.add('chrome-off');
-});
+const hideBtn=document.getElementById('hide');
+['pointerdown','touchend','click'].forEach(t=>hideBtn.addEventListener(t,chromeOff,{passive:false}));
 
 /* ---------- audio: raw S16LE PCM -> Web Audio ----------
    Starts automatically on load. Some browsers' autoplay policy opens the
