@@ -355,7 +355,7 @@ def _selftest():
     argv_log = os.path.join(tmp, "wlan-argv.log")
     wlan_bin = os.path.join(tmp, "wlan-bin")
     with open(wlan_bin, "w", encoding="utf-8") as f:
-        f.write("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '%s'\nexit 0\n" % argv_log)
+        f.write("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> '%s'\nexit 0\n" % argv_log)
     os.chmod(wlan_bin, 0o755)
 
     def argv_lines():
