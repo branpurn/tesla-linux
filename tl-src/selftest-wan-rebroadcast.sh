@@ -42,10 +42,10 @@ grep -q 'mode.json' "$HELPER" && pass "helper honors mode.json" \
     || bad "helper missing mode.json"
 grep -Eq 'masquerade|MASQUERADE' "$HELPER" && pass "helper has NAT/masquerade" \
     || bad "helper missing masquerade"
-if grep -Eq 'listen 0\.0\.0\.0' "$HELPER"; then
-    bad "helper would bind nginx to 0.0.0.0"
+if awk '/^write_nginx_servers\(\)/,/^}/' "$HELPER" | grep -Eq 'listen 0\.0\.0\.0|listen 80;|listen \[::\]'; then
+    bad "write_nginx_servers would bind nginx to 0.0.0.0"
 else
-    pass "helper never listen 0.0.0.0"
+    pass "write_nginx_servers never listen 0.0.0.0"
 fi
 
 TREE="$(mktemp -d /tmp/tl-wan-tree.XXXXXX)"
