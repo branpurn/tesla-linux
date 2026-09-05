@@ -44,7 +44,7 @@ a{color:#8ecdff}
 </div>
 <div id="wan" hidden>
   <p>Keep TeslaLinux AP up. Plug ethernet for uplink. Clients on TeslaLinux get internet. Open http://10.42.0.1/ — do not hunt a DHCP station IP.</p>
-  <p id="wan-facts">TeslaLinux AP stays up at 10.42.0.1/24. Uplink is ethernet. Factory ethernet is 10.42.1.1/24 for management.</p>
+  <p id="wan-facts">TeslaLinux AP stays up at 10.42.0.1/24. Factory ethernet is 10.42.1.1/24 for management.</p>
 </div>
 <p id="status"></p>
 <p><a href="desktop.html">Desktop</a> · <a href="probe.html">Probe</a></p>
@@ -71,11 +71,14 @@ async function fetchRel(url, opts){
 
 function paintWan(data){
   const ap=(data&&data.ap)||{};
+  const up=(data&&data.uplink)||{};
   const ssid=(typeof ap.ssid==='string'&&ap.ssid.trim())?ap.ssid.trim():'TeslaLinux';
   const addr=(typeof ap.addr==='string'&&ap.addr.trim())?ap.addr.trim():'10.42.0.1/24';
-  // Always ethernet in this skeleton. Do not render uplink.kind lte as dongle chrome.
-  const bits=[ssid+' AP stays up at '+addr+'.', 'Uplink is ethernet.'];
+  // GET shape: {mode, ap:{up,ssid,addr}, uplink:{kind,iface,addr}, nat}.
+  // Skeleton uplink.kind is none and nat is false until Infra. No LTE chrome.
+  const bits=[ssid+' AP stays up at '+addr+'.'];
   if(ap.up===true) bits.push('AP is up.');
+  if(up.kind==='ethernet') bits.push('Uplink is ethernet.');
   bits.push('Factory ethernet is 10.42.1.1/24 for management.');
   $('wan-facts').textContent=bits.join(' ');
 }
@@ -162,12 +165,15 @@ async function selectMode(mode){
     });
     if(backendMissing(r)) return;
     if(!r.ok) return;
-    try{
-      const g=await fetchRel(modeApi,{method:'GET'});
-      if(backendMissing(g) || !g.ok) return;
-      const data=await g.json();
-      showMode(modeFrom(data)||mode, data);
-    }catch(e){}
+    let posted=null;
+    try{ posted=await r.json(); }catch(e){}
+    if(posted && posted.ok && (posted.mode===STATION || posted.mode===WAN)){
+      showMode(posted.mode, posted);
+    }
+    const g=await fetchRel(modeApi,{method:'GET'});
+    if(backendMissing(g) || !g.ok) return;
+    const data=await g.json();
+    showMode(modeFrom(data), data);
   }catch(e){ /* 404/offline: chrome still switches */ }
 }
 
