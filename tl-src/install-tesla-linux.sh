@@ -633,6 +633,7 @@ cat > /etc/nginx/tl-locations.conf <<'EOF'
 # WAVE 1: / is the station-WLAN picker (index.html). desktop.html stays the in-car stream.
 # /api/wlan → loopback ta_wlan_api.py :9094 (save-wlan kick + nmcli scan). 501 gone.
 # /api/reboot → same loopback :9094 (system reboot kick; next boot joins saved WLAN).
+# /api/mode → same loopback :9094 (WAN-rebroadcast intent; persist only).
 root /var/www/tl;
 index index.html;
 location /sockets/display     { proxy_pass http://127.0.0.1:9091; include /etc/nginx/tl-ws.conf; }
@@ -648,6 +649,12 @@ location /api/reboot {
     proxy_pass http://127.0.0.1:9094;
     proxy_set_header Host $host;
     client_max_body_size 1k;
+}
+location /api/mode {
+    proxy_pass http://127.0.0.1:9094;
+    proxy_set_header Host $host;
+    proxy_set_header Content-Type $http_content_type;
+    client_max_body_size 8k;
 }
 EOF
 # Placeholder until tesla-linux-wlan nginx-bind sees an AP/station/ethernet IPv4.
