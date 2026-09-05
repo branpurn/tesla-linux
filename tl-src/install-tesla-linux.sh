@@ -527,11 +527,11 @@ verify_wan_rebroadcast() {
     grep -Eq 'masquerade|MASQUERADE' "$wlan_bin" \
         || { echo "ERROR: tesla-linux-wlan missing NAT/masquerade helper" >&2; exit 1; }
     grep -q 'cmd_wan_up' "$wlan_bin" \
-        || { echo "ERROR: tesla-linux-wlan missing wan-up" >&2; exit 1; }
-    grep -q 'wan-ap|wan-up' "$wlan_bin" \
-        || { echo "ERROR: tesla-linux-wlan missing wan-ap alias" >&2; exit 1; }
+        || { echo "ERROR: tesla-linux-wlan missing wan-ap" >&2; exit 1; }
+    grep -q 'wan-ap|wan-rebroadcast|wan-up' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing wan-ap / wan-rebroadcast" >&2; exit 1; }
     grep -q 'wan-off|wan-down' "$wlan_bin" \
-        || { echo "ERROR: tesla-linux-wlan missing wan-off alias" >&2; exit 1; }
+        || { echo "ERROR: tesla-linux-wlan missing wan-off" >&2; exit 1; }
     grep -q 'mode.json' "$wlan_bin" \
         || { echo "ERROR: tesla-linux-wlan does not honor /etc/tesla-linux/mode.json" >&2; exit 1; }
     grep -q 'wan_mode_on' "$wlan_bin" \

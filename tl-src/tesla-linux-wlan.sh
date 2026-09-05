@@ -32,7 +32,7 @@ WAIT_SEC="${WAIT_SEC:-20}"
 IFACE_WAIT_SEC="${IFACE_WAIT_SEC:-60}"
 # Alternate mode: AP stays up; do not join a station WLAN. Ethernet WAN is NAT'd.
 # Backend persist is /etc/tesla-linux/mode.json (POST /api/mode). Missing = station.
-# wan-ap/wan-up also plants /run/tesla-linux-wan for this boot.
+# wan-ap / wan-rebroadcast also plants /run/tesla-linux-wan for this boot.
 WAN_REBROADCAST="${WAN_REBROADCAST:-0}"
 WAN_RUNTIME="${WAN_RUNTIME:-/run/tesla-linux-wan}"
 MODE_FILE="${MODE_FILE:-/etc/tesla-linux/mode.json}"
@@ -1180,22 +1180,23 @@ EOF
 
 usage() {
     cat <<EOF
-usage: tesla-linux-wlan <boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan|wan-ap|wan-up|wan-off|wan-down|wan-verify|selftest>
-  boot         eth-up + nginx-bind; wifi/AP if present; success if ${ETH_ADDR} bound or AP/station
-               mode.json wan_rebroadcast (or WAN_REBROADCAST=1): skip station; AP + NAT
-  eth-up       wait ~${IFACE_WAIT_SEC}s for wired iface; static ${ETH_ADDR}/${ETH_PREFIX} (no DHCP)
-               WAN mode keeps ${ETH_ADDR} and allows DHCP default-route on the same jack
-  ap-up        TeslaLinux hostapd AP + dnsmasq (never if station is up, unless WAN mode)
-  ap-down      stop AP; return iface to NetworkManager
-  nginx-bind   listen on current AP/station/ethernet IPv4s only (WAN: ${AP_ADDR} + ${ETH_ADDR} only)
-  maybe-ap     dispatcher: station if possible, else AP (WAN mode: wan-ap)
-  save-wlan    BACKEND bounce: save infra SSID/PSK, AP down, NM up
-  wan-ap       AP stays up; skip station; NAT 10.42.0.0/24 out ethernet WAN (alias: wan-up)
-  wan-up       same as wan-ap (Backend /api/mode wan_rebroadcast kick)
-  wan-off      remove NAT; restore factory ethernet static (alias: wan-down)
-  wan-down     same as wan-off (leave wan_rebroadcast; Backend persist stays mode.json)
-  wan-verify   fail-hard: factory AP addr, no nginx 0.0.0.0, NAT helper when mode selected
-  selftest     address-filter + WAN skeleton checks (no hardware)
+usage: tesla-linux-wlan <boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan|wan-ap|wan-rebroadcast|wan-off|wan-verify|selftest>
+  boot              eth-up + nginx-bind; wifi/AP if present; success if ${ETH_ADDR} bound or AP/station
+                    mode.json wan_rebroadcast: skip station; AP + NAT
+  eth-up            wait ~${IFACE_WAIT_SEC}s for wired iface; static ${ETH_ADDR}/${ETH_PREFIX} (no DHCP)
+                    WAN mode keeps ${ETH_ADDR} and allows DHCP default-route on the same jack
+  ap-up             TeslaLinux hostapd AP + dnsmasq (never if station is up, unless WAN mode)
+  ap-down           stop AP; return iface to NetworkManager
+  nginx-bind        listen on current AP/station/ethernet IPv4s only (WAN: ${AP_ADDR} + ${ETH_ADDR} only)
+  maybe-ap          dispatcher: station if possible, else AP (WAN mode: wan-ap)
+  save-wlan         BACKEND bounce: save infra SSID/PSK, AP down, NM up
+  wan-ap            enter AP-stays-up + NAT (Backend kick for /api/mode wan_rebroadcast)
+  wan-rebroadcast   same as wan-ap
+  wan-off           leave WAN mode; back to maybe-ap / station (Backend kick for /api/mode station)
+  wan-up            alias of wan-ap
+  wan-down          alias of wan-off
+  wan-verify        fail-hard: factory AP addr, no nginx 0.0.0.0, NAT helper when mode selected
+  selftest          address-filter + WAN skeleton checks (no hardware)
 EOF
 }
 
@@ -1203,7 +1204,7 @@ main() {
     local cmd="${1:-}"
     shift || true
     case "$cmd" in
-        boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan|wan-ap|wan-up|wan-off|wan-down)
+        boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan|wan-ap|wan-rebroadcast|wan-up|wan-off|wan-down)
             with_lock
             ;;
     esac
@@ -1215,7 +1216,7 @@ main() {
         nginx-bind) cmd_nginx_bind ;;
         maybe-ap) cmd_maybe_ap ;;
         save-wlan) cmd_save_wlan "${1:-}" "${2:-}" ;;
-        wan-ap|wan-up) cmd_wan_up ;;
+        wan-ap|wan-rebroadcast|wan-up) cmd_wan_up ;;
         wan-off|wan-down) cmd_wan_down ;;
         wan-verify) cmd_wan_verify "${1:-}" ;;
         selftest) cmd_selftest ;;
