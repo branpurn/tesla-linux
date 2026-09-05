@@ -32,9 +32,10 @@ First-boot still creates the NM infra profile (`connection.autoconnect yes`). `t
 | Path | Role |
 |---|---|
 | `/etc/tesla-linux/ap.env` | Factory `AP_SSID=TeslaLinux`, `AP_PSK=teslalinux`, `AP_ADDR=10.42.0.1`, `ETH_ADDR=10.42.1.1` |
+| `/etc/tesla-linux/mode.json` | WAN-rebroadcast intent (`station` default if missing). Written by `POST /api/mode` |
 | `/etc/NetworkManager/system-connections/tesla-linux-eth.nmconnection` | Wired static **10.42.1.1/24** (no DHCP; not AP `10.42.0.1/24`) |
 | `/usr/local/sbin/tesla-linux-wlan` | `boot` / `eth-up` / `ap-up` / `ap-down` / `nginx-bind` / `maybe-ap` / `save-wlan` |
-| `/usr/local/sbin/ta_wlan_api.py` | loopback `127.0.0.1:9094` — GET scan + POST save-wlan kick + POST `/api/reboot` |
+| `/usr/local/sbin/ta_wlan_api.py` | loopback `127.0.0.1:9094` — GET scan + POST save-wlan kick + POST `/api/reboot` + GET/POST `/api/mode` |
 | `tesla-linux-wlan.service` | `After=NetworkManager.service tesla-linux-firstboot.service`; oneshot `boot`; `Restart=on-failure`; `WantedBy=multi-user.target` (not desktop/X). nginx `After=`/`Wants=` this unit; this unit does not `Before=nginx` |
 | `tesla-linux-firstboot.service` | `After=NetworkManager.service`; `Before=tesla-linux-wlan.service` (eth-up/cert before wlan boot). Does not `Before=nginx`. After the TLS cert: `nginx -t && nginx -s reload` only if nginx is already active; never `systemctl start/restart nginx`. |
 | `tesla-linux-wlan-api.service` | `Type=simple`; `TA_BIND=127.0.0.1` |
@@ -53,9 +54,9 @@ Chrome lock (Designer): [design/ap-setup.md](../design/ap-setup.md) — title **
 - `GET` is optional: if Backend later returns a scan list, the page fills a dropdown; a typed SSID is enough if there is no scan.
 - Do not rewrite `desktop.html` / `probe.html` for a settings maze. Do not reprint the factory AP PSK here.
 
-## Backend `/api/wlan` + `/api/reboot` (this SHA)
+## Backend `/api/wlan` + `/api/reboot` + `/api/mode` (this SHA)
 
-`tl-src/ta_wlan_api.py` listens on **`127.0.0.1:9094`** (never `0.0.0.0`). nginx `location /api/wlan` and `location /api/reboot` `proxy_pass` there. **501 is gone.**
+`tl-src/ta_wlan_api.py` listens on **`127.0.0.1:9094`** (never `0.0.0.0`). nginx `location /api/wlan`, `location /api/reboot`, and `location /api/mode` `proxy_pass` there. **501 is gone.**
 
 ```
 # save infra profile, tear down AP, NM associate, rebind nginx
@@ -67,6 +68,29 @@ tesla-linux-wlan save-wlan <ssid> [psk]
 - Non-JSON POST or missing/invalid `ssid`: `400 {error:"..."}`.
 - `POST /api/reboot` kicks a real system reboot (`systemctl reboot`, then `/sbin/reboot`) in a **background thread** and returns **HTTP 200 fast**. Desktop/probe Reboot buttons use origin-relative POST. Hint: **Next boot joins that WLAN.**
 - Display/touch/audio stay `TA_BIND=127.0.0.1`. Do not rewrite those `ta_*.py` files.
+
+### `/api/mode` — WAN rebroadcast intent (skeleton)
+
+Alternate mode: do **not** join another station WLAN. A WAN uplink is provided (ethernet first; USB LTE later). TeslaLinux AP stays up as AP at factory **10.42.0.1/24** unless a later lock moves it, and NAT/rebroadcasts that WAN so clients on TeslaLinux get internet. Operators stay on that factory AP address — do not guess a DHCP station IP.
+
+This SHA persists **intent only**. Infra owns AP-stays-up + NAT. `tesla-linux-wlan.sh` / hostapd / iptables are untouched here.
+
+Origin-relative `GET`/`POST` `/api/mode` (same `location.host` as the page). Persist: `/etc/tesla-linux/mode.json`. Missing or corrupt file is **`station`**.
+
+`GET` returns:
+
+```json
+{
+  "mode": "station",
+  "ap": { "up": true, "ssid": "TeslaLinux", "addr": "10.42.0.1/24" },
+  "uplink": { "kind": "none", "iface": null, "addr": null },
+  "nat": false
+}
+```
+
+`mode` is `station` or `wan_rebroadcast`. Skeleton reports `nat: false` and uplink `kind: none` until Infra lands NAT. Factory AP identity is the lock (`TeslaLinux` / `10.42.0.1/24`).
+
+`POST` JSON `{mode}` (`station` or `wan_rebroadcast`) writes the intent file and returns **200 `{ok:true, mode}`**. Invalid/missing `mode` is `400 {error:"..."}`.
 
 ## Packages
 

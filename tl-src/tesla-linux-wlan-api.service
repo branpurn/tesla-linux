@@ -1,5 +1,5 @@
 [Unit]
-Description=Tesla Linux WLAN + reboot API (loopback /api/wlan /api/reboot)
+Description=Tesla Linux WLAN + reboot + mode API (loopback /api/wlan /api/reboot /api/mode)
 After=NetworkManager.service
 Wants=NetworkManager.service
 
