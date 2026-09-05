@@ -17,26 +17,42 @@ a{color:#8ecdff}
 .psk-row{display:flex;gap:8px}
 .psk-row input{flex:1;min-width:0}
 .psk-row button{flex:0 0 auto;background:#161616;border-color:#333;color:#e8e8e8}
+.modes{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px;max-width:36em}
+.modes button[aria-pressed="true"]{outline:2px solid #8ecdff}
+#join[hidden],#wan[hidden]{display:none}
 </style>
 <h1>Wi-Fi</h1>
-<p>Join the same Wi-Fi network as the car</p>
-<form id="f">
-  <label>Network
-    <select id="scan" hidden></select>
-    <input id="ssid" name="ssid" autocomplete="off">
-  </label>
-  <label>Password
-    <span class="psk-row">
-      <input id="psk" name="psk" type="password" autocomplete="new-password">
-      <button type="button" id="peek" aria-pressed="false">Show</button>
-    </span>
-  </label>
-  <button id="go" type="submit">Join</button>
-</form>
+<div class="modes" role="group" aria-label="Mode">
+  <button type="button" id="pick-station" aria-pressed="true">Join</button>
+  <button type="button" id="pick-wan" aria-pressed="false">WAN rebroadcast</button>
+</div>
+<div id="join">
+  <p>Join the same Wi-Fi network as the car</p>
+  <form id="f">
+    <label>Network
+      <select id="scan" hidden></select>
+      <input id="ssid" name="ssid" autocomplete="off">
+    </label>
+    <label>Password
+      <span class="psk-row">
+        <input id="psk" name="psk" type="password" autocomplete="new-password">
+        <button type="button" id="peek" aria-pressed="false">Show</button>
+      </span>
+    </label>
+    <button id="go" type="submit">Join</button>
+  </form>
+</div>
+<div id="wan" hidden>
+  <p>Keep TeslaLinux AP up. Plug ethernet for uplink. Clients on TeslaLinux get internet. Open http://10.42.0.1/ — do not hunt a DHCP station IP.</p>
+  <p id="wan-facts">TeslaLinux AP stays up at 10.42.0.1/24. Uplink is ethernet. Factory ethernet is 10.42.1.1/24 for management.</p>
+</div>
 <p id="status"></p>
 <p><a href="desktop.html">Desktop</a> · <a href="probe.html">Probe</a></p>
 <script>
-const api='/api/wlan';
+const wlanApi='/api/wlan';
+const modeApi='/api/mode';
+const STATION='station';
+const WAN='wan_rebroadcast';
 const $=id=>document.getElementById(id);
 const status=m=>{ $('status').innerHTML=m; };
 
@@ -45,12 +61,57 @@ function fail(r){
   return '<span class="bad">Couldn\'t join</span> ('+hint+')';
 }
 
-async function fetchApi(opts){
+async function fetchRel(url, opts){
   const ac=new AbortController();
   const t=setTimeout(()=>ac.abort(),15000);
   try{
-    return await fetch(api, Object.assign({signal:ac.signal, credentials:'same-origin'}, opts));
+    return await fetch(url, Object.assign({signal:ac.signal, credentials:'same-origin'}, opts));
   }finally{ clearTimeout(t); }
+}
+
+function paintWan(data){
+  const ap=(data&&data.ap)||{};
+  const ssid=(typeof ap.ssid==='string'&&ap.ssid.trim())?ap.ssid.trim():'TeslaLinux';
+  const addr=(typeof ap.addr==='string'&&ap.addr.trim())?ap.addr.trim():'10.42.0.1/24';
+  // Always ethernet in this skeleton. Do not render uplink.kind lte as dongle chrome.
+  const bits=[ssid+' AP stays up at '+addr+'.', 'Uplink is ethernet.'];
+  if(ap.up===true) bits.push('AP is up.');
+  bits.push('Factory ethernet is 10.42.1.1/24 for management.');
+  $('wan-facts').textContent=bits.join(' ');
+}
+
+function showMode(mode, data){
+  const wan=mode===WAN;
+  $('join').hidden=wan;
+  $('wan').hidden=!wan;
+  $('pick-station').setAttribute('aria-pressed', wan?'false':'true');
+  $('pick-wan').setAttribute('aria-pressed', wan?'true':'false');
+  if(wan) paintWan(data||null);
+}
+
+function modeFrom(data){
+  return data && data.mode===WAN ? WAN : STATION;
+}
+
+function backendMissing(r){
+  return !r || r.status===404 || r.status===501;
+}
+
+let scanned=false;
+async function maybeScan(){
+  if(scanned) return;
+  status('Scanning');
+  try{
+    const r=await fetchRel(wlanApi,{method:'GET'});
+    if(r.status===501 || !r.ok) return;
+    const data=await r.json();
+    const list=Array.isArray(data)?data: (data.ssids||data.networks||data.scan||[]);
+    if(Array.isArray(list)) fillScan(list);
+    scanned=true;
+  }catch(e){ /* no scan endpoint — typing the SSID is enough */ }
+  finally{
+    if($('status').textContent==='Scanning') status('');
+  }
 }
 
 function fillScan(list){
@@ -72,18 +133,42 @@ function fillScan(list){
   sel.addEventListener('change',()=>{ if(sel.value) $('ssid').value=sel.value; });
 }
 
-async function maybeScan(){
-  status('Scanning');
+async function loadMode(){
   try{
-    const r=await fetchApi({method:'GET'});
-    if(r.status===501 || !r.ok) return;
+    const r=await fetchRel(modeApi,{method:'GET'});
+    if(backendMissing(r) || !r.ok){
+      showMode(STATION);
+      maybeScan();
+      return;
+    }
     const data=await r.json();
-    const list=Array.isArray(data)?data: (data.ssids||data.networks||data.scan||[]);
-    if(Array.isArray(list)) fillScan(list);
-  }catch(e){ /* no scan endpoint — typing the SSID is enough */ }
-  finally{
-    if($('status').textContent==='Scanning') status('');
+    const mode=modeFrom(data);
+    showMode(mode, data);
+    if(mode===STATION) maybeScan();
+  }catch(e){
+    showMode(STATION);
+    maybeScan();
   }
+}
+
+async function selectMode(mode){
+  showMode(mode);
+  if(mode===STATION) maybeScan();
+  try{
+    const r=await fetchRel(modeApi,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mode})
+    });
+    if(backendMissing(r)) return;
+    if(!r.ok) return;
+    try{
+      const g=await fetchRel(modeApi,{method:'GET'});
+      if(backendMissing(g) || !g.ok) return;
+      const data=await g.json();
+      showMode(modeFrom(data)||mode, data);
+    }catch(e){}
+  }catch(e){ /* 404/offline: chrome still switches */ }
 }
 
 $('f').addEventListener('submit', async ev=>{
@@ -94,7 +179,7 @@ $('f').addEventListener('submit', async ev=>{
   $('go').disabled=true;
   status('Joining');
   try{
-    const r=await fetchApi({
+    const r=await fetchRel(wlanApi,{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({ssid, psk})
@@ -114,5 +199,8 @@ $('peek').addEventListener('click',()=>{
   $('peek').setAttribute('aria-pressed', show?'true':'false');
 });
 
-maybeScan();
+$('pick-station').addEventListener('click',()=>selectMode(STATION));
+$('pick-wan').addEventListener('click',()=>selectMode(WAN));
+
+loadMode();
 </script>
