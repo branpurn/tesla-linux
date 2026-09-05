@@ -34,7 +34,7 @@ First-boot still creates the NM infra profile (`connection.autoconnect yes`). `t
 | `/etc/tesla-linux/ap.env` | Factory `AP_SSID=TeslaLinux`, `AP_PSK=teslalinux`, `AP_ADDR=10.42.0.1`, `ETH_ADDR=10.42.1.1` |
 | `/etc/tesla-linux/mode.json` | WAN-rebroadcast intent (`station` default if missing). Written by `POST /api/mode` |
 | `/etc/NetworkManager/system-connections/tesla-linux-eth.nmconnection` | Wired static **10.42.1.1/24** (no DHCP; not AP `10.42.0.1/24`) |
-| `/usr/local/sbin/tesla-linux-wlan` | `boot` / `eth-up` / `ap-up` / `ap-down` / `nginx-bind` / `maybe-ap` / `save-wlan` |
+| `/usr/local/sbin/tesla-linux-wlan` | `boot` / `eth-up` / `ap-up` / `ap-down` / `nginx-bind` / `maybe-ap` / `save-wlan` / `wan-ap` (`wan-up`) / `wan-off` (`wan-down`) / `wan-verify` |
 | `/usr/local/sbin/ta_wlan_api.py` | loopback `127.0.0.1:9094` — GET scan + POST save-wlan kick + POST `/api/reboot` + GET/POST `/api/mode` |
 | `tesla-linux-wlan.service` | `After=NetworkManager.service tesla-linux-firstboot.service`; oneshot `boot`; `Restart=on-failure`; `WantedBy=multi-user.target` (not desktop/X). nginx `After=`/`Wants=` this unit; this unit does not `Before=nginx` |
 | `tesla-linux-firstboot.service` | `After=NetworkManager.service`; `Before=tesla-linux-wlan.service` (eth-up/cert before wlan boot). Does not `Before=nginx`. After the TLS cert: `nginx -t && nginx -s reload` only if nginx is already active; never `systemctl start/restart nginx`. |
@@ -73,7 +73,7 @@ tesla-linux-wlan save-wlan <ssid> [psk]
 
 Alternate mode: do **not** join another station WLAN. A WAN uplink is provided (ethernet first; USB LTE later). TeslaLinux AP stays up as AP at factory **10.42.0.1/24** unless a later lock moves it, and NAT/rebroadcasts that WAN so clients on TeslaLinux get internet. Operators stay on that factory AP address — do not guess a DHCP station IP.
 
-This SHA persists **intent only**. Infra owns AP-stays-up + NAT. `tesla-linux-wlan.sh` / hostapd / iptables are untouched here.
+`POST /api/mode` persists intent only (`/etc/tesla-linux/mode.json`). The wlan helper honors that file: `wan_rebroadcast` → `wan-ap` (AP stays up + NAT); `station` or absent → station-else-AP (`wan-off`). See [WAN-REBROADCAST.md](WAN-REBROADCAST.md).
 
 Origin-relative `GET`/`POST` `/api/mode` (same `location.host` as the page). Persist: `/etc/tesla-linux/mode.json`. Missing or corrupt file is **`station`**.
 

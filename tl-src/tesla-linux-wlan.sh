@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Tesla Linux WAVE 1 — saved-WLAN station else TeslaLinux hostapd AP.
+# Alternate: WAN rebroadcast — AP stays up; ethernet WAN is NAT'd to AP clients.
 #
 # NetworkManager owns infrastructure (station) autoconnect.
 # Fallback AP is hostapd + dnsmasq (not nmcli hotspot), SSID TeslaLinux.
 # nginx listen is rewritten to the current AP / station / ethernet IPv4s only
 # (never 0.0.0.0, never loopback-only). teslalinux.local is existing avahi.
+# WAN mode never binds nginx to a DHCP WAN address — operators use 10.42.0.1
+# (AP) and 10.42.1.1 (factory ethernet). Do not guess a station DHCP IP.
 #
 # FRONTEND-HOLE (this SHA): pick/save WLAN UI — do not invent a settings maze.
 # HDMI and web capture share XFCE on Xorg :0. AP must not wait on X.
@@ -27,6 +30,12 @@ ETH_CONN="${ETH_CONN:-tesla-linux-eth}"
 WAIT_SEC="${WAIT_SEC:-20}"
 # brcmfmac often appears after this oneshot first runs — wait, then fail so systemd restarts.
 IFACE_WAIT_SEC="${IFACE_WAIT_SEC:-60}"
+# Alternate mode: AP stays up; do not join a station WLAN. Ethernet WAN is NAT'd.
+# Backend persist is /etc/tesla-linux/mode.json (POST /api/mode). Missing = station.
+# wan-ap/wan-up also plants /run/tesla-linux-wan for this boot.
+WAN_REBROADCAST="${WAN_REBROADCAST:-0}"
+WAN_RUNTIME="${WAN_RUNTIME:-/run/tesla-linux-wan}"
+MODE_FILE="${MODE_FILE:-/etc/tesla-linux/mode.json}"
 
 HOSTAPD_CONF="${HOSTAPD_CONF:-/etc/tesla-linux/hostapd.conf}"
 DNSMASQ_CONF="${DNSMASQ_CONF:-/etc/tesla-linux/dnsmasq-ap.conf}"
@@ -145,6 +154,129 @@ eth_static_bound() {
     return 1
 }
 
+# Backend persist: {"mode":"wan_rebroadcast"|"station"}. Missing/corrupt = station.
+persisted_mode() {
+    local f="${MODE_FILE:-/etc/tesla-linux/mode.json}"
+    if [ -f "$f" ] && grep -Eq '"mode"[[:space:]]*:[[:space:]]*"wan_rebroadcast"' "$f"; then
+        printf '%s\n' wan_rebroadcast
+        return 0
+    fi
+    printf '%s\n' station
+}
+
+# AP-stays-up + NAT when mode.json is wan_rebroadcast, ap.env flag, or wan-ap runtime.
+wan_mode_on() {
+    case "${WAN_REBROADCAST:-0}" in
+        1|yes|true|on|ON) return 0 ;;
+    esac
+    [ -f "$WAN_RUNTIME" ] && return 0
+    [ "$(persisted_mode)" = wan_rebroadcast ]
+}
+
+# AP client subnet for NAT (factory 10.42.0.1/24 → 10.42.0.0/24).
+ap_client_net() {
+    printf '%s.0/%s\n' "${AP_ADDR%.*}" "${AP_PREFIX}"
+}
+
+have_nft() { command -v nft >/dev/null 2>&1; }
+have_iptables() { command -v iptables >/dev/null 2>&1; }
+
+set_ip_forward() {
+    if [ -w /proc/sys/net/ipv4/ip_forward ]; then
+        echo 1 > /proc/sys/net/ipv4/ip_forward
+    else
+        sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    fi
+}
+
+# Wired iface with a default route, else a non-factory bindable IPv4 (WAN DHCP).
+wan_uplink_iface() {
+    local n ip gw
+    gw="$(ip -4 route show default 2>/dev/null \
+        | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
+    if [ -n "$gw" ] && is_wired_iface "$gw"; then
+        printf '%s\n' "$gw"
+        return 0
+    fi
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        while IFS= read -r ip; do
+            [ -n "$ip" ] || continue
+            [ "$ip" = "$ETH_ADDR" ] && continue
+            [ "$ip" = "$AP_ADDR" ] && continue
+            is_bindable_ipv4 "$ip" || continue
+            printf '%s\n' "$n"
+            return 0
+        done < <(iface_ipv4s "$n")
+    done < <(wired_ifaces)
+    return 1
+}
+
+# Idempotent NAT: AP 10.42.0.0/24 masquerade out the wired WAN uplink.
+# nftables table tesla-linux-wan if nft exists; else iptables. No LTE drivers.
+apply_wan_nat() {
+    local wan net
+    net="$(ap_client_net)"
+    if ! wan="$(wan_uplink_iface)"; then
+        log "no wired WAN uplink yet; NAT not applied (factory $ETH_ADDR / AP $AP_ADDR still documented)"
+        return 0
+    fi
+    set_ip_forward
+    if have_nft; then
+        nft delete table ip tesla-linux-wan >/dev/null 2>&1 || true
+        nft -f - <<EOF
+table ip tesla-linux-wan {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        ip saddr $net oifname "$wan" masquerade
+    }
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        ip saddr $net oifname "$wan" accept
+        iifname "$wan" ip daddr $net ct state related,established accept
+    }
+}
+EOF
+        log "nft tesla-linux-wan masquerade $net -> $wan"
+        return 0
+    fi
+    if have_iptables; then
+        if ! iptables -t nat -C POSTROUTING -s "$net" -o "$wan" -m comment --comment tesla-linux-wan -j MASQUERADE 2>/dev/null; then
+            iptables -t nat -A POSTROUTING -s "$net" -o "$wan" -m comment --comment tesla-linux-wan -j MASQUERADE
+        fi
+        if ! iptables -C FORWARD -s "$net" -o "$wan" -m comment --comment tesla-linux-wan -j ACCEPT 2>/dev/null; then
+            iptables -A FORWARD -s "$net" -o "$wan" -m comment --comment tesla-linux-wan -j ACCEPT
+        fi
+        if ! iptables -C FORWARD -d "$net" -m state --state RELATED,ESTABLISHED -m comment --comment tesla-linux-wan -j ACCEPT 2>/dev/null; then
+            iptables -A FORWARD -d "$net" -m state --state RELATED,ESTABLISHED -m comment --comment tesla-linux-wan -j ACCEPT
+        fi
+        log "iptables tesla-linux-wan MASQUERADE $net -> $wan"
+        return 0
+    fi
+    log "nft/iptables missing; cannot NAT $net"
+    return 1
+}
+
+remove_wan_nat() {
+    if have_nft; then
+        nft delete table ip tesla-linux-wan >/dev/null 2>&1 || true
+    fi
+    if have_iptables; then
+        local spec
+        while spec="$(iptables -t nat -S POSTROUTING 2>/dev/null | grep -F tesla-linux-wan | head -n1)"; do
+            [ -n "$spec" ] || break
+            # shellcheck disable=SC2086
+            iptables -t nat -D ${spec#-A } 2>/dev/null || break
+        done
+        while spec="$(iptables -S FORWARD 2>/dev/null | grep -F tesla-linux-wan | head -n1)"; do
+            [ -n "$spec" ] || break
+            # shellcheck disable=SC2086
+            iptables -D ${spec#-A } 2>/dev/null || break
+        done
+    fi
+    rm -f "$WAN_RUNTIME"
+}
+
 is_ap_conn() {
     local name="$1" mode
     [ -n "$name" ] || return 1
@@ -260,6 +392,12 @@ port=0
 dhcp-range=$AP_DHCP_START,$AP_DHCP_END,12h
 dhcp-option=3,$AP_ADDR
 EOF
+    if wan_mode_on; then
+        cat >> "$DNSMASQ_CONF" <<EOF
+# WAN rebroadcast: AP clients use public DNS (no guess-the-station-IP path).
+dhcp-option=6,1.1.1.1,8.8.8.8
+EOF
+    fi
 }
 
 stop_pidfile() {
@@ -336,14 +474,22 @@ collect_bind_ips() {
     }
     if [ -n "$iface" ]; then
         while IFS= read -r ip; do
+            # WAN mode: never bind nginx to a station/WAN DHCP address on wifi.
+            if wan_mode_on && [ "$ip" != "$AP_ADDR" ] && [ "$ip" != "$ETH_ADDR" ]; then
+                continue
+            fi
             _emit_ip "$ip"
         done < <(iface_ipv4s "$iface")
     fi
     # Wired eth0/end0/en* (and VM virtio) — picker/desktop on the same ethernet.
+    # WAN mode: factory 10.42.1.1 only — do not bind the WAN DHCP IPv4.
     while IFS= read -r n; do
         [ -n "$n" ] || continue
         [ "$n" = "$iface" ] && continue
         while IFS= read -r ip; do
+            if wan_mode_on && [ "$ip" != "$ETH_ADDR" ]; then
+                continue
+            fi
             _emit_ip "$ip"
         done < <(iface_ipv4s "$n")
     done < <(wired_ifaces)
@@ -428,7 +574,7 @@ cmd_nginx_bind() {
 cmd_ap_up() {
     local iface
     iface="$(wifi_iface)" || { log "no Wi-Fi iface; cannot start AP"; return 1; }
-    if station_associated "$iface"; then
+    if station_associated "$iface" && ! wan_mode_on; then
         log "station associated; not starting AP"
         cmd_nginx_bind
         return 0
@@ -505,15 +651,22 @@ cmd_save_wlan() {
     cmd_nginx_bind
 }
 
-# Static 10.42.1.1/24 on the primary wired iface. No DHCP client. Not the AP subnet.
+# Factory static 10.42.1.1/24 on the primary wired iface. Not the AP subnet.
+# WAN mode: keep that documented address and also allow DHCP default-route (WAN).
 # Wait for delayed usb-net/cdc_ether/eth0/end0/en* — skip-if-none immediately is an operator hangup.
 cmd_eth_up() {
-    local iface name type
+    local iface name type ipv4_method=manual never_default=yes
     if ! iface="$(wait_wired_iface)"; then
         log "no wired iface after ${IFACE_WAIT_SEC}s; skip $ETH_CONN"
         return 0
     fi
-    log "wired $iface -> $ETH_ADDR/$ETH_PREFIX ($ETH_CONN, not DHCP, not $AP_ADDR/$AP_PREFIX)"
+    if wan_mode_on; then
+        ipv4_method=auto
+        never_default=no
+        log "wired $iface -> factory $ETH_ADDR/$ETH_PREFIX + DHCP WAN ($ETH_CONN; operators use $ETH_ADDR / $AP_ADDR)"
+    else
+        log "wired $iface -> $ETH_ADDR/$ETH_PREFIX ($ETH_CONN, not DHCP, not $AP_ADDR/$AP_PREFIX)"
+    fi
     if command -v nmcli >/dev/null 2>&1; then
         while IFS=: read -r name type; do
             [ -n "$name" ] || continue
@@ -528,14 +681,14 @@ cmd_eth_up() {
             nmcli connection modify "$ETH_CONN" \
                 connection.interface-name "$iface" \
                 connection.autoconnect yes \
-                ipv4.method manual \
+                ipv4.method "$ipv4_method" \
                 ipv4.addresses "$ETH_ADDR/$ETH_PREFIX" \
-                ipv4.never-default yes \
+                ipv4.never-default "$never_default" \
                 ipv6.method disabled 2>/dev/null || true
         else
             nmcli connection add type ethernet con-name "$ETH_CONN" ifname "$iface" \
-                ipv4.method manual ipv4.addresses "$ETH_ADDR/$ETH_PREFIX" \
-                ipv4.never-default yes ipv6.method disabled \
+                ipv4.method "$ipv4_method" ipv4.addresses "$ETH_ADDR/$ETH_PREFIX" \
+                ipv4.never-default "$never_default" ipv6.method disabled \
                 connection.autoconnect yes 2>/dev/null || true
         fi
         nmcli connection up "$ETH_CONN" ifname "$iface" 2>/dev/null || true
@@ -546,11 +699,107 @@ cmd_eth_up() {
     fi
 }
 
+# WAN rebroadcast: keep TeslaLinux AP up, do not join a station WLAN, NAT AP clients.
+cmd_wan_up() {
+    local iface
+    mkdir -p "$(dirname "$WAN_RUNTIME")"
+    : > "$WAN_RUNTIME"
+    log "WAN rebroadcast: AP stays up; skip station join; NAT ${AP_ADDR%.*}.0/${AP_PREFIX} out ethernet WAN"
+    cmd_eth_up
+    iface="$(wifi_iface 2>/dev/null || true)"
+    if [ -n "$iface" ]; then
+        if station_associated "$iface"; then
+            log "wan-up: leaving station so TeslaLinux AP can stay up"
+            nmcli device disconnect "$iface" 2>/dev/null || true
+        fi
+        cmd_ap_up || log "wan-up: AP did not start"
+        if hostapd_running && [ -n "$iface" ]; then
+            write_dnsmasq_conf "$iface"
+            if [ -f "$DNSMASQ_PID" ]; then
+                kill -HUP "$(cat "$DNSMASQ_PID" 2>/dev/null)" 2>/dev/null || true
+            fi
+        fi
+    fi
+    apply_wan_nat || log "wan-up: NAT helper missing or no uplink yet"
+    cmd_nginx_bind
+}
+
+cmd_wan_down() {
+    log "WAN rebroadcast off; restore factory ethernet static (station mode unchanged)"
+    remove_wan_nat
+    WAN_REBROADCAST=0
+    cmd_eth_up
+    cmd_nginx_bind
+}
+
+# Fail-hard: factory AP addr present, nginx not world-bind, NAT helper present when selected.
+cmd_wan_verify() {
+    local fail=0 helper apenv nginx_http mode_on=0
+    helper="${WLAN_VERIFY_HELPER:-$0}"
+    apenv="${1:-$AP_ENV}"
+    nginx_http="${NGINX_HTTP}"
+    if [ -f "$apenv" ]; then
+        # shellcheck source=/dev/null
+        . "$apenv"
+        case "${WAN_REBROADCAST:-0}" in
+            1|yes|true|on|ON) mode_on=1 ;;
+        esac
+    fi
+    if ! is_bindable_ipv4 "${AP_ADDR:-}"; then
+        echo "FAIL: AP factory addr missing or not bindable (${AP_ADDR:-unset})" >&2
+        fail=1
+    fi
+    [ "${AP_ADDR:-}" = "10.42.0.1" ] || {
+        echo "FAIL: AP factory addr is '${AP_ADDR:-unset}', expected 10.42.0.1" >&2
+        fail=1
+    }
+    if [ -f "$nginx_http" ] && grep -Eq '0\.0\.0\.0|listen[[:space:]]+80;|listen[[:space:]]+\[::\]' "$nginx_http"; then
+        echo "FAIL: nginx listen includes 0.0.0.0 / world bind ($nginx_http)" >&2
+        fail=1
+    fi
+    if [ -f "$helper" ]; then
+        grep -Eq 'masquerade|MASQUERADE' "$helper" \
+            || { echo "FAIL: NAT/masquerade helper missing in $helper" >&2; fail=1; }
+        grep -q 'apply_wan_nat' "$helper" \
+            || { echo "FAIL: apply_wan_nat missing in $helper" >&2; fail=1; }
+        if grep -Eq 'listen 0\.0\.0\.0' "$helper"; then
+            echo "FAIL: helper would bind nginx to 0.0.0.0" >&2
+            fail=1
+        fi
+    else
+        echo "FAIL: wlan helper missing ($helper)" >&2
+        fail=1
+    fi
+    if [ "$mode_on" = 1 ]; then
+        if [ -f "$helper" ] && ! grep -Eq 'masquerade|MASQUERADE' "$helper"; then
+            echo "FAIL: WAN_REBROADCAST selected but NAT/masquerade helper missing" >&2
+            fail=1
+        fi
+    fi
+    if [ "$fail" -eq 0 ]; then
+        echo "tesla-linux-wlan wan-verify OK"
+        return 0
+    fi
+    echo "tesla-linux-wlan wan-verify FAILED"
+    return 1
+}
+
 cmd_boot() {
     local iface
     # Ethernet + nginx-bind first — do not wait on X/desktop. qemu has no wlan0.
     cmd_eth_up
     cmd_nginx_bind
+    if wan_mode_on; then
+        log "WAN rebroadcast mode (mode.json/ap.env); skip station join"
+        cmd_wan_up
+        if hostapd_running || eth_static_bound; then
+            return 0
+        fi
+        log "WAN mode: neither AP nor wired $ETH_ADDR; fail so the unit can restart"
+        return 1
+    fi
+    # station (or absent mode.json): drop leftover NAT from a previous wan_rebroadcast.
+    remove_wan_nat
     if iface="$(wait_wifi_iface)"; then
         if has_saved_infra; then
             log "saved infra WLAN present; waiting ${WAIT_SEC}s for NM autoconnect"
@@ -581,6 +830,11 @@ cmd_boot() {
 
 cmd_maybe_ap() {
     local iface
+    if wan_mode_on; then
+        cmd_wan_up
+        return 0
+    fi
+    remove_wan_nat
     if hostapd_running; then
         cmd_nginx_bind
         return 0
@@ -733,6 +987,187 @@ cmd_selftest() {
     write_nginx_servers "$(printf '%s\n' 10.42.0.1 10.42.1.1)"
     grep -q 'listen 10.42.1.1:80;' "$dir/http.conf" || { echo "FAIL: eth listen"; fail=1; }
     grep -Eq '0\.0\.0\.0|listen 80;|listen \[::\]' "$dir/http.conf" && { echo "FAIL: world listen after eth"; fail=1; }
+
+    # WAN rebroadcast skeleton: factory net, nginx not world, NAT helper, skip station.
+    [ "$(ap_client_net)" = "10.42.0.0/24" ] || { echo "FAIL: ap_client_net"; fail=1; }
+    WAN_REBROADCAST=0
+    WAN_RUNTIME="$dir/no-wan-runtime"
+    wan_mode_on && { echo "FAIL: wan_mode_on default"; fail=1; }
+    WAN_REBROADCAST=1
+    wan_mode_on || { echo "FAIL: wan_mode_on flag"; fail=1; }
+    WAN_REBROADCAST=0
+    : > "$dir/wan-runtime"
+    WAN_RUNTIME="$dir/wan-runtime"
+    wan_mode_on || { echo "FAIL: wan_mode_on runtime"; fail=1; }
+    WAN_RUNTIME="$dir/absent-wan"
+    wan_mode_on && { echo "FAIL: wan_mode_on still set"; fail=1; }
+    MODE_FILE="$dir/mode.json"
+    echo '{"mode":"station"}' > "$MODE_FILE"
+    wan_mode_on && { echo "FAIL: mode.json station enabled WAN"; fail=1; }
+    echo '{"mode":"wan_rebroadcast"}' > "$MODE_FILE"
+    wan_mode_on || { echo "FAIL: mode.json wan_rebroadcast did not enable WAN"; fail=1; }
+    [ "$(persisted_mode)" = wan_rebroadcast ] || { echo "FAIL: persisted_mode wan_rebroadcast"; fail=1; }
+    echo 'not-json' > "$MODE_FILE"
+    wan_mode_on && { echo "FAIL: corrupt mode.json enabled WAN"; fail=1; }
+    [ "$(persisted_mode)" = station ] || { echo "FAIL: corrupt mode.json not station"; fail=1; }
+    rm -f "$MODE_FILE"
+    [ "$(persisted_mode)" = station ] || { echo "FAIL: missing mode.json not station"; fail=1; }
+
+    WAN_REBROADCAST=1
+    wired_ifaces() { printf '%s\n' eth0; }
+    iface_ipv4s() {
+        case "$1" in
+            wlan0) printf '%s\n' 10.42.0.1 ;;
+            eth0) printf '%s\n' 10.42.1.1 203.0.113.8 ;;
+            *) ;;
+        esac
+    }
+    hostapd_running() { return 0; }
+    out="$(collect_bind_ips wlan0)"
+    echo "$out" | grep -qx '10.42.0.1' || { echo "FAIL: WAN collect missing AP"; fail=1; }
+    echo "$out" | grep -qx '10.42.1.1' || { echo "FAIL: WAN collect missing factory eth"; fail=1; }
+    echo "$out" | grep -qx '203.0.113.8' && { echo "FAIL: WAN collect bound WAN DHCP"; fail=1; }
+    echo "$out" | grep -Eq '0\.0\.0\.0|127\.|169\.254' && { echo "FAIL: WAN collect leaked"; fail=1; }
+    NGINX_HTTP="$dir/wan-http.conf"
+    NGINX_HTTPS="$dir/wan-https.conf"
+    write_nginx_servers "$(collect_bind_ips wlan0)"
+    grep -q 'listen 10.42.0.1:80;' "$dir/wan-http.conf" || { echo "FAIL: WAN nginx AP listen"; fail=1; }
+    grep -q 'listen 10.42.1.1:80;' "$dir/wan-http.conf" || { echo "FAIL: WAN nginx factory eth listen"; fail=1; }
+    grep -q '203.0.113.8' "$dir/wan-http.conf" && { echo "FAIL: WAN nginx WAN DHCP listen"; fail=1; }
+    grep -Eq '0\.0\.0\.0|listen 80;|listen \[::\]' "$dir/wan-http.conf" && { echo "FAIL: WAN world listen"; fail=1; }
+
+    DNSMASQ_CONF="$dir/dnsmasq-wan.conf"
+    write_dnsmasq_conf wlan0
+    grep -q 'dhcp-option=3,10.42.0.1' "$dir/dnsmasq-wan.conf" || { echo "FAIL: WAN dnsmasq gateway"; fail=1; }
+    grep -q 'dhcp-option=6,1.1.1.1,8.8.8.8' "$dir/dnsmasq-wan.conf" || { echo "FAIL: WAN dnsmasq DNS"; fail=1; }
+    WAN_REBROADCAST=0
+    DNSMASQ_CONF="$dir/dnsmasq-ap.conf"
+    write_dnsmasq_conf wlan0
+    grep -q 'dhcp-option=6,' "$dir/dnsmasq-ap.conf" && { echo "FAIL: station-fallback dnsmasq got WAN DNS"; fail=1; }
+
+    nft_log="$dir/nft.log"
+    : > "$nft_log"
+    have_nft() { return 0; }
+    have_iptables() { return 1; }
+    wan_uplink_iface() { printf '%s\n' eth0; }
+    nft() {
+        echo "nft $*" >> "$nft_log"
+        if [ "${1:-}" = "-f" ]; then
+            cat >> "$nft_log"
+        fi
+        return 0
+    }
+    set_ip_forward() { return 0; }
+    apply_wan_nat || { echo "FAIL: apply_wan_nat nft"; fail=1; }
+    grep -q 'tesla-linux-wan' "$nft_log" || { echo "FAIL: nft table tesla-linux-wan"; fail=1; }
+    grep -qi 'masquerade' "$nft_log" || { echo "FAIL: nft masquerade"; fail=1; }
+    have_nft() { return 1; }
+    have_iptables() { return 0; }
+    ipt_log="$dir/ipt.log"
+    : > "$ipt_log"
+    iptables() {
+        echo "iptables $*" >> "$ipt_log"
+        # -C (check) misses until we add; first -C fails so -A runs.
+        case "${1:-}${2:-}" in
+            -tnat) [ "${3:-}" = "-C" ] && return 1; return 0 ;;
+        esac
+        [ "${1:-}" = "-C" ] && return 1
+        return 0
+    }
+    apply_wan_nat || { echo "FAIL: apply_wan_nat iptables"; fail=1; }
+    grep -q 'MASQUERADE' "$ipt_log" || { echo "FAIL: iptables MASQUERADE"; fail=1; }
+
+    WAN_REBROADCAST=1
+    WAN_RUNTIME="$dir/boot-wan-runtime"
+    rm -f "$WAN_RUNTIME"
+    boot_log="$dir/boot-wan.log"
+    : > "$boot_log"
+    cmd_eth_up() { echo eth-up >> "$boot_log"; return 0; }
+    cmd_nginx_bind() { echo nginx-bind >> "$boot_log"; return 0; }
+    cmd_ap_up() { echo ap-up >> "$boot_log"; return 0; }
+    apply_wan_nat() { echo nat >> "$boot_log"; return 0; }
+    wait_station() { echo FAIL-station-wait >> "$boot_log"; return 1; }
+    has_saved_infra() { echo FAIL-saved-infra >> "$boot_log"; return 0; }
+    wait_wifi_iface() { printf '%s\n' wlan0; }
+    wifi_iface() { printf '%s\n' wlan0; }
+    station_associated() { return 1; }
+    hostapd_running() { return 0; }
+    eth_static_bound() { return 0; }
+    if ! cmd_boot; then
+        echo "FAIL: WAN boot returned non-zero"; fail=1
+    fi
+    grep -q 'ap-up' "$boot_log" || { echo "FAIL: WAN boot did not start AP"; fail=1; }
+    grep -q 'nat' "$boot_log" || { echo "FAIL: WAN boot did not apply NAT"; fail=1; }
+    grep -q 'FAIL-station-wait' "$boot_log" && { echo "FAIL: WAN boot waited on station"; fail=1; }
+    grep -q 'FAIL-saved-infra' "$boot_log" && { echo "FAIL: WAN boot probed saved infra"; fail=1; }
+    [ -f "$WAN_RUNTIME" ] || { echo "FAIL: wan-up did not plant runtime marker"; fail=1; }
+
+    WAN_REBROADCAST=0
+    WAN_RUNTIME="$dir/maybe-wan-runtime"
+    : > "$WAN_RUNTIME"
+    : > "$boot_log"
+    if ! cmd_maybe_ap; then
+        echo "FAIL: maybe-ap WAN returned non-zero"; fail=1
+    fi
+    grep -q 'FAIL-station-wait' "$boot_log" && { echo "FAIL: maybe-ap WAN waited on station"; fail=1; }
+    grep -q 'ap-up' "$boot_log" || { echo "FAIL: maybe-ap WAN did not keep AP path"; fail=1; }
+
+    # Backend persist file selects the path (do not edit ta_wlan_api.py).
+    WAN_REBROADCAST=0
+    WAN_RUNTIME="$dir/mode-boot-runtime"
+    rm -f "$WAN_RUNTIME"
+    MODE_FILE="$dir/mode.json"
+    echo '{"mode":"wan_rebroadcast"}' > "$MODE_FILE"
+    : > "$boot_log"
+    if ! cmd_boot; then
+        echo "FAIL: mode.json wan_rebroadcast boot returned non-zero"; fail=1
+    fi
+    grep -q 'ap-up' "$boot_log" || { echo "FAIL: mode.json boot did not start AP"; fail=1; }
+    grep -q 'nat' "$boot_log" || { echo "FAIL: mode.json boot did not apply NAT"; fail=1; }
+    grep -q 'FAIL-station-wait' "$boot_log" && { echo "FAIL: mode.json boot waited on station"; fail=1; }
+    echo '{"mode":"station"}' > "$MODE_FILE"
+    rm -f "$WAN_RUNTIME"
+    : > "$boot_log"
+    remove_wan_nat() { echo wan-off >> "$boot_log"; }
+    wait_wifi_iface() { return 1; }
+    eth_static_bound() { return 0; }
+    if ! cmd_boot; then
+        echo "FAIL: mode.json station boot returned non-zero"; fail=1
+    fi
+    grep -q 'wan-off' "$boot_log" || { echo "FAIL: station mode.json did not leave NAT"; fail=1; }
+    grep -q 'FAIL-station-wait' "$boot_log" && { echo "FAIL: station boot probed saved infra wait"; fail=1; }
+
+    AP_ENV="$dir/ap.env"
+    cat > "$dir/ap.env" <<'EOF'
+AP_SSID=TeslaLinux
+AP_PSK=teslalinux
+AP_ADDR=10.42.0.1
+ETH_ADDR=10.42.1.1
+WAN_REBROADCAST=1
+EOF
+    NGINX_HTTP="$dir/wan-http.conf"
+    WLAN_VERIFY_HELPER="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+    [ -n "$WLAN_VERIFY_HELPER" ] || WLAN_VERIFY_HELPER="$0"
+    if ! cmd_wan_verify "$dir/ap.env"; then
+        echo "FAIL: wan-verify good tree"; fail=1
+    fi
+    echo '    listen 0.0.0.0:80;' > "$dir/wan-http.conf"
+    if cmd_wan_verify "$dir/ap.env"; then
+        echo "FAIL: wan-verify accepted 0.0.0.0 listen"; fail=1
+    fi
+    echo '    listen 10.42.0.1:80;' > "$dir/wan-http.conf"
+    cat > "$dir/ap.env" <<'EOF'
+AP_SSID=TeslaLinux
+AP_PSK=teslalinux
+ETH_ADDR=10.42.1.1
+WAN_REBROADCAST=1
+EOF
+    AP_ADDR=""
+    if cmd_wan_verify "$dir/ap.env"; then
+        echo "FAIL: wan-verify accepted missing AP_ADDR"; fail=1
+    fi
+    AP_ADDR=10.42.0.1
+
     rm -rf "$dir"
 
     if [ "$fail" -eq 0 ]; then
@@ -745,15 +1180,22 @@ cmd_selftest() {
 
 usage() {
     cat <<EOF
-usage: tesla-linux-wlan <boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan|selftest>
+usage: tesla-linux-wlan <boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan|wan-ap|wan-up|wan-off|wan-down|wan-verify|selftest>
   boot         eth-up + nginx-bind; wifi/AP if present; success if ${ETH_ADDR} bound or AP/station
+               mode.json wan_rebroadcast (or WAN_REBROADCAST=1): skip station; AP + NAT
   eth-up       wait ~${IFACE_WAIT_SEC}s for wired iface; static ${ETH_ADDR}/${ETH_PREFIX} (no DHCP)
-  ap-up        TeslaLinux hostapd AP + dnsmasq (never if station is up)
+               WAN mode keeps ${ETH_ADDR} and allows DHCP default-route on the same jack
+  ap-up        TeslaLinux hostapd AP + dnsmasq (never if station is up, unless WAN mode)
   ap-down      stop AP; return iface to NetworkManager
-  nginx-bind   listen on current AP/station/ethernet IPv4s only
-  maybe-ap     dispatcher: station if possible, else AP
+  nginx-bind   listen on current AP/station/ethernet IPv4s only (WAN: ${AP_ADDR} + ${ETH_ADDR} only)
+  maybe-ap     dispatcher: station if possible, else AP (WAN mode: wan-ap)
   save-wlan    BACKEND bounce: save infra SSID/PSK, AP down, NM up
-  selftest     address-filter checks (no hardware)
+  wan-ap       AP stays up; skip station; NAT 10.42.0.0/24 out ethernet WAN (alias: wan-up)
+  wan-up       same as wan-ap (Backend /api/mode wan_rebroadcast kick)
+  wan-off      remove NAT; restore factory ethernet static (alias: wan-down)
+  wan-down     same as wan-off (leave wan_rebroadcast; Backend persist stays mode.json)
+  wan-verify   fail-hard: factory AP addr, no nginx 0.0.0.0, NAT helper when mode selected
+  selftest     address-filter + WAN skeleton checks (no hardware)
 EOF
 }
 
@@ -761,7 +1203,7 @@ main() {
     local cmd="${1:-}"
     shift || true
     case "$cmd" in
-        boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan)
+        boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan|wan-ap|wan-up|wan-off|wan-down)
             with_lock
             ;;
     esac
@@ -773,6 +1215,9 @@ main() {
         nginx-bind) cmd_nginx_bind ;;
         maybe-ap) cmd_maybe_ap ;;
         save-wlan) cmd_save_wlan "${1:-}" "${2:-}" ;;
+        wan-ap|wan-up) cmd_wan_up ;;
+        wan-off|wan-down) cmd_wan_down ;;
+        wan-verify) cmd_wan_verify "${1:-}" ;;
         selftest) cmd_selftest ;;
         -h|--help|help|'') usage ;;
         *) usage >&2; exit 2 ;;
