@@ -762,8 +762,8 @@ cmd_wan_verify() {
             || { echo "FAIL: NAT/masquerade helper missing in $helper" >&2; fail=1; }
         grep -q 'apply_wan_nat' "$helper" \
             || { echo "FAIL: apply_wan_nat missing in $helper" >&2; fail=1; }
-        if grep -Eq 'listen 0\.0\.0\.0' "$helper"; then
-            echo "FAIL: helper would bind nginx to 0.0.0.0" >&2
+        if awk '/^write_nginx_servers\(\)/,/^}/' "$helper" | grep -Eq 'listen 0\.0\.0\.0|listen 80;|listen \[::\]'; then
+            echo "FAIL: write_nginx_servers would bind nginx to 0.0.0.0" >&2
             fail=1
         fi
     else

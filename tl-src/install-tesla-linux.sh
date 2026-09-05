@@ -538,8 +538,8 @@ verify_wan_rebroadcast() {
         || { echo "ERROR: tesla-linux-wlan missing wan_mode_on" >&2; exit 1; }
     grep -q 'ignore_broadcast_ssid=0' "$wlan_bin" \
         || { echo "ERROR: TeslaLinux SSID would be hidden" >&2; exit 1; }
-    if grep -Eq 'listen 0\.0\.0\.0' "$wlan_bin"; then
-        echo "ERROR: tesla-linux-wlan would bind nginx to 0.0.0.0" >&2
+    if awk '/^write_nginx_servers\(\)/,/^}/' "$wlan_bin" | grep -Eq 'listen 0\.0\.0\.0|listen 80;|listen \[::\]'; then
+        echo "ERROR: tesla-linux-wlan write_nginx_servers would bind nginx to 0.0.0.0" >&2
         exit 1
     fi
 
