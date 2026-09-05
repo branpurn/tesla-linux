@@ -1,10 +1,11 @@
 [Unit]
-Description=Tesla Linux WLAN (saved station else TeslaLinux hostapd AP)
+Description=Tesla Linux WLAN (saved station else TeslaLinux hostapd AP, or WAN rebroadcast)
 After=NetworkManager.service tesla-linux-firstboot.service
 Wants=NetworkManager.service
 # nginx After=/Wants= this unit (install drop-in) so it starts after listen files.
 # Do not Before=nginx — a oneshot that systemctl-restarts nginx deadlocks.
 # AP must not wait on HDMI/X — do not After/Requires tesla-linux-desktop or xorg.
+# WAN rebroadcast is the helper boot path (wan-up), not a second unit.
 
 [Service]
 Type=oneshot
