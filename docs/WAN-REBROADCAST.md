@@ -2,7 +2,7 @@
 
 Alternate networking mode vs station-on-same-WLAN. Skeleton only (helper / install / systemd). Backend owns `/api/mode` (`ta_wlan_api.py`); Frontend owns the picker. This SHA does not edit those.
 
-SSID **TeslaLinux** stays visible. Operators use documented **10.42.0.1** (AP) and **10.42.1.1** (factory ethernet). Do not guess a DHCP station IP. nginx never listens on `0.0.0.0` or the WAN DHCP address.
+SSID **TeslaLinux** stays visible. Operators use documented **10.42.0.1** (AP) and **10.42.1.1** (factory ethernet). Do not guess a DHCP station IP. nginx never listens on `0.0.0.0` or the WAN DHCP address. AP DHCP is dnsmasq (authoritative, option 3+6, range `10.42.0.10`–`10.42.0.200`); `wan-ap` fails if hostapd is up without that lease server.
 
 ## Modes
 
