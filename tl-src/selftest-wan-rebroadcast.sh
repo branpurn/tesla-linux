@@ -34,6 +34,10 @@ expect_fail() {
     fi
 }
 
+grep -q '^ensure_ap_dhcp()' "$HELPER" && pass "helper ensures AP DHCP" \
+    || bad "helper missing ensure_ap_dhcp"
+grep -q 'dhcp-authoritative' "$HELPER" && pass "helper dnsmasq is authoritative" \
+    || bad "helper missing dhcp-authoritative"
 grep -q 'wan-ap|wan-rebroadcast|wan-up' "$HELPER" && pass "helper exposes wan-ap/wan-rebroadcast" \
     || bad "helper missing wan-ap/wan-rebroadcast"
 grep -q 'wan-off|wan-down' "$HELPER" && pass "helper exposes wan-off" \
