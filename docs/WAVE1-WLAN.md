@@ -39,7 +39,7 @@ First-boot still creates the NM infra profile (`connection.autoconnect yes`). `t
 | `tesla-linux-wlan.service` | `After=NetworkManager.service tesla-linux-firstboot.service`; oneshot `boot`; `Restart=on-failure`; `WantedBy=multi-user.target` (not desktop/X). nginx `After=`/`Wants=` this unit; this unit does not `Before=nginx` |
 | `tesla-linux-firstboot.service` | `After=NetworkManager.service`; `Before=tesla-linux-wlan.service` (eth-up/cert before wlan boot). Does not `Before=nginx`. After the TLS cert: `nginx -t && nginx -s reload` only if nginx is already active; never `systemctl start/restart nginx`. |
 | `tesla-linux-wlan-api.service` | `Type=simple`; `TA_BIND=127.0.0.1` |
-| hostapd + dnsmasq | AP + DHCP (stock `hostapd.service` / `dnsmasq.service` stay disabled) |
+| hostapd + dnsmasq | AP + DHCP `10.42.0.10`–`10.42.0.200` via **10.42.0.1** (`dhcp-authoritative`, option 3+6; `port=0`). `ap-up` / `maybe-ap` / `wan-ap` must keep dnsmasq running — hostapd-up without DHCP is FAIL (Tesla: Unable to obtain IP address). Stock `hostapd.service` / `dnsmasq.service` stay disabled. |
 
 Connect a client to **TeslaLinux** / **teslalinux**, then open `http://10.42.0.1/` (pick/save station WLAN). Stream page stays `http://10.42.0.1/desktop.html`. Probe: `http://10.42.0.1/probe.html`.
 
