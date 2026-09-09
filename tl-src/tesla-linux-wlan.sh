@@ -357,6 +357,39 @@ dnsmasq_running() {
     [ -f "$DNSMASQ_PID" ] && kill -0 "$(cat "$DNSMASQ_PID" 2>/dev/null)" 2>/dev/null
 }
 
+# TeslaLinux AP product path: hostapd without DHCP is FAIL ("Unable to obtain IP address").
+# If hostapd is already up and dnsmasq is down, rewrite conf for iface, start, verify pid.
+ensure_ap_dhcp() {
+    local iface="${1:-}" i
+    if [ -z "$iface" ]; then
+        iface="$(wifi_iface 2>/dev/null || true)"
+    fi
+    if [ -z "$iface" ]; then
+        log "FAIL: no Wi-Fi iface; cannot start AP DHCP"
+        return 1
+    fi
+    write_dnsmasq_conf "$iface"
+    if dnsmasq_running; then
+        kill -HUP "$(cat "$DNSMASQ_PID" 2>/dev/null)" 2>/dev/null || true
+        return 0
+    fi
+    log "starting dnsmasq AP DHCP ${AP_DHCP_START}-${AP_DHCP_END} via ${AP_ADDR}"
+    stop_pidfile "$DNSMASQ_PID" dnsmasq
+    if ! dnsmasq --conf-file="$DNSMASQ_CONF" --pid-file="$DNSMASQ_PID"; then
+        log "FAIL: dnsmasq did not start; Tesla clients will not get a lease"
+        return 1
+    fi
+    if dnsmasq_running; then
+        return 0
+    fi
+    for i in 1 2 3 4 5; do
+        sleep 0.1
+        dnsmasq_running && return 0
+    done
+    log "FAIL: dnsmasq pid not live; Tesla clients will not get a lease"
+    return 1
+}
+
 write_hostapd_conf() {
     local iface="$1"
     mkdir -p "$(dirname "$HOSTAPD_CONF")"
@@ -382,8 +415,9 @@ EOF
 write_dnsmasq_conf() {
     local iface="$1"
     mkdir -p "$(dirname "$DNSMASQ_CONF")"
+    # AP DHCP only (port=0 — we are not a DNS server). Tesla-class leases still
+    # need option 3 (gateway) + option 6 (DNS) + authoritative on 10.42.0.1/24.
     cat > "$DNSMASQ_CONF" <<EOF
-# AP DHCP only (no DNS — clients use http://$AP_ADDR/).
 interface=$iface
 bind-interfaces
 except-interface=lo
@@ -391,13 +425,9 @@ listen-address=$AP_ADDR
 port=0
 dhcp-range=$AP_DHCP_START,$AP_DHCP_END,12h
 dhcp-option=3,$AP_ADDR
-EOF
-    if wan_mode_on; then
-        cat >> "$DNSMASQ_CONF" <<EOF
-# WAN rebroadcast: AP clients use public DNS (no guess-the-station-IP path).
 dhcp-option=6,1.1.1.1,8.8.8.8
+dhcp-authoritative
 EOF
-    fi
 }
 
 stop_pidfile() {
@@ -581,6 +611,7 @@ cmd_ap_up() {
     fi
     if hostapd_running; then
         log "hostapd already up on $AP_SSID"
+        ensure_ap_dhcp "$iface" || return 1
         cmd_nginx_bind
         return 0
     fi
@@ -595,12 +626,11 @@ cmd_ap_up() {
     ip link set "$iface" up
 
     write_hostapd_conf "$iface"
-    write_dnsmasq_conf "$iface"
 
     stop_pidfile "$HOSTAPD_PID" hostapd
     stop_pidfile "$DNSMASQ_PID" dnsmasq
     hostapd -B -P "$HOSTAPD_PID" "$HOSTAPD_CONF"
-    dnsmasq --conf-file="$DNSMASQ_CONF" --pid-file="$DNSMASQ_PID"
+    ensure_ap_dhcp "$iface" || return 1
     cmd_nginx_bind
 }
 
@@ -713,11 +743,8 @@ cmd_wan_up() {
             nmcli device disconnect "$iface" 2>/dev/null || true
         fi
         cmd_ap_up || log "wan-up: AP did not start"
-        if hostapd_running && [ -n "$iface" ]; then
-            write_dnsmasq_conf "$iface"
-            if [ -f "$DNSMASQ_PID" ]; then
-                kill -HUP "$(cat "$DNSMASQ_PID" 2>/dev/null)" 2>/dev/null || true
-            fi
+        if hostapd_running; then
+            ensure_ap_dhcp "$iface" || { log "wan-up: AP DHCP did not start"; cmd_nginx_bind; return 1; }
         fi
     fi
     apply_wan_nat || log "wan-up: NAT helper missing or no uplink yet"
@@ -792,7 +819,14 @@ cmd_boot() {
     if wan_mode_on; then
         log "WAN rebroadcast mode (mode.json/ap.env); skip station join"
         cmd_wan_up
-        if hostapd_running || eth_static_bound; then
+        if hostapd_running; then
+            if dnsmasq_running; then
+                return 0
+            fi
+            log "WAN mode: hostapd up but AP DHCP down; fail so the unit can restart"
+            return 1
+        fi
+        if eth_static_bound; then
             return 0
         fi
         log "WAN mode: neither AP nor wired $ETH_ADDR; fail so the unit can restart"
@@ -832,10 +866,11 @@ cmd_maybe_ap() {
     local iface
     if wan_mode_on; then
         cmd_wan_up
-        return 0
+        return $?
     fi
     remove_wan_nat
     if hostapd_running; then
+        ensure_ap_dhcp || return 1
         cmd_nginx_bind
         return 0
     fi
@@ -1040,10 +1075,112 @@ cmd_selftest() {
     write_dnsmasq_conf wlan0
     grep -q 'dhcp-option=3,10.42.0.1' "$dir/dnsmasq-wan.conf" || { echo "FAIL: WAN dnsmasq gateway"; fail=1; }
     grep -q 'dhcp-option=6,1.1.1.1,8.8.8.8' "$dir/dnsmasq-wan.conf" || { echo "FAIL: WAN dnsmasq DNS"; fail=1; }
+    grep -q 'dhcp-authoritative' "$dir/dnsmasq-wan.conf" || { echo "FAIL: WAN dnsmasq not authoritative"; fail=1; }
+    grep -q 'dhcp-range=10.42.0.10,10.42.0.200,' "$dir/dnsmasq-wan.conf" || { echo "FAIL: WAN dnsmasq range"; fail=1; }
+    grep -q 'listen-address=10.42.0.1' "$dir/dnsmasq-wan.conf" || { echo "FAIL: WAN dnsmasq factory AP_ADDR"; fail=1; }
+    grep -q '^port=0$' "$dir/dnsmasq-wan.conf" || { echo "FAIL: WAN dnsmasq should stay port=0"; fail=1; }
     WAN_REBROADCAST=0
     DNSMASQ_CONF="$dir/dnsmasq-ap.conf"
     write_dnsmasq_conf wlan0
-    grep -q 'dhcp-option=6,' "$dir/dnsmasq-ap.conf" && { echo "FAIL: station-fallback dnsmasq got WAN DNS"; fail=1; }
+    grep -q 'dhcp-option=3,10.42.0.1' "$dir/dnsmasq-ap.conf" || { echo "FAIL: station-fallback dnsmasq gateway"; fail=1; }
+    grep -q 'dhcp-option=6,1.1.1.1,8.8.8.8' "$dir/dnsmasq-ap.conf" || { echo "FAIL: station-fallback dnsmasq missing option 6"; fail=1; }
+    grep -q 'dhcp-authoritative' "$dir/dnsmasq-ap.conf" || { echo "FAIL: station-fallback dnsmasq not authoritative"; fail=1; }
+    grep -q 'dhcp-range=10.42.0.10,10.42.0.200,' "$dir/dnsmasq-ap.conf" || { echo "FAIL: station-fallback dnsmasq range"; fail=1; }
+    grep -q 'listen-address=10.42.0.1' "$dir/dnsmasq-ap.conf" || { echo "FAIL: station-fallback factory AP_ADDR"; fail=1; }
+    grep -q '^port=0$' "$dir/dnsmasq-ap.conf" || { echo "FAIL: station-fallback dnsmasq should stay port=0"; fail=1; }
+
+    # JUMP LIVE: hostapd already up must still start/verify dnsmasq (Tesla no-lease).
+    helper_src="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+    [ -n "$helper_src" ] || helper_src="$0"
+    _fn_body() {
+        awk -v fn="$1" '
+            $0 ~ "^" fn "\\(\\)" { p=1; next }
+            p && /^[a-zA-Z_][a-zA-Z0-9_]*\(\)/ { exit }
+            p { print }
+        ' "$helper_src"
+    }
+    _hostapd_early_ensures_dhcp() {
+        _fn_body "$1" | awk '
+            /if hostapd_running; then/ { inblk=1; saw=0; next }
+            inblk && /ensure_ap_dhcp/ { saw=1 }
+            inblk && /return 0/ {
+                if (!saw) { exit 1 }
+                inblk=0
+            }
+            END { if (inblk && !saw) exit 1 }
+        '
+    }
+    grep -q '^ensure_ap_dhcp()' "$helper_src" || { echo "FAIL: ensure_ap_dhcp missing"; fail=1; }
+    _hostapd_early_ensures_dhcp cmd_ap_up || { echo "FAIL: cmd_ap_up hostapd_running early path skips dnsmasq"; fail=1; }
+    _hostapd_early_ensures_dhcp cmd_maybe_ap || { echo "FAIL: cmd_maybe_ap hostapd_running early path skips dnsmasq"; fail=1; }
+    _fn_body cmd_wan_up | grep -q 'ensure_ap_dhcp' || { echo "FAIL: cmd_wan_up does not ensure AP DHCP"; fail=1; }
+    _fn_body cmd_ap_up | grep -q 'ensure_ap_dhcp' || { echo "FAIL: cmd_ap_up does not ensure AP DHCP after start"; fail=1; }
+
+    dhcp_log="$dir/dhcp-early.log"
+    : > "$dhcp_log"
+    DNSMASQ_CONF="$dir/dnsmasq-early.conf"
+    DNSMASQ_PID="$dir/dnsmasq-early.pid"
+    HOSTAPD_PID="$dir/hostapd-early.pid"
+    WAN_REBROADCAST=0
+    WAN_RUNTIME="$dir/absent-wan-early"
+    MODE_FILE="$dir/absent-mode-early"
+    wifi_iface() { printf '%s\n' wlan0; }
+    station_associated() { return 1; }
+    hostapd_running() { return 0; }
+    cmd_nginx_bind() { echo nginx-bind >> "$dhcp_log"; return 0; }
+    stop_pidfile() { echo "stop $*" >> "$dhcp_log"; rm -f "$1"; return 0; }
+    # Success: hostapd already up, dnsmasq start writes a live pid.
+    dnsmasq() {
+        echo "dnsmasq $*" >> "$dhcp_log"
+        echo $$ > "$DNSMASQ_PID"
+        return 0
+    }
+    rm -f "$DNSMASQ_PID"
+    if ! cmd_ap_up; then
+        echo "FAIL: ap-up hostapd-up should succeed when dnsmasq starts"; fail=1
+    fi
+    grep -q 'dnsmasq ' "$dhcp_log" || { echo "FAIL: ap-up early path did not start dnsmasq"; fail=1; }
+    grep -q 'dhcp-authoritative' "$DNSMASQ_CONF" || { echo "FAIL: ensure rewrite missing authoritative"; fail=1; }
+    : > "$dhcp_log"
+    rm -f "$DNSMASQ_PID"
+    if ! cmd_maybe_ap; then
+        echo "FAIL: maybe-ap hostapd-up should succeed when dnsmasq starts"; fail=1
+    fi
+    grep -q 'dnsmasq ' "$dhcp_log" || { echo "FAIL: maybe-ap early path did not start dnsmasq"; fail=1; }
+
+    # FAIL: start command fails — do not claim AP success without DHCP.
+    dnsmasq() {
+        echo "dnsmasq $*" >> "$dhcp_log"
+        return 1
+    }
+    : > "$dhcp_log"
+    rm -f "$DNSMASQ_PID"
+    if cmd_ap_up; then
+        echo "FAIL: ap-up hostapd-up/dnsmasq-down claimed success"; fail=1
+    fi
+    grep -q 'dnsmasq ' "$dhcp_log" || { echo "FAIL: ap-up early path did not start dnsmasq on fail"; fail=1; }
+    : > "$dhcp_log"
+    rm -f "$DNSMASQ_PID"
+    if cmd_maybe_ap; then
+        echo "FAIL: maybe-ap hostapd-up/dnsmasq-down claimed success"; fail=1
+    fi
+    grep -q 'dnsmasq ' "$dhcp_log" || { echo "FAIL: maybe-ap early path did not start dnsmasq on fail"; fail=1; }
+
+    # Fresh start: hostapd launched, dnsmasq start/pid must still be verified.
+    hostapd_running() { return 1; }
+    : > "$dhcp_log"
+    rm -f "$DNSMASQ_PID"
+    nmcli() { return 0; }
+    rfkill() { return 0; }
+    ip() { return 0; }
+    hostapd() { echo "hostapd $*" >> "$dhcp_log"; return 0; }
+    write_hostapd_conf() { :; }
+    if cmd_ap_up; then
+        echo "FAIL: ap-up claimed success without live dnsmasq"; fail=1
+    fi
+    grep -q 'dnsmasq ' "$dhcp_log" || { echo "FAIL: ap-up fresh start did not start dnsmasq"; fail=1; }
+    unset -f nmcli rfkill ip hostapd dnsmasq
+    unset -f _fn_body _hostapd_early_ensures_dhcp
 
     nft_log="$dir/nft.log"
     : > "$nft_log"
@@ -1085,6 +1222,7 @@ cmd_selftest() {
     cmd_eth_up() { echo eth-up >> "$boot_log"; return 0; }
     cmd_nginx_bind() { echo nginx-bind >> "$boot_log"; return 0; }
     cmd_ap_up() { echo ap-up >> "$boot_log"; return 0; }
+    ensure_ap_dhcp() { echo dhcp >> "$boot_log"; return 0; }
     apply_wan_nat() { echo nat >> "$boot_log"; return 0; }
     wait_station() { echo FAIL-station-wait >> "$boot_log"; return 1; }
     has_saved_infra() { echo FAIL-saved-infra >> "$boot_log"; return 0; }
@@ -1092,11 +1230,13 @@ cmd_selftest() {
     wifi_iface() { printf '%s\n' wlan0; }
     station_associated() { return 1; }
     hostapd_running() { return 0; }
+    dnsmasq_running() { return 0; }
     eth_static_bound() { return 0; }
     if ! cmd_boot; then
         echo "FAIL: WAN boot returned non-zero"; fail=1
     fi
     grep -q 'ap-up' "$boot_log" || { echo "FAIL: WAN boot did not start AP"; fail=1; }
+    grep -q 'dhcp' "$boot_log" || { echo "FAIL: WAN boot did not ensure AP DHCP"; fail=1; }
     grep -q 'nat' "$boot_log" || { echo "FAIL: WAN boot did not apply NAT"; fail=1; }
     grep -q 'FAIL-station-wait' "$boot_log" && { echo "FAIL: WAN boot waited on station"; fail=1; }
     grep -q 'FAIL-saved-infra' "$boot_log" && { echo "FAIL: WAN boot probed saved infra"; fail=1; }
@@ -1111,6 +1251,7 @@ cmd_selftest() {
     fi
     grep -q 'FAIL-station-wait' "$boot_log" && { echo "FAIL: maybe-ap WAN waited on station"; fail=1; }
     grep -q 'ap-up' "$boot_log" || { echo "FAIL: maybe-ap WAN did not keep AP path"; fail=1; }
+    grep -q 'dhcp' "$boot_log" || { echo "FAIL: maybe-ap WAN did not ensure AP DHCP"; fail=1; }
 
     # Backend persist file selects the path (do not edit ta_wlan_api.py).
     WAN_REBROADCAST=0
@@ -1123,6 +1264,7 @@ cmd_selftest() {
         echo "FAIL: mode.json wan_rebroadcast boot returned non-zero"; fail=1
     fi
     grep -q 'ap-up' "$boot_log" || { echo "FAIL: mode.json boot did not start AP"; fail=1; }
+    grep -q 'dhcp' "$boot_log" || { echo "FAIL: mode.json boot did not ensure AP DHCP"; fail=1; }
     grep -q 'nat' "$boot_log" || { echo "FAIL: mode.json boot did not apply NAT"; fail=1; }
     grep -q 'FAIL-station-wait' "$boot_log" && { echo "FAIL: mode.json boot waited on station"; fail=1; }
     echo '{"mode":"station"}' > "$MODE_FILE"
@@ -1185,7 +1327,7 @@ usage: tesla-linux-wlan <boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan
                     mode.json wan_rebroadcast: skip station; AP + NAT
   eth-up            wait ~${IFACE_WAIT_SEC}s for wired iface; static ${ETH_ADDR}/${ETH_PREFIX} (no DHCP)
                     WAN mode keeps ${ETH_ADDR} and allows DHCP default-route on the same jack
-  ap-up             TeslaLinux hostapd AP + dnsmasq (never if station is up, unless WAN mode)
+  ap-up             TeslaLinux hostapd AP + dnsmasq DHCP (never if station is up, unless WAN mode)
   ap-down           stop AP; return iface to NetworkManager
   nginx-bind        listen on current AP/station/ethernet IPv4s only (WAN: ${AP_ADDR} + ${ETH_ADDR} only)
   maybe-ap          dispatcher: station if possible, else AP (WAN mode: wan-ap)
