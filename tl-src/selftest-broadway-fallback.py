@@ -395,12 +395,12 @@ def run_case(page_url: str, cdp_port: int, chrome: str, user_data: str, expect_k
     ]
     proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        ver = wait_json(f"http://127.0.0.1:{cdp_port}/json/version")
-        ws = ver.get("webSocketDebuggerUrl")
-        if not ws:
-            tabs = wait_json(f"http://127.0.0.1:{cdp_port}/json/list")
-            ws = tabs[0]["webSocketDebuggerUrl"]
-        cdp = Cdp(ws)
+        wait_json(f"http://127.0.0.1:{cdp_port}/json/version")
+        tabs = wait_json(f"http://127.0.0.1:{cdp_port}/json")
+        page = next((t for t in tabs if t.get("type") == "page" and t.get("webSocketDebuggerUrl")), None)
+        if not page:
+            raise RuntimeError(f"no page target: {tabs!r}")
+        cdp = Cdp(page["webSocketDebuggerUrl"])
         cdp.call("Page.enable")
         cdp.call("Runtime.enable")
         if strip_wc:
@@ -436,6 +436,7 @@ def run_case(page_url: str, cdp_port: int, chrome: str, user_data: str, expect_k
                 and expect_kind in hud
                 and "frames" in hud
                 and "NO WebCodecs" not in hud
+                and "decoder setup failed" not in hud
             ):
                 print(f"  {expect_kind}: hud={hud!r} hasWC={val.get('hasWC')}")
                 saw = True
