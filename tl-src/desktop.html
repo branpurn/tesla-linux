@@ -24,13 +24,26 @@ body.chrome-off #hud,body.chrome-off #bar{display:none}
 <div id="wrap"><div id="stage"><canvas id="c" width="1280" height="720"></canvas><div id="feed"></div></div></div>
 <div id="bar"><button type="button" id="reboot">Reboot</button><button type="button" id="hide">Hide</button><span class="hint">Next boot joins that WLAN.</span></div>
 <script>
-const hud=document.getElementById('hud'), canvas=document.getElementById('c'), ctx=canvas.getContext('2d');
+const hud=document.getElementById('hud');
+let canvas=document.getElementById('c'), ctx=null;
 const feed=document.getElementById('feed');
 const secure = location.protocol==='https:';
 const base = `${secure?'wss':'ws'}://${location.host}`;
-let dec=null, cfg=false, started=false, spsPps=null, ts=0, frames=0, bytes=0, t0=Date.now();
+const hasWC=('VideoDecoder' in window);
+let dec=null, decKind='', cfg=false, started=false, spsPps=null, ts=0, frames=0, bytes=0, t0=Date.now(), setup=null;
 const hx=n=>n.toString(16).padStart(2,'0');
 function hudMsg(m){ hud.textContent=m; }
+function paintHud(w,h){
+  const fps=(frames/((Date.now()-t0)/1000)).toFixed(1);
+  hudMsg(`${w||canvas.width}x${h||canvas.height} · ${fps} fps · ${(bytes/1024/1024).toFixed(1)} MiB · ${frames} frames · ${decKind||'?'} · audio:${!actx?'off':(actx.state==='running'&&audioOn?'on':actx.state)} · click/drag to control`);
+}
+function loadScript(src){
+  return new Promise((res,rej)=>{
+    const s=document.createElement('script'); s.src=src;
+    s.onload=res; s.onerror=()=>rej(new Error('load '+src));
+    document.head.appendChild(s);
+  });
+}
 
 /* ---------- video ---------- */
 function scan(b){
@@ -45,8 +58,63 @@ function scan(b){
 }
 const cat=(a,b)=>{const o=new Uint8Array(a.length+b.length);o.set(a,0);o.set(b,a.length);return o;};
 
+function adoptPlayerCanvas(p){
+  p.canvas.id='c';
+  p.canvas.style.maxWidth='100%';
+  p.canvas.style.maxHeight='100%';
+  p.canvas.style.display='block';
+  p.canvas.style.pointerEvents='none';
+  canvas.replaceWith(p.canvas);
+  canvas=p.canvas;
+}
+function waitBroadwayWorker(p,ms){
+  return new Promise((res,rej)=>{
+    if(!p.worker){ res(); return; }
+    const t=setTimeout(()=>rej(new Error('broadway worker timeout')), ms||15000);
+    function onMsg(e){
+      if(e.data && e.data.consoleLog==='broadway worker initialized'){
+        clearTimeout(t); p.worker.removeEventListener('message', onMsg); res();
+      }
+    }
+    p.worker.addEventListener('message', onMsg);
+  });
+}
+
+const broadwayScripts=hasWC?null:
+  loadScript('broadway/Decoder.js')
+    .then(()=>loadScript('broadway/YUVCanvas.js'))
+    .then(()=>loadScript('broadway/Player.js'));
+
+async function mkBroadway(){
+  try{
+    if(broadwayScripts) await broadwayScripts;
+    else{
+      await loadScript('broadway/Decoder.js');
+      await loadScript('broadway/YUVCanvas.js');
+      await loadScript('broadway/Player.js');
+    }
+    if(typeof Player!=='function') throw new Error('Player not defined');
+    const size={width:canvas.width||1088, height:canvas.height||832};
+    let p;
+    try{
+      p=new Player({useWorker:true, workerFile:'broadway/Decoder.js', webgl:'auto', preserveDrawingBuffer:true, size});
+      await waitBroadwayWorker(p);
+    }catch(e){
+      p=new Player({useWorker:false, webgl:'auto', preserveDrawingBuffer:true, size});
+    }
+    adoptPlayerCanvas(p);
+    p.onPictureDecoded=function(buf,w,h){
+      frames++;
+      if(frames===1||frames%30===0) paintHud(w,h);
+    };
+    dec=p; decKind='broadway'; cfg=true;
+    hudMsg('broadway ready…');
+  }catch(err){ hudMsg('broadway setup failed: '+err.message); }
+}
+
 async function mkDecoder(codec){
   try{
+    if(!ctx) ctx=canvas.getContext('2d');
     if(VideoDecoder.isConfigSupported){
       const s=await VideoDecoder.isConfigSupported({codec});
       if(!s.supported) codec='avc1.42e01f';
@@ -57,15 +125,12 @@ async function mkDecoder(codec){
         if(canvas.width!==f.displayWidth){canvas.width=f.displayWidth;}
         if(canvas.height!==f.displayHeight){canvas.height=f.displayHeight;}
         ctx.drawImage(f,0,0); f.close();
-        if(frames%30===0){
-          const fps=(frames/((Date.now()-t0)/1000)).toFixed(1);
-          hudMsg(`${canvas.width}x${canvas.height} · ${fps} fps · ${(bytes/1024/1024).toFixed(1)} MiB · ${frames} frames · audio:${!actx?'off':(actx.state==='running'&&audioOn?'on':actx.state)} · click/drag to control`);
-        }
+        if(frames===1||frames%30===0) paintHud(f.displayWidth,f.displayHeight);
       },
       error:e=>hudMsg('decoder error: '+e.message)
     });
     dec.configure({codec, optimizeForLatency:true});
-    cfg=true;
+    decKind='webcodecs'; cfg=true;
   }catch(err){ hudMsg('decoder setup failed: '+err.message); }
 }
 
@@ -73,15 +138,33 @@ const vws=new WebSocket(base+'/sockets/display');
 vws.binaryType='arraybuffer';
 vws.onopen =()=>hudMsg('video socket open…');
 vws.onclose=()=>hudMsg('video socket closed');
+function feedNal(b, hasSPS, hasIDR){
+  if(!cfg || !dec) return;
+  if(!started){ if(!hasIDR) return; started=true; }
+  const data=(hasIDR&&!hasSPS&&spsPps)?cat(spsPps,b):b;
+  try{
+    if(decKind==='webcodecs'){
+      dec.decode(new EncodedVideoChunk({type:hasIDR?'key':'delta',timestamp:ts, data}));
+    }else{
+      dec.decode(data);
+    }
+    ts+=33333;
+  }catch(e){}
+}
 vws.onmessage=async ev=>{
   const b=new Uint8Array(ev.data); bytes+=b.length;
   const {types,spsOff}=scan(b);
   const hasSPS=types.has(7), hasIDR=types.has(5);
-  if(hasSPS){ spsPps=b; if(!cfg) await mkDecoder('avc1.'+hx(b[spsOff+1])+hx(b[spsOff+2])+hx(b[spsOff+3])); }
-  if(!cfg) return;
-  if(!started){ if(!hasIDR) return; started=true; }
-  try{ dec.decode(new EncodedVideoChunk({type:hasIDR?'key':'delta',timestamp:ts,
-        data:(hasIDR&&!hasSPS&&spsPps)?cat(spsPps,b):b})); ts+=33333; }catch(e){}
+  if(hasSPS) spsPps=b;
+  if(!cfg){
+    if(!hasSPS) return;
+    if(!setup){
+      const codec='avc1.'+hx(b[spsOff+1])+hx(b[spsOff+2])+hx(b[spsOff+3]);
+      setup=hasWC?mkDecoder(codec):mkBroadway();
+    }
+    await setup;
+  }
+  feedNal(b, hasSPS, hasIDR);
 };
 
 /* ---------- input ---------- */
@@ -153,5 +236,5 @@ const resumeAudio=()=>{                         // fallback: any gesture un-susp
   if(actx && actx.state==='suspended') actx.resume();
 };
 ['pointerdown','keydown','touchstart'].forEach(t=>addEventListener(t,resumeAudio,{passive:true}));
-if(!('VideoDecoder' in window)) hudMsg('NO WebCodecs — needs HTTPS (secure context). isSecureContext='+window.isSecureContext);
+if(!hasWC) hudMsg('VideoDecoder absent — broadway fallback…');
 </script>

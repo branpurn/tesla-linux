@@ -81,7 +81,7 @@ if(hasWC && VideoDecoder.isConfigSupported){
     .then(r=>{$('t_h264').innerHTML=yn(!!r.supported,'YES (avc1.42e01f baseline)','NO');})
     .catch(e=>{$('t_h264').innerHTML='<span class="bad">check failed: '+e.name+'</span>';});
 }else{
-  $('t_h264').innerHTML='<span class="bad">n/a — no WebCodecs</span>';
+  $('t_h264').innerHTML='<span class="bad">n/a — no WebCodecs</span> · desktop Broadway fallback';
 }
 
 $('reboot').addEventListener('click', async ()=>{
