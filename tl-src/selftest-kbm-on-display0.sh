@@ -77,6 +77,22 @@ if grep -q 'cat > /etc/udev/rules.d/60-tesla-linux-kbm-seat0.rules' "$INSTALL"; 
 else
     pass "input uses standard seat0 udev discovery"
 fi
+grep -q '^IdleAction=ignore$' "$INSTALL" \
+    && pass "logind IdleAction=ignore" || bad "logind IdleAction=ignore missing"
+grep -q 'sleep.target suspend.target hibernate.target hybrid-sleep.target' "$INSTALL" \
+    && pass "install masks sleep/suspend targets" || bad "sleep target mask missing"
+grep -q 'usbcore.autosuspend=-1' "$INSTALL" \
+    && pass "USB autosuspend disabled" || bad "USB autosuspend still enabled"
+grep -q 'name="inactivity-on-ac" type="uint" value="0"' "$INSTALL" \
+    && pass "XFCE power-manager inactivity-on-ac=0" \
+    || bad "XFCE power-manager still allows idle sleep"
+grep -q 'Hidden=true' "$INSTALL" \
+    && pass "xfce4-power-manager autostart Hidden" \
+    || bad "xfce4-power-manager autostart not Hidden"
+grep -q 'BlankTime".*"0"' "$INSTALL" \
+    && pass "Xorg BlankTime 0" || bad "Xorg BlankTime not 0"
+grep -q 'xset -dpms s off s noblank' "$INSTALL" \
+    && pass "desktop xset disables DPMS" || bad "desktop missing xset -dpms"
 
 TREE="$(mktemp -d /tmp/tl-display-tree.XXXXXX)"
 cleanup() { rm -rf "$TREE"; }
@@ -91,6 +107,10 @@ plant() {
              "$t/etc/systemd/system/serial-getty@.service.d" \
              "$t/etc/systemd/logind.conf.d" \
              "$t/etc/X11/xorg.conf.d" \
+             "$t/etc/modprobe.d" \
+             "$t/etc/udev/rules.d" \
+             "$t/etc/xdg/autostart" \
+             "$t/etc/xdg/xfce4/xfconf/xfce-perchannel-xml" \
              "$t/usr/lib/systemd/system" \
              "$t/usr/lib/xorg/modules/input" \
              "$t/usr/local/sbin" \
@@ -101,6 +121,9 @@ plant() {
     ln -sfn /usr/lib/systemd/system/graphical.target "$t/etc/systemd/system/default.target"
     ln -sfn /dev/null "$t/etc/systemd/system/getty@tty1.service"
     ln -sfn /dev/null "$t/etc/systemd/system/autovt@tty1.service"
+    for tunit in sleep.target suspend.target hibernate.target hybrid-sleep.target; do
+        ln -sfn /dev/null "$t/etc/systemd/system/$tunit"
+    done
     for tty in ttyAMA0 ttyS0 ttyAMA1; do
         ln -sfn /usr/lib/systemd/system/getty@.service \
             "$t/etc/systemd/system/getty.target.wants/serial-getty@${tty}.service"
@@ -130,6 +153,7 @@ Requires=tesla-linux-xorg.service
 User=teslalinux
 Environment=DISPLAY=:0
 ExecStartPre=/bin/sh -c 'DISPLAY=:0 xrandr --fb 1088x832 --output HDMI-1 --mode 1920x1080 --scale-from 1088x832 --primary'
+ExecStartPre=/bin/sh -c 'DISPLAY=:0 xset -dpms s off s noblank'
 ExecStart=/usr/bin/dbus-launch --exit-with-session /usr/bin/xfce4-session
 [Install]
 WantedBy=graphical.target
@@ -145,12 +169,49 @@ EOF
 [Login]
 NAutoVTs=0
 ReserveVT=0
+IdleAction=ignore
+IdleActionSec=infinity
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandlePowerKey=poweroff
+IdleHint=no
 EOF
     cat > "$t/etc/systemd/system/serial-getty@.service.d/tl-no-binds-to-dev.conf" <<'EOF'
 [Unit]
 BindsTo=
 EOF
+    cat > "$t/etc/modprobe.d/tesla-linux-no-autosuspend.conf" <<'EOF'
+options usbcore autosuspend=-1
+EOF
+    cat > "$t/etc/udev/rules.d/50-tesla-linux-usb-power.rules" <<'EOF'
+ACTION=="add", SUBSYSTEM=="usb", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", TEST=="power/autosuspend", ATTR{power/autosuspend}="-1"
+ACTION=="add", SUBSYSTEM=="pci", DRIVER=="xhci_hcd", TEST=="power/control", ATTR{power/control}="on"
+EOF
+    cat > "$t/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-power-manager" version="1.0">
+  <property name="xfce4-power-manager" type="empty">
+    <property name="inactivity-on-ac" type="uint" value="0" locked="true"/>
+    <property name="lid-action-on-ac" type="uint" value="0" locked="true"/>
+    <property name="dpms-enabled" type="bool" value="false" locked="true"/>
+  </property>
+</channel>
+EOF
+    cat > "$t/etc/xdg/autostart/xfce4-power-manager.desktop" <<'EOF'
+[Desktop Entry]
+Hidden=true
+EOF
     cat > "$t/etc/X11/xorg.conf.d/10-tesla-linux-display.conf" <<'EOF'
+Section "ServerFlags"
+    Option "BlankTime" "0"
+    Option "StandbyTime" "0"
+    Option "SuspendTime" "0"
+    Option "OffTime" "0"
+EndSection
 Section "OutputClass"
     Identifier "TeslaLinuxVC4"
     MatchDriver "vc4"
@@ -204,6 +265,19 @@ rm -f "$TREE/etc/systemd/system/getty@tty1.service"
 ln -sfn /usr/lib/systemd/system/getty@.service \
     "$TREE/etc/systemd/system/getty.target.wants/getty@tty1.service"
 expect_fail "unmasked getty fails gate" "unmasked" "$INSTALL" --verify-kbm "$TREE"
+plant "$TREE"
+
+rm -f "$TREE/etc/systemd/system/suspend.target"
+expect_fail "unmasked suspend.target fails gate" "unmasked" "$INSTALL" --verify-kbm "$TREE"
+plant "$TREE"
+
+sed -i '/^IdleAction=ignore$/d' "$TREE/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf"
+expect_fail "missing IdleAction fails gate" "IdleAction" "$INSTALL" --verify-kbm "$TREE"
+plant "$TREE"
+
+sed -i 's/value="0"/value="15"/' \
+    "$TREE/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml"
+expect_fail "XFCE idle-sleep fails gate" "inactivity-on-ac" "$INSTALL" --verify-kbm "$TREE"
 plant "$TREE"
 
 rm -f "$TREE/usr/lib/xorg/modules/input/libinput_drv.so"

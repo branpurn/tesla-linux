@@ -164,9 +164,19 @@ ensure_graphical_vt1() {
     cat > /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf <<'EOF'
 # Xorg :0 owns tty1 and displays the same 1088x832 desktop captured for the web.
 # NAutoVTs=0: no extra VTs. getty@tty1 stays masked.
+# Appliance never sleeps: idle/lid/suspend keys must not take down :0 or USB KBM.
 [Login]
 NAutoVTs=0
 ReserveVT=0
+IdleAction=ignore
+IdleActionSec=infinity
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandlePowerKey=poweroff
+IdleHint=no
 EOF
 
     local mask
@@ -186,6 +196,8 @@ EOF
         || { echo "ERROR: logind NAutoVTs=0 did not stick" >&2; exit 1; }
     grep -q '^ReserveVT=0$' /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf \
         || { echo "ERROR: logind ReserveVT=0 did not stick" >&2; exit 1; }
+    grep -q '^IdleAction=ignore$' /etc/systemd/logind.conf.d/tesla-linux-hdmi.conf \
+        || { echo "ERROR: logind IdleAction=ignore did not stick" >&2; exit 1; }
 }
 
 # Give Pi HDMI0 a standard timing monitors accept. Xrandr scales the logical
@@ -207,10 +219,111 @@ ensure_hdmi_mode() {
     }
     line="$(tr '\n' ' ' < "$cmdline")"
     line="$(printf '%s\n' "$line" \
-        | sed -E 's/(^| )video=HDMI-A-1:[^ ]+//g; s/[[:space:]]+/ /g; s/^ //; s/ $//')"
-    printf '%s video=HDMI-A-1:1920x1080@60D\n' "$line" > "$cmdline"
+        | sed -E 's/(^| )video=HDMI-A-1:[^ ]+//g; s/(^| )usbcore.autosuspend=[^ ]+//g; s/[[:space:]]+/ /g; s/^ //; s/ $//')"
+    printf '%s video=HDMI-A-1:1920x1080@60D usbcore.autosuspend=-1\n' "$line" > "$cmdline"
     grep -q 'video=HDMI-A-1:1920x1080@60D' "$cmdline" \
         || { echo "ERROR: HDMI0 kernel mode did not stick" >&2; exit 1; }
+    grep -q 'usbcore.autosuspend=-1' "$cmdline" \
+        || { echo "ERROR: usbcore.autosuspend=-1 did not stick" >&2; exit 1; }
+}
+
+# Appliance never sleep/suspend/hibernate. File-level so bake chroot and live
+# install both stick without a running systemd. USB autosuspend off keeps HID
+# and :0 capture awake; do not touch seat0 / GrabDevice / KBM udev.
+ensure_never_sleep() {
+    local t
+    mkdir -p /etc/systemd/system /etc/modprobe.d /etc/udev/rules.d \
+             /etc/xdg/autostart \
+             /etc/xdg/xfce4/xfconf/xfce-perchannel-xml
+    for t in sleep.target suspend.target hibernate.target hybrid-sleep.target; do
+        ln -sfn /dev/null "/etc/systemd/system/$t"
+    done
+
+    cat > /etc/modprobe.d/tesla-linux-no-autosuspend.conf <<'EOF'
+# Keep USB HID and the :0 capture path from runtime-PM idle disconnects.
+options usbcore autosuspend=-1
+EOF
+
+    cat > /etc/udev/rules.d/50-tesla-linux-usb-power.rules <<'EOF'
+# USB power stays on. Do not assign seats or match HID here (standard seat0).
+ACTION=="add", SUBSYSTEM=="usb", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", TEST=="power/autosuspend", ATTR{power/autosuspend}="-1"
+ACTION=="add", SUBSYSTEM=="pci", DRIVER=="xhci_hcd", TEST=="power/control", ATTR{power/control}="on"
+EOF
+
+    # Locked system defaults: XFCE must not idle-suspend or DPMS-blank :0.
+    cat > /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-power-manager" version="1.0">
+  <property name="xfce4-power-manager" type="empty">
+    <property name="inactivity-on-ac" type="uint" value="0" locked="true"/>
+    <property name="inactivity-on-battery" type="uint" value="0" locked="true"/>
+    <property name="lid-action-on-ac" type="uint" value="0" locked="true"/>
+    <property name="lid-action-on-battery" type="uint" value="0" locked="true"/>
+    <property name="sleep-button-action" type="uint" value="0" locked="true"/>
+    <property name="hibernate-button-action" type="uint" value="0" locked="true"/>
+    <property name="power-button-action" type="uint" value="0" locked="true"/>
+    <property name="critical-power-action" type="uint" value="0" locked="true"/>
+    <property name="dpms-enabled" type="bool" value="false" locked="true"/>
+    <property name="dpms-on-ac-sleep" type="uint" value="0" locked="true"/>
+    <property name="dpms-on-ac-off" type="uint" value="0" locked="true"/>
+    <property name="dpms-on-battery-sleep" type="uint" value="0" locked="true"/>
+    <property name="dpms-on-battery-off" type="uint" value="0" locked="true"/>
+    <property name="blank-on-ac" type="int" value="0" locked="true"/>
+    <property name="blank-on-battery" type="int" value="0" locked="true"/>
+    <property name="lock-screen-suspend-hibernate" type="bool" value="false" locked="true"/>
+    <property name="logind-handle-lid-switch" type="bool" value="false" locked="true"/>
+    <property name="presentation-mode" type="bool" value="true" locked="true"/>
+  </property>
+</channel>
+EOF
+
+    cat > /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-screensaver.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-screensaver" version="1.0">
+  <property name="saver" type="empty">
+    <property name="enabled" type="bool" value="false" locked="true"/>
+    <property name="idle-activation" type="empty">
+      <property name="enabled" type="bool" value="false" locked="true"/>
+    </property>
+  </property>
+  <property name="lock" type="empty">
+    <property name="enabled" type="bool" value="false" locked="true"/>
+  </property>
+</channel>
+EOF
+
+    local desk
+    for desk in xfce4-power-manager.desktop xfce4-screensaver.desktop \
+                xscreensaver.desktop light-locker.desktop; do
+        cat > "/etc/xdg/autostart/$desk" <<'EOF'
+[Desktop Entry]
+Hidden=true
+EOF
+    done
+
+    for t in sleep.target suspend.target hibernate.target hybrid-sleep.target; do
+        case "$(readlink "/etc/systemd/system/$t")" in
+            /dev/null|dev/null) ;;
+            *)
+                echo "ERROR: $t is not masked" >&2
+                exit 1
+                ;;
+        esac
+    done
+    grep -q 'autosuspend=-1' /etc/modprobe.d/tesla-linux-no-autosuspend.conf \
+        || { echo "ERROR: usbcore autosuspend=-1 did not stick" >&2; exit 1; }
+    grep -q 'ATTR{power/control}="on"' /etc/udev/rules.d/50-tesla-linux-usb-power.rules \
+        || { echo "ERROR: USB power/control=on udev rule did not stick" >&2; exit 1; }
+    if grep -Eiq 'ID_SEAT|seat0|GrabDevice' /etc/udev/rules.d/50-tesla-linux-usb-power.rules; then
+        echo "ERROR: USB power udev rule must not assign seats or GrabDevice" >&2
+        exit 1
+    fi
+    grep -q 'name="inactivity-on-ac" type="uint" value="0"' \
+        /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml \
+        || { echo "ERROR: XFCE power-manager inactivity-on-ac is not 0" >&2; exit 1; }
+    grep -q 'Hidden=true' /etc/xdg/autostart/xfce4-power-manager.desktop \
+        || { echo "ERROR: xfce4-power-manager autostart is not Hidden" >&2; exit 1; }
 }
 
 # libinput_drv.so must exist on a real install (live / chroot / mounted bake).
@@ -330,6 +443,66 @@ verify_kbm_on_display0() {
     fi
 }
 
+# Host-side / live / bake: sleep targets masked, logind idle ignore, XFCE
+# power-manager will not suspend, USB autosuspend off. Optional prefix ($1).
+verify_never_sleep() {
+    local r="${1:-}"
+    local t rl logind udev xfce desk display
+    for t in sleep.target suspend.target hibernate.target hybrid-sleep.target; do
+        [ -L "$r/etc/systemd/system/$t" ] \
+            || { echo "ERROR: $t is unmasked (not a mask symlink)" >&2; exit 1; }
+        rl="$(readlink "$r/etc/systemd/system/$t")"
+        case "$rl" in
+            /dev/null|dev/null) ;;
+            *)
+                echo "ERROR: $t is unmasked (readlink='$rl')" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    logind="$r/etc/systemd/logind.conf.d/tesla-linux-hdmi.conf"
+    [ -f "$logind" ] || { echo "ERROR: missing logind tesla-linux-hdmi.conf" >&2; exit 1; }
+    grep -q '^IdleAction=ignore$' "$logind" \
+        || { echo "ERROR: logind IdleAction is not ignore" >&2; exit 1; }
+
+    udev="$r/etc/udev/rules.d/50-tesla-linux-usb-power.rules"
+    [ -f "$udev" ] || { echo "ERROR: missing USB power udev rule" >&2; exit 1; }
+    grep -q 'ATTR{power/control}="on"' "$udev" \
+        || { echo "ERROR: USB udev rule does not set power/control=on" >&2; exit 1; }
+    if grep -Eiq 'ID_SEAT|60-tesla-linux-kbm-seat0|GrabDevice' "$udev"; then
+        echo "ERROR: USB power udev rule must not assign seats or GrabDevice" >&2
+        exit 1
+    fi
+    [ -f "$r/etc/modprobe.d/tesla-linux-no-autosuspend.conf" ] \
+        || { echo "ERROR: missing usbcore autosuspend modprobe" >&2; exit 1; }
+    grep -q 'autosuspend=-1' "$r/etc/modprobe.d/tesla-linux-no-autosuspend.conf" \
+        || { echo "ERROR: usbcore autosuspend is not -1" >&2; exit 1; }
+
+    xfce="$r/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml"
+    [ -f "$xfce" ] || { echo "ERROR: missing XFCE power-manager xfconf" >&2; exit 1; }
+    grep -q 'name="inactivity-on-ac" type="uint" value="0"' "$xfce" \
+        || { echo "ERROR: XFCE power-manager inactivity-on-ac is not 0" >&2; exit 1; }
+    grep -q 'name="lid-action-on-ac" type="uint" value="0"' "$xfce" \
+        || { echo "ERROR: XFCE power-manager lid-action-on-ac is not 0" >&2; exit 1; }
+    grep -q 'name="dpms-enabled" type="bool" value="false"' "$xfce" \
+        || { echo "ERROR: XFCE power-manager DPMS is not disabled" >&2; exit 1; }
+    desk="$r/etc/xdg/autostart/xfce4-power-manager.desktop"
+    [ -f "$desk" ] || { echo "ERROR: missing xfce4-power-manager autostart override" >&2; exit 1; }
+    grep -q '^Hidden=true$' "$desk" \
+        || { echo "ERROR: xfce4-power-manager autostart is not Hidden" >&2; exit 1; }
+
+    display="$r/etc/X11/xorg.conf.d/10-tesla-linux-display.conf"
+    if [ -f "$display" ]; then
+        grep -q 'BlankTime".*"0"' "$display" \
+            || { echo "ERROR: Xorg BlankTime is not 0 (:0 capture would idle-blank)" >&2; exit 1; }
+    fi
+    if [ -f "$r/etc/systemd/system/tesla-linux-desktop.service" ]; then
+        grep -q 'xset -dpms s off s noblank' "$r/etc/systemd/system/tesla-linux-desktop.service" \
+            || { echo "ERROR: desktop does not xset -dpms (capture would idle-blank)" >&2; exit 1; }
+    fi
+}
+
 verify_autologin_hdmi() {
     local r="${1:-}"
     local xorg="$r/etc/systemd/system/tesla-linux-xorg.service"
@@ -396,6 +569,16 @@ verify_autologin_hdmi() {
         || { echo "ERROR: logind NAutoVTs is not 0" >&2; exit 1; }
     grep -q '^ReserveVT=0$' "$logind" \
         || { echo "ERROR: logind ReserveVT is not 0 (Xorg vt1 must not fight a reserved getty VT)" >&2; exit 1; }
+    grep -q '^IdleAction=ignore$' "$logind" \
+        || { echo "ERROR: logind IdleAction is not ignore (appliance must not idle-sleep)" >&2; exit 1; }
+    grep -q '^HandleLidSwitch=ignore$' "$logind" \
+        || { echo "ERROR: logind HandleLidSwitch is not ignore" >&2; exit 1; }
+    grep -q '^HandleSuspendKey=ignore$' "$logind" \
+        || { echo "ERROR: logind HandleSuspendKey is not ignore" >&2; exit 1; }
+    grep -q '^HandleHibernateKey=ignore$' "$logind" \
+        || { echo "ERROR: logind HandleHibernateKey is not ignore" >&2; exit 1; }
+
+    verify_never_sleep "$r"
 
     [ -L "$r/etc/systemd/system/getty.target.wants/serial-getty@ttyAMA0.service" ] \
         || { echo "ERROR: serial-getty@ttyAMA0 not enabled" >&2; exit 1; }
@@ -597,6 +780,7 @@ ensure_sshd_qemu
 ensure_serial_console
 ensure_graphical_vt1
 ensure_hdmi_mode
+ensure_never_sleep
 set_graphical_default
 TL_UID="$(id -u "$TL_USER")"
 
@@ -814,6 +998,10 @@ cat > /etc/X11/xorg.conf.d/10-tesla-linux-display.conf <<'EOF'
 Section "ServerFlags"
     Option "AutoAddDevices" "true"
     Option "AutoEnableDevices" "true"
+    Option "BlankTime" "0"
+    Option "StandbyTime" "0"
+    Option "SuspendTime" "0"
+    Option "OffTime" "0"
 EndSection
 
 Section "OutputClass"
@@ -932,6 +1120,7 @@ EnvironmentFile=/etc/tesla-linux/tesla-linux.env
 Environment=DISPLAY=:0
 ExecStartPre=/bin/sh -c 'for i in \$(seq 1 30); do DISPLAY=:0 xdpyinfo >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
 ExecStartPre=/bin/sh -c 'DISPLAY=:0 xrandr --fb 1088x832 --output HDMI-1 --mode 1920x1080 --scale-from 1088x832 --primary'
+ExecStartPre=/bin/sh -c 'DISPLAY=:0 xset -dpms s off s noblank'
 ExecStart=/usr/bin/dbus-launch --exit-with-session /usr/bin/xfce4-session
 Restart=always
 RestartSec=3
@@ -999,6 +1188,7 @@ loginctl enable-linger "$TL_USER" 2>/dev/null || true
 set_graphical_default
 # HDMI, web capture, and USB KBM share XFCE on Xorg :0 / vt1.
 ensure_graphical_vt1
+ensure_never_sleep
 
 mkdir -p /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-user.target.wants
 
@@ -1021,6 +1211,7 @@ if [ "$START" = "1" ]; then
     systemctl daemon-reload
     systemctl stop getty@tty1.service
     systemctl mask getty@tty1.service autovt@tty1.service
+    systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
     systemctl enable tesla-linux-xorg tesla-linux-desktop tesla-linux-display \
                      tesla-linux-touch tesla-linux-audio >/dev/null 2>&1
     /usr/local/sbin/tesla-linux-wlan eth-up >/dev/null 2>&1 || true
