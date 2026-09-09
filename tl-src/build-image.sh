@@ -115,6 +115,9 @@ cp "$SRC"/install-tesla-linux.sh "$SRC"/ta_*.py "$SRC"/*.html \
 if [ -f "$SRC/authorized_keys" ]; then
   cp "$SRC/authorized_keys" "$MNT/tmp/tl-src/authorized_keys"
 fi
+if [ -d "$SRC/broadway" ]; then
+  cp -a "$SRC/broadway" "$MNT/tmp/tl-src/broadway"
+fi
 chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh"
 
 # ---------------------------------------------------------------- chroot -----

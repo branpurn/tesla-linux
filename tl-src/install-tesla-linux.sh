@@ -802,6 +802,15 @@ done
 for f in desktop.html probe.html index.html; do
     [ -f "$HERE/$f" ] && install -m644 "$HERE/$f" /var/www/tl/$f
 done
+# Broadway software H.264 (HTTP / no VideoDecoder). Worker loads avc.wasm
+# next to Decoder.js; main-thread Decoder fetches /avc.wasm (page-relative).
+if [ -d "$HERE/broadway" ]; then
+    install -d /var/www/tl/broadway
+    for f in Decoder.js Player.js YUVCanvas.js avc.wasm LICENSE AUTHORS NOTICE; do
+        [ -f "$HERE/broadway/$f" ] && install -m644 "$HERE/broadway/$f" /var/www/tl/broadway/$f
+    done
+    [ -f "$HERE/broadway/avc.wasm" ] && install -m644 "$HERE/broadway/avc.wasm" /var/www/tl/avc.wasm
+fi
 
 # WAVE 1: factory AP env (SSID TeslaLinux / PSK teslalinux) + wlan helper/unit
 if [ -f "$HERE/ap.env" ]; then
@@ -925,6 +934,7 @@ cat > /etc/nginx/tl-locations.conf <<'EOF'
 # /api/mode → same loopback :9094 (WAN-rebroadcast intent; persist only).
 root /var/www/tl;
 index index.html;
+location ~* \.wasm$ { default_type application/wasm; }
 location /sockets/display     { proxy_pass http://127.0.0.1:9091; include /etc/nginx/tl-ws.conf; }
 location /sockets/touchscreen { proxy_pass http://127.0.0.1:9092; include /etc/nginx/tl-ws.conf; }
 location /sockets/audio       { proxy_pass http://127.0.0.1:9093; include /etc/nginx/tl-ws.conf; }
