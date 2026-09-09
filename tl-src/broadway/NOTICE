@@ -1,0 +1,12 @@
+Vendored Broadway.js H.264 software decoder (Player + Decoder + avc.wasm).
+
+Source: https://github.com/mbebenita/Broadway
+Commit: b8f055f5ad709db3c5042cff5938237ac0e1b5d5 (master)
+
+Files:
+  Decoder.js, Player.js, avc.wasm — Broadway Player/ (3-clause BSD; Android AVC core Apache-2.0)
+  YUVCanvas.js — Paperspace MIT (see file header)
+  LICENSE, AUTHORS — upstream
+
+Served origin-relative next to desktop.html as /broadway/*.
+Do not load from a CDN.
