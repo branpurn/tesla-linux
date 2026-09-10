@@ -18,11 +18,13 @@ START=1
 # firefox is Mozilla apt .deb (packages.mozilla.org), not the Ubuntu snap stub.
 # ristretto is the lightweight XFCE image viewer (piecemeal XFCE; not a desktop meta).
 # tumbler is the Thunar thumbnailer (piecemeal XFCE; not a desktop meta).
+# xubuntu-wallpapers ships /usr/share/xfce4/backdrops/xubuntu-wallpaper.png (not xubuntu-desktop).
 PKGS="xserver-xorg-core xserver-xorg-input-libinput \
 xinit x11-utils x11-xserver-utils xinput \
 gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
 python3-gi python3-gst-1.0 python3-websockets python3-evdev \
 xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar ristretto tumbler dbus-x11 \
+xubuntu-wallpapers \
 xarchiver thunar-archive-plugin 7zip unzip \
 pipewire pipewire-pulse pipewire-audio wireplumber pulseaudio-utils gstreamer1.0-pipewire \
 nginx openssl network-manager hostapd iw dnsmasq rfkill firefox"
@@ -332,6 +334,68 @@ EOF
         || { echo "ERROR: XFCE power-manager inactivity-on-ac is not 0" >&2; exit 1; }
     grep -q 'Hidden=true' /etc/xdg/autostart/xfce4-power-manager.desktop \
         || { echo "ERROR: xfce4-power-manager autostart is not Hidden" >&2; exit 1; }
+}
+
+# Default xfdesktop wallpaper from xubuntu-wallpapers. System XDG so bake/chroot
+# sticks; skel + teslalinux home so a user xfce4-desktop.xml cannot override.
+# HDMI-1 is the product stream monitor; Virtual-* covers qemu leftover outputs.
+TL_WALLPAPER=/usr/share/xfce4/backdrops/xubuntu-wallpaper.png
+TL_XFCE_DESKTOP_XML=/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml
+
+write_xfce_wallpaper_xml() {
+    local dest="$1"
+    install -d "$(dirname "$dest")"
+    cat > "$dest" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-desktop" version="1.0">
+  <property name="backdrop" type="empty">
+    <property name="screen0" type="empty">
+      <property name="monitorHDMI-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="last-image" type="string" value="$TL_WALLPAPER" locked="true"/>
+          <property name="image-style" type="int" value="5" locked="true"/>
+          <property name="backdrop-cycle-enable" type="bool" value="false" locked="true"/>
+        </property>
+      </property>
+      <property name="monitorVirtual-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="last-image" type="string" value="$TL_WALLPAPER" locked="true"/>
+          <property name="image-style" type="int" value="5" locked="true"/>
+          <property name="backdrop-cycle-enable" type="bool" value="false" locked="true"/>
+        </property>
+      </property>
+      <property name="monitorVirtual-2" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="last-image" type="string" value="$TL_WALLPAPER" locked="true"/>
+          <property name="image-style" type="int" value="5" locked="true"/>
+          <property name="backdrop-cycle-enable" type="bool" value="false" locked="true"/>
+        </property>
+      </property>
+    </property>
+  </property>
+</channel>
+EOF
+}
+
+ensure_xfce_wallpaper() {
+    local dest
+    write_xfce_wallpaper_xml "$TL_XFCE_DESKTOP_XML"
+    write_xfce_wallpaper_xml /etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml
+    if [ -d /home/teslalinux ]; then
+        dest=/home/teslalinux/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml
+        write_xfce_wallpaper_xml "$dest"
+        if id teslalinux >/dev/null 2>&1; then
+            chown -R teslalinux:teslalinux /home/teslalinux/.config
+        fi
+    fi
+    grep -q "$TL_WALLPAPER" "$TL_XFCE_DESKTOP_XML" \
+        || { echo "ERROR: xfce4-desktop.xml missing $TL_WALLPAPER" >&2; exit 1; }
+    grep -q 'name="monitorHDMI-1"' "$TL_XFCE_DESKTOP_XML" \
+        || { echo "ERROR: xfce4-desktop.xml missing monitorHDMI-1" >&2; exit 1; }
+    grep -q 'name="image-style" type="int" value="5"' "$TL_XFCE_DESKTOP_XML" \
+        || { echo "ERROR: xfce4-desktop.xml image-style is not 5" >&2; exit 1; }
+    grep -q 'name="backdrop-cycle-enable" type="bool" value="false"' "$TL_XFCE_DESKTOP_XML" \
+        || { echo "ERROR: xfce4-desktop.xml backdrop cycle is not off" >&2; exit 1; }
 }
 
 # No background auto-patch. File-level so bake chroot and live install both
@@ -985,6 +1049,56 @@ verify_wan_rebroadcast() {
     fi
 }
 
+# Host-side / live / bake: xubuntu-wallpapers in PKGS and xfdesktop last-image
+# is the factory Xubuntu backdrop. Optional prefix ($1) is an image / plant root.
+verify_xfce_wallpaper() {
+    local r="${1:-}"
+    local xml="$r/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml"
+    local skel="$r/etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml"
+    local home="$r/home/teslalinux/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml"
+    local img="$TL_WALLPAPER"
+    local extra
+
+    case "$PKGS" in
+        *xubuntu-wallpapers*) ;;
+        *)
+            echo "ERROR: PKGS missing xubuntu-wallpapers" >&2
+            exit 1
+            ;;
+    esac
+    case "$PKGS" in
+        *xubuntu-desktop*)
+            echo "ERROR: PKGS includes xubuntu-desktop meta" >&2
+            exit 1
+            ;;
+    esac
+
+    [ -f "$xml" ] || { echo "ERROR: missing XFCE xfce4-desktop.xml" >&2; exit 1; }
+    grep -q "$img" "$xml" \
+        || { echo "ERROR: xfce4-desktop.xml does not reference $img" >&2; exit 1; }
+    grep -q 'name="monitorHDMI-1"' "$xml" \
+        || { echo "ERROR: xfce4-desktop.xml missing monitorHDMI-1" >&2; exit 1; }
+    grep -q 'name="monitorVirtual-1"' "$xml" \
+        || { echo "ERROR: xfce4-desktop.xml missing monitorVirtual-1" >&2; exit 1; }
+    grep -q 'name="image-style" type="int" value="5"' "$xml" \
+        || { echo "ERROR: xfce4-desktop.xml image-style is not 5" >&2; exit 1; }
+    grep -q 'name="backdrop-cycle-enable" type="bool" value="false"' "$xml" \
+        || { echo "ERROR: xfce4-desktop.xml backdrop cycle is not off" >&2; exit 1; }
+
+    for extra in "$skel" "$home"; do
+        if [ -f "$extra" ]; then
+            grep -q "$img" "$extra" \
+                || { echo "ERROR: $extra does not reference $img" >&2; exit 1; }
+        fi
+    done
+
+    if [ -d "$r/usr/share/xfce4/backdrops" ] \
+       || [ -f "$r/var/lib/dpkg/info/xubuntu-wallpapers.list" ]; then
+        [ -f "$r$img" ] \
+            || { echo "ERROR: wallpaper image missing ($r$img)" >&2; exit 1; }
+    fi
+}
+
 # --verify-autologin / --verify-kbm [root] checks a live box or a mounted image.
 # Do not run ensure_*. KBM-on-:0 is part of the same fail-hard gate.
 if [ "${1:-}" = "--verify-autologin" ] || [ "${1:-}" = "--verify-kbm" ]; then
@@ -1007,6 +1121,11 @@ if [ "${1:-}" = "--verify-firefox" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--verify-wallpaper" ]; then
+    verify_xfce_wallpaper "${2:-}"
+    exit 0
+fi
+
 if [ "${1:-}" = "--ensure-firefox-apt" ]; then
     ensure_firefox_deb_apt
     exit 0
@@ -1021,6 +1140,7 @@ ensure_serial_console
 ensure_graphical_vt1
 ensure_hdmi_mode
 ensure_never_sleep
+ensure_xfce_wallpaper
 ensure_no_unattended
 ensure_firefox_deb
 set_graphical_default
@@ -1448,6 +1568,7 @@ set_graphical_default
 # HDMI, web capture, and USB KBM share XFCE on Xorg :0 / vt1.
 ensure_graphical_vt1
 ensure_never_sleep
+ensure_xfce_wallpaper
 ensure_no_unattended
 
 mkdir -p /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-user.target.wants
@@ -1491,3 +1612,5 @@ verify_wan_rebroadcast
 verify_no_unattended
 # Fail the bake/install if Mozilla apt Firefox / XFCE desktop entry did not stick.
 verify_firefox
+# Fail the bake/install if the Xubuntu wallpaper xfdesktop default did not stick.
+verify_xfce_wallpaper
