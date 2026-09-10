@@ -27,7 +27,7 @@ Product path is the Tesla-browser web console (`desktop.html`) at a stable known
 
 ## Usage:
 
-- Operators: flash GitHub Release **[2026.09.09-36ecc74](https://github.com/branpurn/tesla-linux/releases/tag/2026.09.09-36ecc74)** (`tesla-linux-20260910-pi.img.xz`) with Raspberry Pi Imager → **Use custom** onto an SD card or a USB stick. That is the proven image (tip **36ecc74**). `main` tip is ahead (ristretto, tumbler, archive stack, xubuntu-wallpapers) for the next bake.
+- Operators: flash GitHub Release **[2026.09.10-e9c55c1](https://github.com/branpurn/tesla-linux/releases/tag/2026.09.10-e9c55c1)** (`tesla-linux-20260910-pi.img.xz`) with Raspberry Pi Imager → **Use custom** onto an SD card or a USB stick. That is the proven image (tip **e9c55c1**).
 - To bake from this tree instead:
 
 ```
