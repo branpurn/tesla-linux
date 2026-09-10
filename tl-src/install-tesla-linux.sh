@@ -319,7 +319,8 @@ EOF
         || { echo "ERROR: usbcore autosuspend=-1 did not stick" >&2; exit 1; }
     grep -q 'ATTR{power/control}="on"' /etc/udev/rules.d/50-tesla-linux-usb-power.rules \
         || { echo "ERROR: USB power/control=on udev rule did not stick" >&2; exit 1; }
-    if grep -Eiq 'ID_SEAT|seat0|GrabDevice' /etc/udev/rules.d/50-tesla-linux-usb-power.rules; then
+    if grep -Eiv '^[[:space:]]*#' /etc/udev/rules.d/50-tesla-linux-usb-power.rules \
+        | grep -Eiq 'ID_SEAT|seat0|GrabDevice'; then
         echo "ERROR: USB power udev rule must not assign seats or GrabDevice" >&2
         exit 1
     fi
@@ -620,7 +621,8 @@ verify_never_sleep() {
     [ -f "$udev" ] || { echo "ERROR: missing USB power udev rule" >&2; exit 1; }
     grep -q 'ATTR{power/control}="on"' "$udev" \
         || { echo "ERROR: USB udev rule does not set power/control=on" >&2; exit 1; }
-    if grep -Eiq 'ID_SEAT|60-tesla-linux-kbm-seat0|GrabDevice' "$udev"; then
+    if grep -Eiv '^[[:space:]]*#' "$udev" \
+        | grep -Eiq 'ID_SEAT|60-tesla-linux-kbm-seat0|GrabDevice'; then
         echo "ERROR: USB power udev rule must not assign seats or GrabDevice" >&2
         exit 1
     fi
