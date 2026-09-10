@@ -99,27 +99,35 @@ const LTE_HEALTH=['ok','no_stick','no_ip','no_route','station_conflict'];
 const lteDash=v=>(typeof v==='string'&&v.trim())?v.trim():'—';
 const lteYn=v=>v===true?'yes':v===false?'no':'—';
 
+function lteFailHint(r, e){
+  if(e && e.name==='AbortError') return 'timeout';
+  if(r) return 'HTTP '+r.status;
+  return 'error';
+}
+
 async function fetchLte(){
   const ac=new AbortController();
   const t=setTimeout(()=>ac.abort(),15000);
   try{
     const r=await fetch(lteApi,{method:'GET',signal:ac.signal,credentials:'same-origin'});
-    if(!r || r.status===404 || r.status===501 || !r.ok) return null;
+    if(!r || !r.ok) return {err:lteFailHint(r)};
     const data=await r.json();
-    return data && typeof data==='object' ? data : null;
+    if(!data || typeof data!=='object') return {err:'error'};
+    return {data};
   }catch(e){
-    return null;
+    return {err:lteFailHint(null, e)};
   }finally{ clearTimeout(t); }
 }
 
-function paintLte(data){
-  if(!data){
-    $('lte-strip').textContent='LTE  No modem';
+function paintLte(data, err){
+  if(err || !data){
+    $('lte-strip').textContent='LTE  Health '+(err||'error');
     return;
   }
+  const detected=data.stick_present===false?'No modem':lteYn(data.stick_present);
   const mode=data.wan_rebroadcast===true?'wan_rebroadcast':lteYn(data.wan_rebroadcast);
   const h=LTE_HEALTH.indexOf(data.health)>=0?data.health:'—';
-  $('lte-strip').textContent='LTE  Detected '+lteYn(data.stick_present)
+  $('lte-strip').textContent='LTE  Detected '+detected
     +' · Iface '+lteDash(data.iface)
     +' · IPv4 '+lteDash(data.ip)
     +' · Default via LTE '+lteYn(data.default_route)
@@ -127,5 +135,5 @@ function paintLte(data){
     +' · Health '+h;
 }
 
-fetchLte().then(paintLte);
+fetchLte().then(got=>paintLte(got.data, got.err));
 </script>
