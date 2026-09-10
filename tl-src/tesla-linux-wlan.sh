@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tesla Linux WAVE 1 — saved-WLAN station else TeslaLinux hostapd AP.
-# Alternate: WAN rebroadcast — AP stays up; ethernet WAN is NAT'd to AP clients.
+# Alternate: WAN rebroadcast — AP stays up; ethernet or USB LTE WAN is NAT'd
+# to AP clients (10.42.0.0/24). USB stick 1286:4e3c is cdc_ether (enx…).
 #
 # NetworkManager owns infrastructure (station) autoconnect.
 # Fallback AP is hostapd + dnsmasq (not nmcli hotspot), SSID TeslaLinux.
@@ -30,12 +31,20 @@ ETH_CONN="${ETH_CONN:-tesla-linux-eth}"
 WAIT_SEC="${WAIT_SEC:-20}"
 # brcmfmac often appears after this oneshot first runs — wait, then fail so systemd restarts.
 IFACE_WAIT_SEC="${IFACE_WAIT_SEC:-60}"
-# Alternate mode: AP stays up; do not join a station WLAN. Ethernet WAN is NAT'd.
-# Backend persist is /etc/tesla-linux/mode.json (POST /api/mode). Missing = station.
-# wan-ap / wan-rebroadcast also plants /run/tesla-linux-wan for this boot.
+# Alternate mode: AP stays up; do not join a station WLAN. Ethernet or USB LTE
+# (1286:4e3c cdc_ether) WAN is NAT'd. Backend persist is mode.json (POST /api/mode).
+# Missing = station. wan-ap / wan-rebroadcast also plants /run/tesla-linux-wan.
 WAN_REBROADCAST="${WAN_REBROADCAST:-0}"
 WAN_RUNTIME="${WAN_RUNTIME:-/run/tesla-linux-wan}"
 MODE_FILE="${MODE_FILE:-/etc/tesla-linux/mode.json}"
+# Known LTE USB stick (Marvell cdc_ether). Live name is typically enx<MAC>.
+# Backend owns /api/mode uplink.kind; helper only accepts the iface for NAT.
+LTE_USB_VID="${LTE_USB_VID:-1286}"
+LTE_USB_PID="${LTE_USB_PID:-4e3c}"
+LTE_CONN="${LTE_CONN:-tesla-linux-lte}"
+LTE_WAIT_SEC="${LTE_WAIT_SEC:-15}"
+NET_SYSFS="${NET_SYSFS:-/sys/class/net}"
+USB_SYSFS="${USB_SYSFS:-/sys/bus/usb/devices}"
 
 HOSTAPD_CONF="${HOSTAPD_CONF:-/etc/tesla-linux/hostapd.conf}"
 DNSMASQ_CONF="${DNSMASQ_CONF:-/etc/tesla-linux/dnsmasq-ap.conf}"
@@ -96,19 +105,96 @@ wired_ifaces() {
     done
 }
 
-# Primary jack / VM nic: eth0, then end0, then first en*.
+# USB VID:PID from a net iface (walk device → parents). Prints "vid:pid" lowercase.
+iface_usb_vidpid() {
+    local n="$1" d i=0 vid pid
+    [ -n "$n" ] || return 1
+    d="${NET_SYSFS:-/sys/class/net}/$n/device"
+    [ -e "$d" ] || return 1
+    d="$(readlink -f "$d" 2>/dev/null || printf '%s' "$d")"
+    while [ -n "$d" ] && [ "$d" != "/" ] && [ "$i" -lt 8 ]; do
+        if [ -f "$d/idVendor" ] && [ -f "$d/idProduct" ]; then
+            vid="$(tr -d '[:space:]' < "$d/idVendor" | tr 'A-F' 'a-f')"
+            pid="$(tr -d '[:space:]' < "$d/idProduct" | tr 'A-F' 'a-f')"
+            printf '%s:%s\n' "$vid" "$pid"
+            return 0
+        fi
+        d="$(readlink -f "$d/.." 2>/dev/null || true)"
+        i=$((i + 1))
+    done
+    return 1
+}
+
+iface_net_driver() {
+    local n="$1" link
+    link="$(readlink "${NET_SYSFS:-/sys/class/net}/$n/device/driver" 2>/dev/null || true)"
+    [ -n "$link" ] && basename "$link"
+}
+
+is_cdc_ether_iface() {
+    local n="$1"
+    [ "$(iface_net_driver "$n")" = "cdc_ether" ]
+}
+
+# Known LTE stick 1286:4e3c (cdc_ether, live name often enx…).
+is_lte_stick_iface() {
+    local n="$1" id
+    [ -n "$n" ] || return 1
+    id="$(iface_usb_vidpid "$n" 2>/dev/null || true)"
+    [ "$id" = "${LTE_USB_VID:-1286}:${LTE_USB_PID:-4e3c}" ]
+}
+
+# WAN NAT candidate: jack eth, USB cdc_ether, or the 1286:4e3c stick (enx…).
+is_wan_uplink_candidate() {
+    local n="$1"
+    is_lte_stick_iface "$n" && return 0
+    is_cdc_ether_iface "$n" && return 0
+    is_wired_iface "$n"
+}
+
+lte_wan_iface() {
+    local n
+    for n in "${NET_SYSFS:-/sys/class/net}"/*; do
+        [ -e "$n" ] || continue
+        n="$(basename "$n")"
+        is_lte_stick_iface "$n" || continue
+        printf '%s\n' "$n"
+        return 0
+    done
+    for n in "${NET_SYSFS:-/sys/class/net}"/enx*; do
+        [ -e "$n" ] || continue
+        n="$(basename "$n")"
+        is_cdc_ether_iface "$n" || continue
+        printf '%s\n' "$n"
+        return 0
+    done
+    return 1
+}
+
+# Primary jack / VM nic: eth0, then end0, then first en* that is not the LTE stick.
+# Never park factory 10.42.1.1 on USB 1286:4e3c.
 primary_wired_iface() {
     local n
     for n in eth0 end0; do
-        is_wired_iface "$n" && { printf '%s\n' "$n"; return 0; }
+        is_wired_iface "$n" || continue
+        is_lte_stick_iface "$n" && continue
+        printf '%s\n' "$n"
+        return 0
     done
     for n in /sys/class/net/en*; do
         [ -e "$n" ] || continue
         n="$(basename "$n")"
-        is_wired_iface "$n" && { printf '%s\n' "$n"; return 0; }
+        is_wired_iface "$n" || continue
+        is_lte_stick_iface "$n" && continue
+        printf '%s\n' "$n"
+        return 0
     done
-    n="$(wired_ifaces | head -n1)"
-    [ -n "$n" ] && { printf '%s\n' "$n"; return 0; }
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        is_lte_stick_iface "$n" && continue
+        printf '%s\n' "$n"
+        return 0
+    done < <(wired_ifaces)
     return 1
 }
 
@@ -189,36 +275,76 @@ set_ip_forward() {
     fi
 }
 
-# Wired iface with a default route, else a non-factory bindable IPv4 (WAN DHCP).
+# True when iface has a non-factory, non-AP bindable IPv4 (WAN DHCP / LTE).
+iface_has_wan_ipv4() {
+    local n="$1" ip
+    while IFS= read -r ip; do
+        [ -n "$ip" ] || continue
+        [ "$ip" = "$ETH_ADDR" ] && continue
+        [ "$ip" = "$AP_ADDR" ] && continue
+        is_bindable_ipv4 "$ip" || continue
+        return 0
+    done < <(iface_ipv4s "$n")
+    return 1
+}
+
+# Accept eth / enx… / cdc_ether / 1286:4e3c once it has a WAN IPv4 or default route.
+# Prefer LTE stick when it has WAN IP; else default-route iface; else any WAN IPv4.
+# Backend owns uplink.kind; this does not invent a mode API.
 wan_uplink_iface() {
-    local n ip gw
+    local n ip gw lte
+    lte="$(lte_wan_iface 2>/dev/null || true)"
+    if [ -n "$lte" ] && iface_has_wan_ipv4 "$lte"; then
+        printf '%s\n' "$lte"
+        return 0
+    fi
     gw="$(ip -4 route show default 2>/dev/null \
         | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
-    if [ -n "$gw" ] && is_wired_iface "$gw"; then
+    if [ -n "$gw" ] && is_wan_uplink_candidate "$gw"; then
         printf '%s\n' "$gw"
+        return 0
+    fi
+    if [ -n "$lte" ] && is_wan_uplink_candidate "$lte"; then
+        printf '%s\n' "$lte"
         return 0
     fi
     while IFS= read -r n; do
         [ -n "$n" ] || continue
-        while IFS= read -r ip; do
-            [ -n "$ip" ] || continue
-            [ "$ip" = "$ETH_ADDR" ] && continue
-            [ "$ip" = "$AP_ADDR" ] && continue
-            is_bindable_ipv4 "$ip" || continue
-            printf '%s\n' "$n"
-            return 0
-        done < <(iface_ipv4s "$n")
+        iface_has_wan_ipv4 "$n" || continue
+        printf '%s\n' "$n"
+        return 0
     done < <(wired_ifaces)
     return 1
 }
 
-# Idempotent NAT: AP 10.42.0.0/24 masquerade out the wired WAN uplink.
-# nftables table tesla-linux-wan if nft exists; else iptables. No LTE drivers.
+# Bring the LTE stick link up so NM/cdc_ether can get a WAN IPv4. Do not assign
+# factory 10.42.1.1. Do not invent Backend uplink pick — accept iface when present.
+ensure_lte_wan() {
+    local n
+    modprobe cdc_ether >/dev/null 2>&1 || true
+    n="$(lte_wan_iface 2>/dev/null || true)"
+    if [ -z "$n" ]; then
+        log "no LTE USB ${LTE_USB_VID:-1286}:${LTE_USB_PID:-4e3c} / cdc_ether yet; eth WAN path unchanged"
+        return 0
+    fi
+    ip link set "$n" up >/dev/null 2>&1 || true
+    if command -v nmcli >/dev/null 2>&1; then
+        nmcli device set "$n" managed yes >/dev/null 2>&1 || true
+        if ! iface_has_wan_ipv4 "$n"; then
+            nmcli device connect "$n" >/dev/null 2>&1 || true
+        fi
+    fi
+    log "LTE WAN candidate $n (1286:4e3c cdc_ether); NAT when it has a WAN IPv4"
+    return 0
+}
+
+# Idempotent NAT: AP 10.42.0.0/24 masquerade out eth or LTE (cdc_ether) WAN.
+# nftables table tesla-linux-wan if nft exists; else iptables.
 apply_wan_nat() {
     local wan net
     net="$(ap_client_net)"
     if ! wan="$(wan_uplink_iface)"; then
-        log "no wired WAN uplink yet; NAT not applied (factory $ETH_ADDR / AP $AP_ADDR still documented)"
+        log "no eth/LTE WAN uplink yet; NAT not applied (factory $ETH_ADDR / AP $AP_ADDR still documented)"
         return 0
     fi
     set_ip_forward
@@ -323,8 +449,38 @@ station_associated() {
     return 1
 }
 
+# WAN lock: drop every infra station association. Never station+AP dual.
+# Does not kick AP clients (Tesla on TeslaLinux). Only the Pi leaves station.
+leave_station() {
+    local iface n dev typ state conn
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        nmcli connection modify "$n" connection.autoconnect no 2>/dev/null || true
+    done < <(saved_infra_names)
+    while IFS=: read -r dev typ state conn; do
+        [ "$typ" = "wifi" ] || continue
+        [ -n "$dev" ] || continue
+        is_ap_conn "$conn" && continue
+        case "$state" in
+            connected|connecting)
+                log "WAN lock: disconnect station $dev ($state $conn)"
+                nmcli device disconnect "$dev" 2>/dev/null || true
+                ;;
+        esac
+    done < <(nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status 2>/dev/null || true)
+    iface="$(wifi_iface 2>/dev/null || true)"
+    if [ -n "$iface" ] && station_associated "$iface"; then
+        log "WAN lock: leaving station on $iface so TeslaLinux AP can stay up"
+        nmcli device disconnect "$iface" 2>/dev/null || true
+    fi
+}
+
 kick_nm_station() {
     local iface="$1" n
+    if wan_mode_on; then
+        log "WAN mode: refuse station join on ${iface:-?} (no dual station+AP)"
+        return 1
+    fi
     nmcli radio wifi on 2>/dev/null || true
     rfkill unblock wifi 2>/dev/null || true
     nmcli device set "$iface" managed yes 2>/dev/null || true
@@ -337,6 +493,10 @@ kick_nm_station() {
 
 wait_station() {
     local iface="$1" i
+    if wan_mode_on; then
+        log "WAN mode: skip station wait (no dual station+AP)"
+        return 1
+    fi
     kick_nm_station "$iface"
     i=0
     while [ "$i" -lt "$WAIT_SEC" ]; do
@@ -662,6 +822,74 @@ cmd_nginx_bind() {
     fi
 }
 
+# Fully release wifi from NM/wpa_supplicant so hostapd nl80211 can bind.
+# Station disconnect race: NM still holds the wiphy → "nl80211 driver initialization failed".
+prepare_wifi_for_ap() {
+    local iface="$1" i state
+    nmcli device disconnect "$iface" 2>/dev/null || true
+    nmcli device set "$iface" managed no 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 15 ]; do
+        state="$(nmcli -t -f DEVICE,STATE device status 2>/dev/null \
+            | awk -F: -v d="$iface" '$1==d {print $2; exit}')"
+        [ "$state" = "unmanaged" ] && break
+        sleep "${AP_HOSTAPD_SETTLE_SEC:-0.2}"
+        i=$((i + 1))
+    done
+    if [ -S "/run/wpa_supplicant/$iface" ] || [ -S "/var/run/wpa_supplicant/$iface" ]; then
+        wpa_cli -i "$iface" terminate 2>/dev/null || true
+    fi
+    rfkill unblock wifi 2>/dev/null || true
+    ip link set "$iface" down 2>/dev/null || true
+    ip addr flush dev "$iface" 2>/dev/null || true
+    sleep "${AP_HOSTAPD_SETTLE_SEC:-0.2}"
+    ip addr add "$AP_ADDR/$AP_PREFIX" dev "$iface" 2>/dev/null || true
+    ip link set "$iface" up 2>/dev/null || true
+}
+
+# Run hostapd -B; never swallow stderr (nl80211 fail must be visible).
+run_hostapd() {
+    local errf="$1" rc=0
+    : > "$errf"
+    hostapd -B -P "$HOSTAPD_PID" "$HOSTAPD_CONF" >"$errf" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        return 0
+    fi
+    log "FAIL: hostapd -B rc=$rc (nl80211/AP)"
+    if [ -s "$errf" ]; then
+        cat "$errf" >&2
+    else
+        log "hostapd produced no stderr (rc=$rc)"
+    fi
+    return "$rc"
+}
+
+# Start hostapd after NM release. Retry once on nl80211 init fail (station race).
+start_hostapd_ap() {
+    local iface="$1" errf attempt
+    errf="$(mktemp)"
+    write_hostapd_conf "$iface"
+    stop_pidfile "$DNSMASQ_PID" dnsmasq
+    for attempt in 1 2; do
+        prepare_wifi_for_ap "$iface"
+        stop_pidfile "$HOSTAPD_PID" hostapd
+        if run_hostapd "$errf"; then
+            rm -f "$errf"
+            return 0
+        fi
+        if [ "$attempt" = 1 ] && grep -Eiq 'nl80211|driver initialization failed' "$errf"; then
+            log "nl80211 race after station disconnect; releasing iface and retrying hostapd once"
+            stop_pidfile "$HOSTAPD_PID" hostapd
+            sleep "${AP_HOSTAPD_RETRY_SEC:-1}"
+            continue
+        fi
+        rm -f "$errf"
+        return 1
+    done
+    rm -f "$errf"
+    return 1
+}
+
 cmd_ap_up() {
     local iface
     iface="$(wifi_iface)" || { log "no Wi-Fi iface; cannot start AP"; return 1; }
@@ -669,6 +897,9 @@ cmd_ap_up() {
         log "station associated; not starting AP"
         cmd_nginx_bind
         return 0
+    fi
+    if wan_mode_on; then
+        leave_station
     fi
     if hostapd_running; then
         log "hostapd already up on $AP_SSID"
@@ -678,19 +909,10 @@ cmd_ap_up() {
     fi
 
     log "starting hostapd AP SSID=$AP_SSID addr=$AP_ADDR (not nmcli hotspot)"
-    nmcli device disconnect "$iface" 2>/dev/null || true
-    nmcli device set "$iface" managed no 2>/dev/null || true
-    rfkill unblock wifi 2>/dev/null || true
-    ip link set "$iface" down 2>/dev/null || true
-    ip addr flush dev "$iface" 2>/dev/null || true
-    ip addr add "$AP_ADDR/$AP_PREFIX" dev "$iface"
-    ip link set "$iface" up
-
-    write_hostapd_conf "$iface"
-
-    stop_pidfile "$HOSTAPD_PID" hostapd
-    stop_pidfile "$DNSMASQ_PID" dnsmasq
-    hostapd -B -P "$HOSTAPD_PID" "$HOSTAPD_CONF"
+    if ! start_hostapd_ap "$iface"; then
+        log "FAIL: hostapd did not start TeslaLinux AP on $iface (nl80211)"
+        return 1
+    fi
     ensure_ap_dhcp "$iface" || return 1
     cmd_nginx_bind
 }
@@ -711,6 +933,10 @@ cmd_save_wlan() {
     local ssid="${1:-}" psk="${2:-}"
     [ -n "$ssid" ] || { log "usage: tesla-linux-wlan save-wlan <ssid> [psk]"; return 1; }
     local iface
+    if wan_mode_on; then
+        log "WAN mode: refusing save-wlan station bounce (no dual station+AP); AP stays"
+        return 0
+    fi
     iface="$(wifi_iface 2>/dev/null || true)"
     cmd_ap_down
     if nmcli -t -f NAME connection show 2>/dev/null | grep -Fxq "$ssid"; then
@@ -746,15 +972,21 @@ cmd_save_wlan() {
 # WAN mode: keep that documented address and also allow DHCP default-route (WAN).
 # Wait for delayed usb-net/cdc_ether/eth0/end0/en* — skip-if-none immediately is an operator hangup.
 cmd_eth_up() {
-    local iface name type ipv4_method=manual never_default=yes
+    local iface name type ifn lte ipv4_method=manual never_default=yes
     if ! iface="$(wait_wired_iface)"; then
         log "no wired iface after ${IFACE_WAIT_SEC}s; skip $ETH_CONN"
         return 0
     fi
     if wan_mode_on; then
-        ipv4_method=auto
-        never_default=no
-        log "wired $iface -> factory $ETH_ADDR/$ETH_PREFIX + DHCP WAN ($ETH_CONN; operators use $ETH_ADDR / $AP_ADDR)"
+        if lte="$(lte_wan_iface 2>/dev/null || true)" && [ -n "$lte" ]; then
+            ipv4_method=manual
+            never_default=yes
+            log "wired $iface -> factory $ETH_ADDR/$ETH_PREFIX (LTE $lte is WAN; $ETH_CONN never-default)"
+        else
+            ipv4_method=auto
+            never_default=no
+            log "wired $iface -> factory $ETH_ADDR/$ETH_PREFIX + DHCP WAN ($ETH_CONN; operators use $ETH_ADDR / $AP_ADDR)"
+        fi
     else
         log "wired $iface -> $ETH_ADDR/$ETH_PREFIX ($ETH_CONN, not DHCP, not $AP_ADDR/$AP_PREFIX)"
     fi
@@ -762,8 +994,13 @@ cmd_eth_up() {
         while IFS=: read -r name type; do
             [ -n "$name" ] || continue
             [ "$name" = "$ETH_CONN" ] && continue
+            [ "$name" = "${LTE_CONN:-tesla-linux-lte}" ] && continue
             case "$type" in
                 802-3-ethernet|ethernet)
+                    ifn="$(nmcli -g connection.interface-name connection show "$name" 2>/dev/null || true)"
+                    if [ -n "$ifn" ] && is_lte_stick_iface "$ifn"; then
+                        continue
+                    fi
                     nmcli connection modify "$name" connection.autoconnect no 2>/dev/null || true
                     ;;
             esac
@@ -791,18 +1028,18 @@ cmd_eth_up() {
 }
 
 # WAN rebroadcast: keep TeslaLinux AP up, do not join a station WLAN, NAT AP clients.
+# Prefer leave-station then AP+DHCP, then accept eth or LTE (1286:4e3c) for NAT.
 cmd_wan_up() {
     local iface
     mkdir -p "$(dirname "$WAN_RUNTIME")"
     : > "$WAN_RUNTIME"
-    log "WAN rebroadcast: AP stays up; skip station join; NAT ${AP_ADDR%.*}.0/${AP_PREFIX} out ethernet WAN"
+    log "WAN rebroadcast: leave station (no dual); AP stays; NAT ${AP_ADDR%.*}.0/${AP_PREFIX} out eth or LTE WAN"
+    leave_station
+    ensure_lte_wan
     cmd_eth_up
     iface="$(wifi_iface 2>/dev/null || true)"
     if [ -n "$iface" ]; then
-        if station_associated "$iface"; then
-            log "wan-up: leaving station so TeslaLinux AP can stay up"
-            nmcli device disconnect "$iface" 2>/dev/null || true
-        fi
+        leave_station
         cmd_ap_up || log "wan-up: AP did not start"
         if hostapd_running; then
             ensure_ap_dhcp "$iface" || { log "wan-up: AP DHCP did not start"; cmd_nginx_bind; return 1; }
@@ -850,6 +1087,16 @@ cmd_wan_verify() {
             || { echo "FAIL: NAT/masquerade helper missing in $helper" >&2; fail=1; }
         grep -q 'apply_wan_nat' "$helper" \
             || { echo "FAIL: apply_wan_nat missing in $helper" >&2; fail=1; }
+        grep -q '1286:4e3c' "$helper" \
+            || { echo "FAIL: LTE USB 1286:4e3c missing in $helper" >&2; fail=1; }
+        grep -q 'cdc_ether' "$helper" \
+            || { echo "FAIL: cdc_ether LTE uplink missing in $helper" >&2; fail=1; }
+        grep -q 'ensure_lte_wan' "$helper" \
+            || { echo "FAIL: ensure_lte_wan missing in $helper" >&2; fail=1; }
+        grep -q 'leave_station' "$helper" \
+            || { echo "FAIL: leave_station missing in $helper" >&2; fail=1; }
+        grep -q 'start_hostapd_ap' "$helper" \
+            || { echo "FAIL: start_hostapd_ap missing in $helper" >&2; fail=1; }
         if awk '/^write_nginx_servers\(\)/,/^}/' "$helper" | grep -Eq 'listen 0\.0\.0\.0|listen 80;|listen \[::\]'; then
             echo "FAIL: write_nginx_servers would bind nginx to 0.0.0.0" >&2
             fail=1
@@ -878,7 +1125,7 @@ cmd_boot() {
     cmd_eth_up
     cmd_nginx_bind
     if wan_mode_on; then
-        log "WAN rebroadcast mode (mode.json/ap.env); skip station join"
+        log "WAN rebroadcast mode (mode.json/ap.env); leave station (no dual); AP + NAT"
         cmd_wan_up
         if hostapd_running; then
             if dnsmasq_running; then
@@ -952,6 +1199,8 @@ cmd_maybe_ap() {
 
 cmd_selftest() {
     local fail=0 out dir
+    AP_HOSTAPD_SETTLE_SEC=0
+    AP_HOSTAPD_RETRY_SEC=0
     out="$(filter_addrs 0.0.0.0 127.0.0.1 127.0.0.53 169.254.1.1 ::1 10.42.0.1 192.168.4.20 10.42.0.1/24)"
     echo "$out" | grep -qx '10.42.0.1' || { echo "FAIL: expected 10.42.0.1"; fail=1; }
     echo "$out" | grep -qx '192.168.4.20' || { echo "FAIL: expected 192.168.4.20"; fail=1; }
@@ -1217,6 +1466,43 @@ cmd_selftest() {
     echo "$out" | grep -qx '10.42.1.1' || { echo "FAIL: WAN collect missing factory eth"; fail=1; }
     echo "$out" | grep -qx '203.0.113.8' && { echo "FAIL: WAN collect bound WAN DHCP"; fail=1; }
     echo "$out" | grep -Eq '0\.0\.0\.0|127\.|169\.254' && { echo "FAIL: WAN collect leaked"; fail=1; }
+    wired_ifaces() { printf '%s\n' eth0 enxac0033aa9633; }
+    iface_ipv4s() {
+        case "$1" in
+            wlan0) printf '%s\n' 10.42.0.1 ;;
+            eth0) printf '%s\n' 10.42.1.1 ;;
+            enxac0033aa9633) printf '%s\n' 10.64.0.2 ;;
+            *) ;;
+        esac
+    }
+    lte_wan_iface() { printf '%s\n' enxac0033aa9633; }
+    is_lte_stick_iface() { [ "$1" = "enxac0033aa9633" ]; }
+    is_wan_uplink_candidate() { [ "$1" = "enxac0033aa9633" ] || [ "$1" = "eth0" ]; }
+    out="$(wan_uplink_iface)"
+    [ "$out" = "enxac0033aa9633" ] || { echo "FAIL: wan_uplink_iface did not prefer LTE $out"; fail=1; }
+    out="$(collect_bind_ips wlan0)"
+    echo "$out" | grep -qx '10.64.0.2' && { echo "FAIL: WAN collect bound LTE DHCP"; fail=1; }
+    echo "$out" | grep -qx '10.42.0.1' || { echo "FAIL: WAN collect missing AP with LTE"; fail=1; }
+    echo "$out" | grep -qx '10.42.1.1' || { echo "FAIL: WAN collect missing factory eth with LTE"; fail=1; }
+    lte_wan_iface() { return 1; }
+    is_lte_stick_iface() { return 1; }
+    wired_ifaces() { printf '%s\n' eth0; }
+    iface_ipv4s() {
+        case "$1" in
+            eth0) printf '%s\n' 10.42.1.1 203.0.113.8 ;;
+            *) ;;
+        esac
+    }
+    out="$(wan_uplink_iface)"
+    [ "$out" = "eth0" ] || { echo "FAIL: wan_uplink_iface lost eth WAN $out"; fail=1; }
+    wired_ifaces() { printf '%s\n' eth0; }
+    iface_ipv4s() {
+        case "$1" in
+            wlan0) printf '%s\n' 10.42.0.1 ;;
+            eth0) printf '%s\n' 10.42.1.1 203.0.113.8 ;;
+            *) ;;
+        esac
+    }
     NGINX_HTTP="$dir/wan-http.conf"
     NGINX_HTTPS="$dir/wan-https.conf"
     write_nginx_servers "$(collect_bind_ips wlan0)"
@@ -1268,7 +1554,18 @@ cmd_selftest() {
     _hostapd_early_ensures_dhcp cmd_ap_up || { echo "FAIL: cmd_ap_up hostapd_running early path skips dnsmasq"; fail=1; }
     _hostapd_early_ensures_dhcp cmd_maybe_ap || { echo "FAIL: cmd_maybe_ap hostapd_running early path skips dnsmasq"; fail=1; }
     _fn_body cmd_wan_up | grep -q 'ensure_ap_dhcp' || { echo "FAIL: cmd_wan_up does not ensure AP DHCP"; fail=1; }
+    _fn_body cmd_wan_up | grep -q 'leave_station' || { echo "FAIL: cmd_wan_up does not leave_station"; fail=1; }
+    _fn_body cmd_wan_up | grep -q 'ensure_lte_wan' || { echo "FAIL: cmd_wan_up does not ensure_lte_wan"; fail=1; }
+    _fn_body kick_nm_station | grep -q 'wan_mode_on' || { echo "FAIL: kick_nm_station missing WAN guard"; fail=1; }
+    _fn_body wait_station | grep -q 'wan_mode_on' || { echo "FAIL: wait_station missing WAN guard"; fail=1; }
+    _fn_body cmd_save_wlan | grep -q 'wan_mode_on' || { echo "FAIL: save-wlan missing WAN guard"; fail=1; }
     _fn_body cmd_ap_up | grep -q 'ensure_ap_dhcp' || { echo "FAIL: cmd_ap_up does not ensure AP DHCP after start"; fail=1; }
+    _fn_body cmd_ap_up | grep -q 'start_hostapd_ap' || { echo "FAIL: cmd_ap_up missing start_hostapd_ap"; fail=1; }
+    grep -q '^prepare_wifi_for_ap()' "$helper_src" || { echo "FAIL: prepare_wifi_for_ap missing"; fail=1; }
+    grep -q '^run_hostapd()' "$helper_src" || { echo "FAIL: run_hostapd missing"; fail=1; }
+    grep -q 'managed no' "$helper_src" || { echo "FAIL: hostapd path missing NM managed no"; fail=1; }
+    awk '/^write_hostapd_conf\(\)/,/^}/' "$helper_src" | grep -q '^channel=6$' \
+        || { echo "FAIL: hostapd channel default changed (do not invent channel)"; fail=1; }
 
     dhcp_log="$dir/dhcp-early.log"
     : > "$dhcp_log"
@@ -1324,6 +1621,8 @@ cmd_selftest() {
     hostapd_running() { return 1; }
     : > "$dhcp_log"
     rm -f "$DNSMASQ_PID"
+    AP_HOSTAPD_SETTLE_SEC=0
+    AP_HOSTAPD_RETRY_SEC=0
     nmcli() { return 0; }
     rfkill() { return 0; }
     ip() { return 0; }
@@ -1333,8 +1632,27 @@ cmd_selftest() {
         echo "FAIL: ap-up claimed success without live dnsmasq"; fail=1
     fi
     grep -q 'dnsmasq ' "$dhcp_log" || { echo "FAIL: ap-up fresh start did not start dnsmasq"; fail=1; }
+
+    # nl80211 race: first hostapd -B fails, retry after NM unmanaged settle succeeds.
+    hapd_n=0
+    : > "$dhcp_log"
+    hostapd() {
+        hapd_n=$((hapd_n + 1))
+        echo "hostapd $*" >> "$dhcp_log"
+        if [ "$hapd_n" -eq 1 ]; then
+            echo "nl80211: Could not configure driver mode" >&2
+            echo "nl80211 driver initialization failed." >&2
+            return 1
+        fi
+        return 0
+    }
+    if ! start_hostapd_ap wlan0; then
+        echo "FAIL: start_hostapd_ap should retry once after nl80211"; fail=1
+    fi
+    [ "$hapd_n" -eq 2 ] || { echo "FAIL: hostapd retry count $hapd_n"; fail=1; }
     unset -f nmcli rfkill ip hostapd dnsmasq
     unset -f _fn_body _hostapd_early_ensures_dhcp
+    unset AP_HOSTAPD_SETTLE_SEC AP_HOSTAPD_RETRY_SEC
 
     nft_log="$dir/nft.log"
     : > "$nft_log"
@@ -1378,6 +1696,9 @@ cmd_selftest() {
     cmd_ap_up() { echo ap-up >> "$boot_log"; return 0; }
     ensure_ap_dhcp() { echo dhcp >> "$boot_log"; return 0; }
     apply_wan_nat() { echo nat >> "$boot_log"; return 0; }
+    leave_station() { echo leave-station >> "$boot_log"; return 0; }
+    ensure_lte_wan() { echo lte >> "$boot_log"; return 0; }
+    kick_nm_station() { echo FAIL-kick-station >> "$boot_log"; return 0; }
     wait_station() { echo FAIL-station-wait >> "$boot_log"; return 1; }
     has_saved_infra() { echo FAIL-saved-infra >> "$boot_log"; return 0; }
     wait_wifi_iface() { printf '%s\n' wlan0; }
@@ -1392,6 +1713,9 @@ cmd_selftest() {
     grep -q 'ap-up' "$boot_log" || { echo "FAIL: WAN boot did not start AP"; fail=1; }
     grep -q 'dhcp' "$boot_log" || { echo "FAIL: WAN boot did not ensure AP DHCP"; fail=1; }
     grep -q 'nat' "$boot_log" || { echo "FAIL: WAN boot did not apply NAT"; fail=1; }
+    grep -q 'leave-station' "$boot_log" || { echo "FAIL: WAN boot did not leave station"; fail=1; }
+    grep -q 'lte' "$boot_log" || { echo "FAIL: WAN boot did not ensure LTE WAN"; fail=1; }
+    grep -q 'FAIL-kick-station' "$boot_log" && { echo "FAIL: WAN boot kicked station join"; fail=1; }
     grep -q 'FAIL-station-wait' "$boot_log" && { echo "FAIL: WAN boot waited on station"; fail=1; }
     grep -q 'FAIL-saved-infra' "$boot_log" && { echo "FAIL: WAN boot probed saved infra"; fail=1; }
     [ -f "$WAN_RUNTIME" ] || { echo "FAIL: wan-up did not plant runtime marker"; fail=1; }
@@ -1404,6 +1728,8 @@ cmd_selftest() {
         echo "FAIL: maybe-ap WAN returned non-zero"; fail=1
     fi
     grep -q 'FAIL-station-wait' "$boot_log" && { echo "FAIL: maybe-ap WAN waited on station"; fail=1; }
+    grep -q 'FAIL-kick-station' "$boot_log" && { echo "FAIL: maybe-ap WAN kicked station join"; fail=1; }
+    grep -q 'leave-station' "$boot_log" || { echo "FAIL: maybe-ap WAN did not leave station"; fail=1; }
     grep -q 'ap-up' "$boot_log" || { echo "FAIL: maybe-ap WAN did not keep AP path"; fail=1; }
     grep -q 'dhcp' "$boot_log" || { echo "FAIL: maybe-ap WAN did not ensure AP DHCP"; fail=1; }
 
@@ -1421,6 +1747,17 @@ cmd_selftest() {
     grep -q 'dhcp' "$boot_log" || { echo "FAIL: mode.json boot did not ensure AP DHCP"; fail=1; }
     grep -q 'nat' "$boot_log" || { echo "FAIL: mode.json boot did not apply NAT"; fail=1; }
     grep -q 'FAIL-station-wait' "$boot_log" && { echo "FAIL: mode.json boot waited on station"; fail=1; }
+    grep -q 'leave-station' "$boot_log" || { echo "FAIL: mode.json boot did not leave station"; fail=1; }
+    grep -q 'FAIL-kick-station' "$boot_log" && { echo "FAIL: mode.json boot kicked station join"; fail=1; }
+
+    WAN_REBROADCAST=1
+    WAN_RUNTIME="$dir/guard-wan"
+    : > "$WAN_RUNTIME"
+    if ! cmd_save_wlan EeroHome secret12 >/dev/null; then
+        echo "FAIL: save-wlan WAN refuse returned non-zero"; fail=1
+    fi
+    WAN_REBROADCAST=0
+    rm -f "$WAN_RUNTIME"
     echo '{"mode":"station"}' > "$MODE_FILE"
     rm -f "$WAN_RUNTIME"
     : > "$boot_log"
@@ -1478,15 +1815,15 @@ usage() {
     cat <<EOF
 usage: tesla-linux-wlan <boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan|wan-ap|wan-rebroadcast|wan-off|wan-verify|selftest>
   boot              eth-up + nginx-bind; wifi/AP if present; success if ${ETH_ADDR} bound or AP/station
-                    mode.json wan_rebroadcast: skip station; AP + NAT
+                    mode.json wan_rebroadcast: leave station (no dual); AP + NAT
   eth-up            wait ~${IFACE_WAIT_SEC}s for wired iface; static ${ETH_ADDR}/${ETH_PREFIX} (no DHCP)
-                    WAN mode keeps ${ETH_ADDR} and allows DHCP default-route on the same jack
+                    WAN mode keeps ${ETH_ADDR}; LTE 1286:4e3c is WAN when present (eth never-default)
   ap-up             TeslaLinux hostapd AP + dnsmasq DHCP (never if station is up, unless WAN mode)
   ap-down           stop AP; return iface to NetworkManager
   nginx-bind        listen on current AP/station/ethernet IPv4s only (WAN: ${AP_ADDR} + ${ETH_ADDR} only)
-  maybe-ap          dispatcher: station if possible, else AP (WAN mode: wan-ap)
-  save-wlan         BACKEND bounce: save infra SSID/PSK, AP down, NM up
-  wan-ap            enter AP-stays-up + NAT (Backend kick for /api/mode wan_rebroadcast)
+  maybe-ap          dispatcher: station if possible, else AP (WAN mode: wan-ap, never re-join station)
+  save-wlan         BACKEND bounce: save infra SSID/PSK, AP down, NM up (refused while WAN on)
+  wan-ap            leave station, keep AP+DHCP, NAT eth or LTE (Backend kick for wan_rebroadcast)
   wan-rebroadcast   same as wan-ap
   wan-off           leave WAN mode; back to maybe-ap / station (Backend kick for /api/mode station)
   wan-up            alias of wan-ap
