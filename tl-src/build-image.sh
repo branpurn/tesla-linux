@@ -136,6 +136,10 @@ apt-get update -q
 # NetworkManager IN (netplan/networkd out — NM is what the onboarding portal drives)
 apt-get install -y -q --no-install-recommends network-manager avahi-daemon libnss-mdns
 
+# Deb Firefox from Mozilla apt (not the Ubuntu snap stub). Pin before PKGS.
+/tmp/tl-src/install-tesla-linux.sh --ensure-firefox-apt
+apt-get update -q
+
 PKGS=$(/tmp/tl-src/install-tesla-linux.sh --print-packages)
 echo "installing: $PKGS"
 apt-get install -y -q --no-install-recommends $PKGS
@@ -158,6 +162,8 @@ systemctl enable NetworkManager >/dev/null 2>&1 || true
 /tmp/tl-src/install-tesla-linux.sh --verify-autologin
 # No background apt auto-patch — fail the chroot if timers/Unattended-Upgrade did not stick.
 /tmp/tl-src/install-tesla-linux.sh --verify-no-unattended
+# Mozilla apt Firefox .deb + XFCE desktop entry — not the Ubuntu snap stub.
+/tmp/tl-src/install-tesla-linux.sh --verify-firefox
 
 # Fail the bake if factory login / default.target / ssh host keys did not stick.
 id teslalinux >/dev/null
@@ -298,6 +304,7 @@ fi
 log "verifying unified HDMI / web / KBM Xorg :0"
 "$SRC/install-tesla-linux.sh" --verify-autologin "$MNT"
 "$SRC/install-tesla-linux.sh" --verify-no-unattended "$MNT"
+"$SRC/install-tesla-linux.sh" --verify-firefox "$MNT"
 grep -q '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
   || die "Xorg is not on vt1"
 if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
