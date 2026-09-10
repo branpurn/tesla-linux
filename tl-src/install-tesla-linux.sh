@@ -326,6 +326,49 @@ EOF
         || { echo "ERROR: xfce4-power-manager autostart is not Hidden" >&2; exit 1; }
 }
 
+# No background auto-patch. File-level so bake chroot and live install both
+# stick without a running systemd. Manual `apt` / `apt-get` stay available.
+ensure_no_unattended() {
+    local u
+    mkdir -p /etc/systemd/system /etc/apt/apt.conf.d \
+             /etc/systemd/system/multi-user.target.wants \
+             /etc/systemd/system/timers.target.wants
+    for u in unattended-upgrades.service unattended-upgrades.timer \
+             apt-daily.timer apt-daily.service \
+             apt-daily-upgrade.timer apt-daily-upgrade.service; do
+        ln -sfn /dev/null "/etc/systemd/system/$u"
+        rm -f "/etc/systemd/system/multi-user.target.wants/$u" \
+              "/etc/systemd/system/timers.target.wants/$u"
+    done
+
+    cat > /etc/apt/apt.conf.d/99tesla-linux-no-unattended <<'EOF'
+// Tesla Linux appliance: no background auto-patch.
+// Operators still run apt / apt-get by hand.
+APT::Periodic::Enable "0";
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Download-Upgradeable-Packages "0";
+APT::Periodic::AutocleanInterval "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+
+    for u in unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+             apt-daily.service apt-daily-upgrade.service unattended-upgrades.timer; do
+        case "$(readlink "/etc/systemd/system/$u")" in
+            /dev/null|dev/null) ;;
+            *)
+                echo "ERROR: $u is not masked" >&2
+                exit 1
+                ;;
+        esac
+    done
+    grep -q 'APT::Periodic::Unattended-Upgrade "0"' \
+        /etc/apt/apt.conf.d/99tesla-linux-no-unattended \
+        || { echo "ERROR: Unattended-Upgrade 0 did not stick" >&2; exit 1; }
+    grep -q 'APT::Periodic::Update-Package-Lists "0"' \
+        /etc/apt/apt.conf.d/99tesla-linux-no-unattended \
+        || { echo "ERROR: Update-Package-Lists 0 did not stick" >&2; exit 1; }
+}
+
 # libinput_drv.so must exist on a real install (live / chroot / mounted bake).
 # Fake verify roots may plant the file; skip only when Xorg itself is absent.
 libinput_driver_present() {
@@ -500,6 +543,54 @@ verify_never_sleep() {
     if [ -f "$r/etc/systemd/system/tesla-linux-desktop.service" ]; then
         grep -q 'xset -dpms s off s noblank' "$r/etc/systemd/system/tesla-linux-desktop.service" \
             || { echo "ERROR: desktop does not xset -dpms (capture would idle-blank)" >&2; exit 1; }
+    fi
+}
+
+# Host-side / live / bake: apt-daily + unattended-upgrades masked;
+# Periodic Unattended-Upgrade is 0. Optional prefix ($1).
+# Do not mask apt itself — operators still apt by hand.
+verify_no_unattended() {
+    local r="${1:-}"
+    local u rl aptcfg
+    for u in unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+             apt-daily.service apt-daily-upgrade.service unattended-upgrades.timer; do
+        [ -L "$r/etc/systemd/system/$u" ] \
+            || { echo "ERROR: $u is unmasked (not a mask symlink)" >&2; exit 1; }
+        rl="$(readlink "$r/etc/systemd/system/$u")"
+        case "$rl" in
+            /dev/null|dev/null) ;;
+            *)
+                echo "ERROR: $u is unmasked (readlink='$rl')" >&2
+                exit 1
+                ;;
+        esac
+        if [ -e "$r/etc/systemd/system/multi-user.target.wants/$u" ] \
+           || [ -e "$r/etc/systemd/system/timers.target.wants/$u" ]; then
+            echo "ERROR: $u still enabled in systemd wants" >&2
+            exit 1
+        fi
+    done
+
+    aptcfg="$r/etc/apt/apt.conf.d/99tesla-linux-no-unattended"
+    [ -f "$aptcfg" ] || { echo "ERROR: missing 99tesla-linux-no-unattended" >&2; exit 1; }
+    grep -q 'APT::Periodic::Unattended-Upgrade "0"' "$aptcfg" \
+        || { echo "ERROR: Unattended-Upgrade is not 0" >&2; exit 1; }
+    grep -q 'APT::Periodic::Update-Package-Lists "0"' "$aptcfg" \
+        || { echo "ERROR: Update-Package-Lists is not 0" >&2; exit 1; }
+    grep -q 'APT::Periodic::Download-Upgradeable-Packages "0"' "$aptcfg" \
+        || { echo "ERROR: Download-Upgradeable-Packages is not 0" >&2; exit 1; }
+    if grep -Eq 'APT::Periodic::Unattended-Upgrade[[:space:]]+"[1-9]' "$aptcfg"; then
+        echo "ERROR: Unattended-Upgrade is still enabled" >&2
+        exit 1
+    fi
+
+    if [ -L "$r/etc/systemd/system/apt.service" ]; then
+        case "$(readlink "$r/etc/systemd/system/apt.service")" in
+            /dev/null|dev/null)
+                echo "ERROR: apt.service is masked (operators must still apt by hand)" >&2
+                exit 1
+                ;;
+        esac
     fi
 }
 
@@ -786,6 +877,11 @@ if [ "${1:-}" = "--verify-wan" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--verify-no-unattended" ]; then
+    verify_no_unattended "${2:-}"
+    exit 0
+fi
+
 if [ "${1:-}" = "--print-packages" ]; then echo "$PKGS"; exit 0; fi
 
 ensure_factory_user
@@ -795,6 +891,7 @@ ensure_serial_console
 ensure_graphical_vt1
 ensure_hdmi_mode
 ensure_never_sleep
+ensure_no_unattended
 set_graphical_default
 TL_UID="$(id -u "$TL_USER")"
 
@@ -1220,6 +1317,7 @@ set_graphical_default
 # HDMI, web capture, and USB KBM share XFCE on Xorg :0 / vt1.
 ensure_graphical_vt1
 ensure_never_sleep
+ensure_no_unattended
 
 mkdir -p /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-user.target.wants
 
@@ -1243,6 +1341,9 @@ if [ "$START" = "1" ]; then
     systemctl stop getty@tty1.service
     systemctl mask getty@tty1.service autovt@tty1.service
     systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+    systemctl mask unattended-upgrades.service unattended-upgrades.timer \
+                   apt-daily.timer apt-daily.service \
+                   apt-daily-upgrade.timer apt-daily-upgrade.service
     systemctl enable tesla-linux-xorg tesla-linux-desktop tesla-linux-display \
                      tesla-linux-touch tesla-linux-audio >/dev/null 2>&1
     /usr/local/sbin/tesla-linux-wlan eth-up >/dev/null 2>&1 || true
@@ -1255,3 +1356,5 @@ fi
 verify_autologin_hdmi
 # Fail the bake/install if WAN rebroadcast skeleton (AP factory / nginx / NAT) did not stick.
 verify_wan_rebroadcast
+# Fail the bake/install if background apt auto-patch is still enabled.
+verify_no_unattended

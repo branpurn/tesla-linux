@@ -77,5 +77,6 @@ WIFI_PSK=yourpsk
 - Pi 4 USB boot may need EEPROM USB MSD first (Raspberry Pi Imager → Misc utility images → Bootloader → USB boot on a spare SD). Official 5V 3A PSU; USB 2.0 or a powered hub if a USB SSD hangs
 - Use HDMI0 (micro-HDMI nearest USB-C). `getty@tty1` is masked because Xorg owns vt1. Ubuntu KMS has no firmware splash — black until the kernel starts is expected
 - Appliance never sleeps: `sleep.target` / `suspend.target` / `hibernate.target` / `hybrid-sleep.target` are masked; logind `IdleAction=ignore` (lid/suspend keys ignored). XFCE power-manager idle/lid/DPMS sleep is locked off and its autostart is Hidden. USB autosuspend is off (`usbcore.autosuspend=-1` + udev `power/control=on`) so USB KBM and the `:0` capture stream stay awake. Physical power button still powers off.
+- Appliance does not background-patch: `unattended-upgrades.service`, `apt-daily.timer`, and `apt-daily-upgrade.timer` are masked; `/etc/apt/apt.conf.d/99tesla-linux-no-unattended` sets `APT::Periodic::Unattended-Upgrade "0"`. Operators still run `apt` by hand.
 - Wired ethernet is static **10.42.1.1/24**, not DHCP, not the AP subnet **10.42.0.1/24**
 - `http://teslalinux.local/` via existing avahi when mDNS is up

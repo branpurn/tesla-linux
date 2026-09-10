@@ -95,3 +95,5 @@ Origin-relative `GET`/`POST` `/api/mode` (same `location.host` as the page). Per
 ## Packages
 
 `install-tesla-linux.sh --print-packages` includes `hostapd iw dnsmasq rfkill` in addition to the WAVE 0 stack. Bake already installs NetworkManager as the netplan renderer.
+
+Appliance does not background-patch (`unattended-upgrades` / `apt-daily` masked; `APT::Periodic::Unattended-Upgrade "0"`). Operators still `apt` by hand.

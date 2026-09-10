@@ -156,6 +156,8 @@ systemctl enable NetworkManager >/dev/null 2>&1 || true
 /tmp/tl-src/install-tesla-linux.sh --no-start
 # Autologin XFCE / getty-not-on-HDMI — fail the chroot if it did not stick.
 /tmp/tl-src/install-tesla-linux.sh --verify-autologin
+# No background apt auto-patch — fail the chroot if timers/Unattended-Upgrade did not stick.
+/tmp/tl-src/install-tesla-linux.sh --verify-no-unattended
 
 # Fail the bake if factory login / default.target / ssh host keys did not stick.
 id teslalinux >/dev/null
@@ -295,6 +297,7 @@ fi
 # HDMI, web capture, and USB KBM use the same 1088x832 XFCE on Xorg :0.
 log "verifying unified HDMI / web / KBM Xorg :0"
 "$SRC/install-tesla-linux.sh" --verify-autologin "$MNT"
+"$SRC/install-tesla-linux.sh" --verify-no-unattended "$MNT"
 grep -q '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
   || die "Xorg is not on vt1"
 if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
