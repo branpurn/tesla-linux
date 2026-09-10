@@ -35,7 +35,8 @@ const hx=n=>n.toString(16).padStart(2,'0');
 function hudMsg(m){ hud.textContent=m; }
 function paintHud(w,h){
   const fps=(frames/((Date.now()-t0)/1000)).toFixed(1);
-  hudMsg(`${w||canvas.width}x${h||canvas.height} · ${fps} fps · ${(bytes/1024/1024).toFixed(1)} MiB · ${frames} frames · ${decKind||'?'} · audio:${!actx?'off':(actx.state==='running'&&audioOn?'on':actx.state)} · click/drag to control`);
+  const aheadMs=(!actx||!audioOn)?'—':Math.round(Math.max(0,(playAt-actx.currentTime)*1000));
+  hudMsg(`${w||canvas.width}x${h||canvas.height} · ${fps} fps · ${(bytes/1024/1024).toFixed(1)} MiB · ${frames} frames · ${decKind||'?'} · audio:${!actx?'off':(actx.state==='running'&&audioOn?'on':actx.state)} · ahead_ms:${aheadMs} · click/drag to control`);
 }
 function loadScript(src){
   return new Promise((res,rej)=>{
@@ -205,12 +206,23 @@ document.getElementById('hide').addEventListener('click',()=>{
    Starts automatically on load. Some browsers' autoplay policy opens the
    AudioContext "suspended"; any later gesture resumes it, so a click is a
    fallback, not a requirement. */
-const RATE=48000, CH=2;
+const RATE=48000, CH=2, MAX_AHEAD=0.15;
 let actx=null, playAt=0, aws=null, abytes=0, audioOn=false;
+function snapPlayAt(pad){
+  if(!actx) return;
+  playAt=actx.currentTime+(pad==null?0.08:pad);
+}
+function schedulePcm(buf){
+  const s=actx.createBufferSource(); s.buffer=buf; s.connect(actx.destination);
+  // Behind → catch up. Ahead beyond MAX_AHEAD → snap (no suspend backlog).
+  if(playAt<actx.currentTime) playAt=actx.currentTime+0.05;
+  else if(playAt-actx.currentTime>MAX_AHEAD) snapPlayAt(0.05);
+  s.start(playAt); playAt+=buf.duration;
+}
 function startAudio(){
   if(actx) return;
   actx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:RATE});
-  playAt=actx.currentTime+0.08;                 // small jitter buffer
+  snapPlayAt(0.08);                             // small jitter buffer
   aws=new WebSocket(base+'/sockets/audio');
   aws.binaryType='arraybuffer';
   aws.onmessage=ev=>{
@@ -222,9 +234,7 @@ function startAudio(){
       const out=buf.getChannelData(c);
       for(let i=0;i<n;i++) out[i]=pcm[i*CH+c]/32768;
     }
-    const s=actx.createBufferSource(); s.buffer=buf; s.connect(actx.destination);
-    if(playAt<actx.currentTime) playAt=actx.currentTime+0.05;   // resync if we fell behind
-    s.start(playAt); playAt+=buf.duration;
+    schedulePcm(buf);
   };
   aws.onopen =()=>{ audioOn=true; };
   aws.onclose=()=>{ audioOn=false; };
@@ -233,7 +243,13 @@ function startAudio(){
 startAudio();                                   // no click required where policy allows
 const resumeAudio=()=>{                         // fallback: any gesture un-suspends it
   if(!actx) startAudio();
-  if(actx && actx.state==='suspended') actx.resume();
+  if(actx && actx.state==='suspended'){
+    const p=actx.resume();
+    if(p&&typeof p.then==='function') p.then(()=>snapPlayAt(0.08)).catch(()=>{});
+    else snapPlayAt(0.08);
+  }else if(actx && actx.state==='running'){
+    if(playAt-actx.currentTime>MAX_AHEAD) snapPlayAt(0.08);
+  }
 };
 ['pointerdown','keydown','touchstart'].forEach(t=>addEventListener(t,resumeAudio,{passive:true}));
 if(!hasWC) hudMsg('VideoDecoder absent — broadway fallback…');
