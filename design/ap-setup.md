@@ -23,4 +23,6 @@ Footer stays `Desktop` · `Probe`. Dark KISS, one column. No AP-password editor.
 
 Wiring (Frontend): origin-relative `GET`/`POST` `/api/wlan`, 15s abort, 501 is a hard error. Typed SSID if scan is missing; dropdown only if `GET` returns a list.
 
-Mode switch (Frontend): **Join** (station — helper above) vs **WAN rebroadcast** (plug ethernet; TeslaLinux AP stays up at 10.42.0.1/24; no Network/Password). Origin-relative `GET` `/api/mode` `{mode,ap,uplink,nat}` and `POST` `{mode}` → `{ok,mode}`. Missing/404 → station. GET skeleton is `uplink.kind: none` and `nat: false` until Infra — do not invent live ethernet/LTE chrome from that.
+Mode switch (Frontend): **Join** (station — helper above) vs **WAN rebroadcast** (plug ethernet; TeslaLinux AP stays up at 10.42.0.1/24; no Network/Password). Origin-relative `GET` `/api/mode` `{mode,ap,uplink,nat}` and `POST` `{mode}` → `{ok,mode}`. Missing/404 → station. GET skeleton is `uplink.kind: none` and `nat: false` until Infra — do not invent live ethernet from that.
+
+WAN panel (and a one-line probe strip) paints compact LTE status from origin-relative `GET` `/api/lte` only: `stick_present`, `iface`, `ip`, `default_route`, `wan_rebroadcast`, `health`. Labels: **Detected** / **Iface** / **IPv4** / **Default via LTE** / **Mode** / **Health**. 404 or missing JSON → **No modem** + dashes. Do not dual-write `/api/mode` or `ta_wlan_api`. `usb_id` is not shown.
