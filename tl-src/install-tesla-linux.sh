@@ -824,6 +824,14 @@ verify_wan_rebroadcast() {
         || { echo "ERROR: tesla-linux-wlan missing NM managed no before hostapd" >&2; exit 1; }
     awk '/^write_hostapd_conf\(\)/,/^}/' "$wlan_bin" | grep -q '^channel=6$' \
         || { echo "ERROR: hostapd channel default must stay 6 (do not invent channel)" >&2; exit 1; }
+    if awk '/^cmd_eth_up\(\)/,/^}/' "$wlan_bin" | grep -Eq 'ipv4_method=auto|ipv4\.method auto|never_default=no'; then
+        echo "ERROR: cmd_eth_up converts factory eth to DHCP auto (wan-ap must keep 10.42.1.1)" >&2
+        exit 1
+    fi
+    awk '/^cmd_eth_up\(\)/,/^}/' "$wlan_bin" | grep -q 'ipv4.method manual' \
+        || { echo "ERROR: cmd_eth_up missing ipv4.method manual lock" >&2; exit 1; }
+    awk '/^cmd_eth_up\(\)/,/^}/' "$wlan_bin" | grep -q 'ipv4.never-default yes' \
+        || { echo "ERROR: cmd_eth_up missing never-default yes lock" >&2; exit 1; }
     grep -q 'ignore_broadcast_ssid=0' "$wlan_bin" \
         || { echo "ERROR: TeslaLinux SSID would be hidden" >&2; exit 1; }
     if awk '/^write_nginx_servers\(\)/,/^}/' "$wlan_bin" | grep -Eq 'listen 0\.0\.0\.0|listen 80;|listen \[::\]'; then
