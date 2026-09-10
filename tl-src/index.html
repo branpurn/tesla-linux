@@ -105,14 +105,25 @@ function yn(v){
   return v===true?'yes':v===false?'no':'—';
 }
 
-function paintLte(data){
-  const miss=!data;
-  $('lte-detected').textContent=miss?'No modem':yn(data.stick_present);
-  $('lte-iface').textContent=miss?'—':dash(data.iface);
-  $('lte-ip').textContent=miss?'—':dash(data.ip);
-  $('lte-route').textContent=miss?'—':yn(data.default_route);
-  $('lte-mode').textContent=miss?'—':(data.wan_rebroadcast===true?WAN:yn(data.wan_rebroadcast));
-  const h=miss?null:data.health;
+function paintLte(data, err){
+  if(err || !data){
+    $('lte-detected').textContent='—';
+    $('lte-iface').textContent='—';
+    $('lte-ip').textContent='—';
+    $('lte-route').textContent='—';
+    $('lte-mode').textContent='—';
+    const el=$('lte-health');
+    el.classList.remove('ok','bad');
+    el.textContent=err||'error';
+    el.classList.add('bad');
+    return;
+  }
+  $('lte-detected').textContent=data.stick_present===false?'No modem':yn(data.stick_present);
+  $('lte-iface').textContent=dash(data.iface);
+  $('lte-ip').textContent=dash(data.ip);
+  $('lte-route').textContent=yn(data.default_route);
+  $('lte-mode').textContent=data.wan_rebroadcast===true?WAN:yn(data.wan_rebroadcast);
+  const h=data.health;
   const el=$('lte-health');
   el.classList.remove('ok','bad');
   if(LTE_HEALTH.indexOf(h)>=0){
@@ -123,19 +134,27 @@ function paintLte(data){
   }
 }
 
+function lteFailHint(r, e){
+  if(e && e.name==='AbortError') return 'timeout';
+  if(r) return 'HTTP '+r.status;
+  return 'error';
+}
+
 async function fetchLte(){
   try{
     const r=await fetchRel(lteApi,{method:'GET'});
-    if(backendMissing(r) || !r.ok) return null;
+    if(!r || !r.ok) return {err:lteFailHint(r)};
     const data=await r.json();
-    return data && typeof data==='object' ? data : null;
+    if(!data || typeof data!=='object') return {err:'error'};
+    return {data};
   }catch(e){
-    return null;
+    return {err:lteFailHint(null, e)};
   }
 }
 
 async function loadLte(){
-  paintLte(await fetchLte());
+  const got=await fetchLte();
+  paintLte(got.data, got.err);
 }
 
 function showMode(mode, data){
