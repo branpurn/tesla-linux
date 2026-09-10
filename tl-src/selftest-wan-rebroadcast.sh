@@ -63,6 +63,15 @@ grep -q 'managed no' "$HELPER" && pass "helper NM managed no before hostapd" \
 awk '/^write_hostapd_conf\(\)/,/^}/' "$HELPER" | grep -q '^channel=6$' \
     && pass "hostapd channel default unchanged (6)" \
     || bad "hostapd channel default invented/changed"
+if awk '/^cmd_eth_up\(\)/,/^}/' "$HELPER" | grep -Eq 'ipv4_method=auto|ipv4\.method auto|never_default=no'; then
+    bad "cmd_eth_up converts factory eth to DHCP auto (wan-ap must keep 10.42.1.1)"
+else
+    pass "cmd_eth_up never sets factory eth ipv4.method=auto"
+fi
+awk '/^cmd_eth_up\(\)/,/^}/' "$HELPER" | grep -q 'ipv4.method manual' \
+    && awk '/^cmd_eth_up\(\)/,/^}/' "$HELPER" | grep -q 'ipv4.never-default yes' \
+    && pass "cmd_eth_up locks factory eth manual + never-default yes" \
+    || bad "cmd_eth_up missing manual / never-default yes lock"
 if awk '/^write_nginx_servers\(\)/,/^}/' "$HELPER" | grep -Eq 'listen 0\.0\.0\.0|listen 80;|listen \[::\]'; then
     bad "write_nginx_servers would bind nginx to 0.0.0.0"
 else

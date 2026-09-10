@@ -968,25 +968,20 @@ cmd_save_wlan() {
     cmd_nginx_bind
 }
 
-# Factory static 10.42.1.1/24 on the primary wired iface. Not the AP subnet.
-# WAN mode: keep that documented address and also allow DHCP default-route (WAN).
+# Factory static 10.42.1.1/24 on the primary wired jack (eth0/end0 / ETH_CONN).
+# Always ipv4.method=manual + never-default=yes — including wan_rebroadcast.
+# WAN DHCP/default-route belongs on LTE enx… / cdc_ether (or a separate uplink),
+# never by converting tesla-linux-eth to auto. Do not flush, disconnect, or
+# unmanage factory eth (Pop SSH + TeslaLinux AP are concurrent).
 # Wait for delayed usb-net/cdc_ether/eth0/end0/en* — skip-if-none immediately is an operator hangup.
 cmd_eth_up() {
-    local iface name type ifn lte ipv4_method=manual never_default=yes
+    local iface name type ifn
     if ! iface="$(wait_wired_iface)"; then
         log "no wired iface after ${IFACE_WAIT_SEC}s; skip $ETH_CONN"
         return 0
     fi
     if wan_mode_on; then
-        if lte="$(lte_wan_iface 2>/dev/null || true)" && [ -n "$lte" ]; then
-            ipv4_method=manual
-            never_default=yes
-            log "wired $iface -> factory $ETH_ADDR/$ETH_PREFIX (LTE $lte is WAN; $ETH_CONN never-default)"
-        else
-            ipv4_method=auto
-            never_default=no
-            log "wired $iface -> factory $ETH_ADDR/$ETH_PREFIX + DHCP WAN ($ETH_CONN; operators use $ETH_ADDR / $AP_ADDR)"
-        fi
+        log "wired $iface -> factory $ETH_ADDR/$ETH_PREFIX ($ETH_CONN manual never-default; WAN DHCP is LTE/uplink, not factory eth)"
     else
         log "wired $iface -> $ETH_ADDR/$ETH_PREFIX ($ETH_CONN, not DHCP, not $AP_ADDR/$AP_PREFIX)"
     fi
@@ -1009,17 +1004,20 @@ cmd_eth_up() {
             nmcli connection modify "$ETH_CONN" \
                 connection.interface-name "$iface" \
                 connection.autoconnect yes \
-                ipv4.method "$ipv4_method" \
+                ipv4.method manual \
                 ipv4.addresses "$ETH_ADDR/$ETH_PREFIX" \
-                ipv4.never-default "$never_default" \
+                ipv4.never-default yes \
                 ipv6.method disabled 2>/dev/null || true
         else
             nmcli connection add type ethernet con-name "$ETH_CONN" ifname "$iface" \
-                ipv4.method "$ipv4_method" ipv4.addresses "$ETH_ADDR/$ETH_PREFIX" \
-                ipv4.never-default "$never_default" ipv6.method disabled \
+                ipv4.method manual ipv4.addresses "$ETH_ADDR/$ETH_PREFIX" \
+                ipv4.never-default yes ipv6.method disabled \
                 connection.autoconnect yes 2>/dev/null || true
         fi
-        nmcli connection up "$ETH_CONN" ifname "$iface" 2>/dev/null || true
+        # Already factory-static: do not bounce (nmcli up would drop Pop SSH on 10.42.1.1).
+        if ! iface_ipv4s "$iface" | grep -qx "$ETH_ADDR"; then
+            nmcli connection up "$ETH_CONN" ifname "$iface" 2>/dev/null || true
+        fi
     fi
     if ! iface_ipv4s "$iface" | grep -qx "$ETH_ADDR"; then
         ip link set "$iface" up 2>/dev/null || true
@@ -1028,12 +1026,13 @@ cmd_eth_up() {
 }
 
 # WAN rebroadcast: keep TeslaLinux AP up, do not join a station WLAN, NAT AP clients.
-# Prefer leave-station then AP+DHCP, then accept eth or LTE (1286:4e3c) for NAT.
+# Prefer leave-station then AP+DHCP, then accept LTE (1286:4e3c) or a separate uplink for NAT.
+# Factory eth0/end0 stays managed + static 10.42.1.1 — never flush/disconnect/unmanage.
 cmd_wan_up() {
     local iface
     mkdir -p "$(dirname "$WAN_RUNTIME")"
     : > "$WAN_RUNTIME"
-    log "WAN rebroadcast: leave station (no dual); AP stays; NAT ${AP_ADDR%.*}.0/${AP_PREFIX} out eth or LTE WAN"
+    log "WAN rebroadcast: leave station (no dual); AP stays; factory $ETH_ADDR stays; NAT ${AP_ADDR%.*}.0/${AP_PREFIX} out LTE or uplink"
     leave_station
     ensure_lte_wan
     cmd_eth_up
@@ -1097,6 +1096,14 @@ cmd_wan_verify() {
             || { echo "FAIL: leave_station missing in $helper" >&2; fail=1; }
         grep -q 'start_hostapd_ap' "$helper" \
             || { echo "FAIL: start_hostapd_ap missing in $helper" >&2; fail=1; }
+        if awk '/^cmd_eth_up\(\)/,/^}/' "$helper" | grep -Eq 'ipv4_method=auto|ipv4\.method auto|never_default=no'; then
+            echo "FAIL: cmd_eth_up converts factory eth to DHCP auto (breaks 10.42.1.1 during wan-ap)" >&2
+            fail=1
+        fi
+        awk '/^cmd_eth_up\(\)/,/^}/' "$helper" | grep -q 'ipv4.method manual' \
+            || { echo "FAIL: cmd_eth_up missing ipv4.method manual lock" >&2; fail=1; }
+        awk '/^cmd_eth_up\(\)/,/^}/' "$helper" | grep -q 'ipv4.never-default yes' \
+            || { echo "FAIL: cmd_eth_up missing never-default yes lock" >&2; fail=1; }
         if awk '/^write_nginx_servers\(\)/,/^}/' "$helper" | grep -Eq 'listen 0\.0\.0\.0|listen 80;|listen \[::\]'; then
             echo "FAIL: write_nginx_servers would bind nginx to 0.0.0.0" >&2
             fail=1
@@ -1566,6 +1573,20 @@ cmd_selftest() {
     grep -q 'managed no' "$helper_src" || { echo "FAIL: hostapd path missing NM managed no"; fail=1; }
     awk '/^write_hostapd_conf\(\)/,/^}/' "$helper_src" | grep -q '^channel=6$' \
         || { echo "FAIL: hostapd channel default changed (do not invent channel)"; fail=1; }
+    _fn_body cmd_eth_up | grep -Eq 'ipv4_method=auto|ipv4\.method auto|never_default=no' \
+        && { echo "FAIL: cmd_eth_up converts factory eth to auto (wan-ap must keep 10.42.1.1)"; fail=1; }
+    _fn_body cmd_eth_up | grep -q 'ipv4.method manual' \
+        || { echo "FAIL: cmd_eth_up missing ipv4.method manual"; fail=1; }
+    _fn_body cmd_eth_up | grep -q 'ipv4.never-default yes' \
+        || { echo "FAIL: cmd_eth_up missing ipv4.never-default yes"; fail=1; }
+    _fn_body cmd_eth_up | grep -Eq '10\.42\.1\.1|\$ETH_ADDR' \
+        || { echo "FAIL: cmd_eth_up missing factory ETH_ADDR"; fail=1; }
+    if _fn_body cmd_eth_up | grep -Eq 'ip addr flush|device disconnect|managed no'; then
+        echo "FAIL: cmd_eth_up flushes/disconnects/unmanages factory eth"; fail=1
+    fi
+    if _fn_body cmd_wan_up | grep -Eq 'ip addr flush|device disconnect|managed no'; then
+        echo "FAIL: cmd_wan_up flushes/disconnects/unmanages (leave_station is wifi-only)"; fail=1
+    fi
 
     dhcp_log="$dir/dhcp-early.log"
     : > "$dhcp_log"
@@ -1685,6 +1706,76 @@ cmd_selftest() {
     }
     apply_wan_nat || { echo "FAIL: apply_wan_nat iptables"; fail=1; }
     grep -q 'MASQUERADE' "$ipt_log" || { echo "FAIL: iptables MASQUERADE"; fail=1; }
+
+    # wan_mode without LTE: factory eth stays manual + 10.42.1.1 / never-default yes.
+    unset -f cmd_eth_up
+    WAN_REBROADCAST=1
+    WAN_RUNTIME="$dir/wan-eth-lock"
+    : > "$WAN_RUNTIME"
+    MODE_FILE="$dir/mode-eth-lock.json"
+    echo '{"mode":"wan_rebroadcast"}' > "$MODE_FILE"
+    lte_wan_iface() { return 1; }
+    is_lte_stick_iface() { return 1; }
+    wait_wired_iface() { printf '%s\n' eth0; }
+    iface_ipv4s() { printf '%s\n' 10.42.1.1; }
+    ip() { echo "ip $*" >> "$dir/nm-eth-lock.log"; return 0; }
+    nm_log="$dir/nm-eth-lock.log"
+    : > "$nm_log"
+    nmcli() {
+        echo "nmcli $*" >> "$nm_log"
+        case "$*" in
+            "-t -f NAME,TYPE connection show")
+                printf '%s\n' 'tesla-linux-eth:802-3-ethernet'
+                ;;
+            "-t -f NAME connection show")
+                printf '%s\n' tesla-linux-eth
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    }
+    if ! cmd_eth_up; then
+        echo "FAIL: wan_mode cmd_eth_up without LTE returned non-zero"; fail=1
+    fi
+    grep -Eq 'ipv4\.method auto|never-default no' "$nm_log" \
+        && { echo "FAIL: wan_mode eth (no LTE) set method=auto / never-default no"; fail=1; }
+    grep -q 'ipv4.method manual' "$nm_log" \
+        || { echo "FAIL: wan_mode eth (no LTE) missing ipv4.method manual"; fail=1; }
+    grep -q '10.42.1.1/24' "$nm_log" \
+        || { echo "FAIL: wan_mode eth (no LTE) missing factory 10.42.1.1/24"; fail=1; }
+    grep -q 'ipv4.never-default yes' "$nm_log" \
+        || { echo "FAIL: wan_mode eth (no LTE) missing never-default yes"; fail=1; }
+    grep -q 'connection up tesla-linux-eth' "$nm_log" \
+        && { echo "FAIL: wan_mode eth bounced connection up while 10.42.1.1 already bound"; fail=1; }
+    grep -Eq 'ip addr flush|device disconnect|device set eth0 managed no' "$nm_log" \
+        && { echo "FAIL: wan_mode eth flushed/disconnected/unmanaged factory jack"; fail=1; }
+
+    # Same lock when LTE is present (WAN DHCP stays on enx…, not ETH_CONN).
+    lte_wan_iface() { printf '%s\n' enxac0033aa9633; }
+    : > "$nm_log"
+    if ! cmd_eth_up; then
+        echo "FAIL: wan_mode cmd_eth_up with LTE returned non-zero"; fail=1
+    fi
+    grep -Eq 'ipv4\.method auto|never-default no' "$nm_log" \
+        && { echo "FAIL: wan+LTE eth set method=auto / never-default no"; fail=1; }
+    grep -q 'ipv4.method manual' "$nm_log" \
+        || { echo "FAIL: wan+LTE eth missing ipv4.method manual"; fail=1; }
+    grep -q 'ipv4.never-default yes' "$nm_log" \
+        || { echo "FAIL: wan+LTE eth missing never-default yes"; fail=1; }
+
+    # Missing factory addr: may connection-up / ip addr add, still never method=auto.
+    iface_ipv4s() { return 0; }
+    : > "$nm_log"
+    if ! cmd_eth_up; then
+        echo "FAIL: wan_mode cmd_eth_up missing-addr returned non-zero"; fail=1
+    fi
+    grep -Eq 'ipv4\.method auto|never-default no' "$nm_log" \
+        && { echo "FAIL: wan_mode missing-addr eth set method=auto"; fail=1; }
+    grep -q 'ipv4.method manual' "$nm_log" \
+        || { echo "FAIL: wan_mode missing-addr eth missing ipv4.method manual"; fail=1; }
+    grep -q '10.42.1.1/24' "$nm_log" \
+        || { echo "FAIL: wan_mode missing-addr eth missing factory 10.42.1.1/24"; fail=1; }
 
     WAN_REBROADCAST=1
     WAN_RUNTIME="$dir/boot-wan-runtime"
@@ -1817,7 +1908,7 @@ usage: tesla-linux-wlan <boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan
   boot              eth-up + nginx-bind; wifi/AP if present; success if ${ETH_ADDR} bound or AP/station
                     mode.json wan_rebroadcast: leave station (no dual); AP + NAT
   eth-up            wait ~${IFACE_WAIT_SEC}s for wired iface; static ${ETH_ADDR}/${ETH_PREFIX} (no DHCP)
-                    WAN mode keeps ${ETH_ADDR}; LTE 1286:4e3c is WAN when present (eth never-default)
+                    always manual + never-default (wan-ap concurrent with Pop SSH on ${ETH_ADDR})
   ap-up             TeslaLinux hostapd AP + dnsmasq DHCP (never if station is up, unless WAN mode)
   ap-down           stop AP; return iface to NetworkManager
   nginx-bind        listen on current AP/station/ethernet IPv4s only (WAN: ${AP_ADDR} + ${ETH_ADDR} only)
