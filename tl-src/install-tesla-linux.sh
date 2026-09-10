@@ -15,13 +15,17 @@ START=1
 # image bake. `install-tesla-linux.sh --print-packages` emits it for the chroot.
 # xserver-xorg-input-libinput is required so USB HID attaches to Xorg :0.
 # python3-evdev is the uinput touch backend, not the Xorg HID driver.
+# firefox is Mozilla apt .deb (packages.mozilla.org), not the Ubuntu snap stub.
 PKGS="xserver-xorg-core xserver-xorg-input-libinput \
 xinit x11-utils x11-xserver-utils xinput \
 gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
 python3-gi python3-gst-1.0 python3-websockets python3-evdev \
 xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar dbus-x11 \
 pipewire pipewire-pulse pipewire-audio wireplumber pulseaudio-utils gstreamer1.0-pipewire \
-nginx openssl network-manager hostapd iw dnsmasq rfkill"
+nginx openssl network-manager hostapd iw dnsmasq rfkill firefox"
+
+MOZILLA_APT_KEY_URL=https://packages.mozilla.org/apt/repo-signing-key.gpg
+MOZILLA_APT_FP=35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3
 
 # Factory console user (documented like AP PSK teslalinux). chpasswd must stick.
 # Fail the bake/install if the password is not written — no `|| true`.
@@ -367,6 +371,109 @@ EOF
     grep -q 'APT::Periodic::Update-Package-Lists "0"' \
         /etc/apt/apt.conf.d/99tesla-linux-no-unattended \
         || { echo "ERROR: Update-Package-Lists 0 did not stick" >&2; exit 1; }
+}
+
+# Ubuntu's archive firefox is a snap stub (fails offline / in-car). Prefer the
+# Mozilla apt .deb so XFCE has a real /usr/bin/firefox + desktop entry.
+firefox_is_snap_stub() {
+    local bin="$1" target
+    [ -e "$bin" ] || return 1
+    target="$(readlink -f "$bin" 2>/dev/null || printf '%s' "$bin")"
+    case "$target" in
+        /snap/*|*/snap/*)
+            return 0
+            ;;
+    esac
+    if grep -Eiq 'snap[[:space:]]+run[[:space:]]+firefox|/snap/bin/firefox|ubuntu-browser-launcher' \
+            "$bin" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+ensure_firefox_deb_apt() {
+    local key=/etc/apt/keyrings/packages.mozilla.org.asc
+    local fp=""
+    export DEBIAN_FRONTEND=noninteractive
+    install -d -m0755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        apt-get install -y -q --no-install-recommends ca-certificates curl
+    fi
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$MOZILLA_APT_KEY_URL" -o "$key"
+    else
+        wget -qO "$key" "$MOZILLA_APT_KEY_URL"
+    fi
+    chmod 644 "$key"
+    if command -v gpg >/dev/null 2>&1; then
+        fp="$(gpg --show-keys --with-colons "$key" 2>/dev/null | awk -F: '/^fpr:/ {print $10; exit}')"
+        [ "$fp" = "$MOZILLA_APT_FP" ] \
+            || { echo "ERROR: Mozilla apt key fingerprint mismatch" >&2; exit 1; }
+    fi
+    cat > /etc/apt/sources.list.d/mozilla.list <<'EOF'
+deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main
+EOF
+    cat > /etc/apt/preferences.d/mozilla <<'EOF'
+Package: *
+Pin: origin packages.mozilla.org
+Pin-Priority: 1000
+
+Package: firefox*
+Pin: release o=Ubuntu
+Pin-Priority: -1
+EOF
+}
+
+ensure_firefox_deb() {
+    ensure_firefox_deb_apt
+    if [ -e /usr/bin/firefox ] && ! firefox_is_snap_stub /usr/bin/firefox \
+       && [ -f /usr/share/applications/firefox.desktop ]; then
+        return 0
+    fi
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q
+    apt-get install -y -q --no-install-recommends firefox
+}
+
+# Host-side / live / bake: Mozilla apt Firefox .deb, XFCE desktop entry,
+# not the Ubuntu snap stub. Optional prefix ($1) is an image / plant root.
+verify_firefox() {
+    local r="${1:-}"
+    local bin desk list pin
+
+    case "$PKGS" in
+        *firefox*) ;;
+        *)
+            echo "ERROR: PKGS missing firefox" >&2
+            exit 1
+            ;;
+    esac
+
+    list="$r/etc/apt/sources.list.d/mozilla.list"
+    [ -f "$list" ] || { echo "ERROR: missing Mozilla apt source" >&2; exit 1; }
+    grep -q 'packages.mozilla.org' "$list" \
+        || { echo "ERROR: mozilla.list is not packages.mozilla.org" >&2; exit 1; }
+
+    pin="$r/etc/apt/preferences.d/mozilla"
+    [ -f "$pin" ] || { echo "ERROR: missing Mozilla apt pin" >&2; exit 1; }
+    grep -q 'Pin: origin packages.mozilla.org' "$pin" \
+        || { echo "ERROR: Mozilla apt pin origin missing" >&2; exit 1; }
+    grep -q 'Pin-Priority: 1000' "$pin" \
+        || { echo "ERROR: Mozilla apt pin is not 1000" >&2; exit 1; }
+    grep -q 'Pin: release o=Ubuntu' "$pin" \
+        || { echo "ERROR: Ubuntu firefox snap stub is not pinned out" >&2; exit 1; }
+
+    bin="$r/usr/bin/firefox"
+    [ -e "$bin" ] || { echo "ERROR: firefox binary missing" >&2; exit 1; }
+    if firefox_is_snap_stub "$bin"; then
+        echo "ERROR: firefox is the Ubuntu snap stub" >&2
+        exit 1
+    fi
+
+    desk="$r/usr/share/applications/firefox.desktop"
+    [ -f "$desk" ] || { echo "ERROR: firefox desktop entry missing" >&2; exit 1; }
+    grep -qi '^Exec=.*firefox' "$desk" \
+        || { echo "ERROR: firefox.desktop has no Exec firefox" >&2; exit 1; }
 }
 
 # libinput_drv.so must exist on a real install (live / chroot / mounted bake).
@@ -882,6 +989,16 @@ if [ "${1:-}" = "--verify-no-unattended" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--verify-firefox" ]; then
+    verify_firefox "${2:-}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--ensure-firefox-apt" ]; then
+    ensure_firefox_deb_apt
+    exit 0
+fi
+
 if [ "${1:-}" = "--print-packages" ]; then echo "$PKGS"; exit 0; fi
 
 ensure_factory_user
@@ -892,6 +1009,7 @@ ensure_graphical_vt1
 ensure_hdmi_mode
 ensure_never_sleep
 ensure_no_unattended
+ensure_firefox_deb
 set_graphical_default
 TL_UID="$(id -u "$TL_USER")"
 
@@ -1358,3 +1476,5 @@ verify_autologin_hdmi
 verify_wan_rebroadcast
 # Fail the bake/install if background apt auto-patch is still enabled.
 verify_no_unattended
+# Fail the bake/install if Mozilla apt Firefox / XFCE desktop entry did not stick.
+verify_firefox
