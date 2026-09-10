@@ -20,6 +20,10 @@ a{color:#8ecdff}
 .modes{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px;max-width:36em}
 .modes button[aria-pressed="true"]{outline:2px solid #8ecdff}
 #join[hidden],#wan[hidden]{display:none}
+.lte{margin:0 0 16px;max-width:36em}
+.lte div{display:flex;gap:12px;margin:0 0 2px}
+.lte dt{flex:0 0 11em;color:#9ab}
+.lte dd{margin:0}
 </style>
 <h1>Wi-Fi</h1>
 <div class="modes" role="group" aria-label="Mode">
@@ -45,14 +49,24 @@ a{color:#8ecdff}
 <div id="wan" hidden>
   <p>Keep TeslaLinux AP up. Plug ethernet for uplink. Clients on TeslaLinux get internet. Open http://10.42.0.1/ — do not hunt a DHCP station IP.</p>
   <p id="wan-facts">TeslaLinux AP stays up at 10.42.0.1/24. Factory ethernet is 10.42.1.1/24 for management.</p>
+  <dl id="lte" class="lte">
+    <div><dt>Detected</dt><dd id="lte-detected">—</dd></div>
+    <div><dt>Iface</dt><dd id="lte-iface">—</dd></div>
+    <div><dt>IPv4</dt><dd id="lte-ip">—</dd></div>
+    <div><dt>Default via LTE</dt><dd id="lte-route">—</dd></div>
+    <div><dt>Mode</dt><dd id="lte-mode">—</dd></div>
+    <div><dt>Health</dt><dd id="lte-health">—</dd></div>
+  </dl>
 </div>
 <p id="status"></p>
 <p><a href="desktop.html">Desktop</a> · <a href="probe.html">Probe</a></p>
 <script>
 const wlanApi='/api/wlan';
 const modeApi='/api/mode';
+const lteApi='/api/lte';
 const STATION='station';
 const WAN='wan_rebroadcast';
+const LTE_HEALTH=['ok','no_stick','no_ip','no_route','station_conflict'];
 const $=id=>document.getElementById(id);
 const status=m=>{ $('status').innerHTML=m; };
 
@@ -74,13 +88,54 @@ function paintWan(data){
   const up=(data&&data.uplink)||{};
   const ssid=(typeof ap.ssid==='string'&&ap.ssid.trim())?ap.ssid.trim():'TeslaLinux';
   const addr=(typeof ap.addr==='string'&&ap.addr.trim())?ap.addr.trim():'10.42.0.1/24';
-  // GET shape: {mode, ap:{up,ssid,addr}, uplink:{kind,iface,addr}, nat}.
-  // Skeleton uplink.kind is none and nat is false until Infra. No LTE chrome.
+  // GET /api/mode: {mode, ap:{up,ssid,addr}, uplink:{kind,iface,addr}, nat}.
+  // LTE status is GET /api/lte only — do not read modem from mode.
   const bits=[ssid+' AP stays up at '+addr+'.'];
   if(ap.up===true) bits.push('AP is up.');
   if(up.kind==='ethernet') bits.push('Uplink is ethernet.');
   bits.push('Factory ethernet is 10.42.1.1/24 for management.');
   $('wan-facts').textContent=bits.join(' ');
+}
+
+function dash(v){
+  return (typeof v==='string'&&v.trim())?v.trim():'—';
+}
+
+function yn(v){
+  return v===true?'yes':v===false?'no':'—';
+}
+
+function paintLte(data){
+  const miss=!data;
+  $('lte-detected').textContent=miss?'No modem':yn(data.stick_present);
+  $('lte-iface').textContent=miss?'—':dash(data.iface);
+  $('lte-ip').textContent=miss?'—':dash(data.ip);
+  $('lte-route').textContent=miss?'—':yn(data.default_route);
+  $('lte-mode').textContent=miss?'—':(data.wan_rebroadcast===true?WAN:yn(data.wan_rebroadcast));
+  const h=miss?null:data.health;
+  const el=$('lte-health');
+  el.classList.remove('ok','bad');
+  if(LTE_HEALTH.indexOf(h)>=0){
+    el.textContent=h;
+    el.classList.add(h==='ok'?'ok':'bad');
+  }else{
+    el.textContent='—';
+  }
+}
+
+async function fetchLte(){
+  try{
+    const r=await fetchRel(lteApi,{method:'GET'});
+    if(backendMissing(r) || !r.ok) return null;
+    const data=await r.json();
+    return data && typeof data==='object' ? data : null;
+  }catch(e){
+    return null;
+  }
+}
+
+async function loadLte(){
+  paintLte(await fetchLte());
 }
 
 function showMode(mode, data){
@@ -89,7 +144,10 @@ function showMode(mode, data){
   $('wan').hidden=!wan;
   $('pick-station').setAttribute('aria-pressed', wan?'false':'true');
   $('pick-wan').setAttribute('aria-pressed', wan?'true':'false');
-  if(wan) paintWan(data||null);
+  if(wan){
+    paintWan(data||null);
+    loadLte();
+  }
 }
 
 function modeFrom(data){
