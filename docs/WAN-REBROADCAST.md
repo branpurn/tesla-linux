@@ -1,5 +1,7 @@
 # WAN rebroadcast — AP stays up + ethernet or LTE NAT
 
+Operator-facing primary in-car path is this mode (LTE WAN + TeslaLinux AP at **10.42.0.1**) — see [README.md](../README.md). Station-on-same-WLAN is setup/alternate.
+
 Alternate networking mode vs station-on-same-WLAN. Helper / install / systemd. Backend owns `/api/mode` (`ta_wlan_api.py`) and uplink.kind — this SHA does not edit Backend or `desktop.html`.
 
 SSID **TeslaLinux** stays visible. Operators use documented **10.42.0.1** (AP) and **10.42.1.1** (factory ethernet). Factory **10.42.1.1** stays up during `wan-ap` so Pop SSH and TeslaLinux AP run concurrently — WAN DHCP/default-route is LTE (`enx…` / `cdc_ether`) or a separate uplink, never by converting `tesla-linux-eth` to `ipv4.method=auto`. Do not guess a DHCP station IP. nginx never listens on `0.0.0.0` or the WAN DHCP address. AP DHCP is dnsmasq (authoritative, option 3+6, range `10.42.0.10`–`10.42.0.200`); `wan-ap` fails if hostapd is up without that lease server.
