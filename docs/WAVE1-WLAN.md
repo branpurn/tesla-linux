@@ -71,7 +71,7 @@ tesla-linux-wlan save-wlan <ssid> [psk]
 
 ### `/api/mode` — WAN rebroadcast intent (skeleton)
 
-Alternate mode: do **not** join another station WLAN. A WAN uplink is provided (ethernet first; USB LTE later). TeslaLinux AP stays up as AP at factory **10.42.0.1/24** unless a later lock moves it, and NAT/rebroadcasts that WAN so clients on TeslaLinux get internet. Operators stay on that factory AP address — do not guess a DHCP station IP.
+Alternate mode: do **not** join another station WLAN — never station+AP dual (`leave_station` on `wan-ap` / `boot` / `maybe-ap`). A WAN uplink is ethernet and/or USB LTE **1286:4e3c** (`cdc_ether`, `enx…`). TeslaLinux AP stays up at factory **10.42.0.1/24** + DHCP, and NAT/rebroadcasts that WAN so clients on TeslaLinux get internet. Operators stay on that factory AP address — do not guess a DHCP station IP.
 
 `POST /api/mode` persists intent only (`/etc/tesla-linux/mode.json`). The wlan helper honors that file and exposes Backend kicks: `wan_rebroadcast` → `tesla-linux-wlan wan-ap` (alias `wan-rebroadcast`); `station` → `tesla-linux-wlan wan-off`. See [WAN-REBROADCAST.md](WAN-REBROADCAST.md).
 
