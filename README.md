@@ -59,6 +59,7 @@ WIFI_PSK=yourpsk
 - `hostapd` AP **TeslaLinux** / **teslalinux** at **10.42.0.1** when no saved station associates
 - NetworkManager station autoconnect when a WLAN is saved
 - nginx serving the console on AP / ethernet / station IPv4
+- XFCE includes Mozilla apt Firefox (`.deb` from `packages.mozilla.org`, not the Ubuntu snap stub)
 - Misc. from Ubuntu Server 26.04 + XFCE (standard GNU tools, etc.)
 
 ## What/Why?:
