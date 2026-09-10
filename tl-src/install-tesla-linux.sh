@@ -21,7 +21,7 @@ xinit x11-utils x11-xserver-utils xinput \
 gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
 python3-gi python3-gst-1.0 python3-websockets python3-evdev \
 xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar dbus-x11 \
-xarchiver thunar-archive-plugin p7zip-full unzip \
+xarchiver thunar-archive-plugin 7zip unzip \
 pipewire pipewire-pulse pipewire-audio wireplumber pulseaudio-utils gstreamer1.0-pipewire \
 nginx openssl network-manager hostapd iw dnsmasq rfkill firefox"
 
