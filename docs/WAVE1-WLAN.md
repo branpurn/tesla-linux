@@ -1,5 +1,7 @@
 # WAVE 1 — WLAN station else TeslaLinux AP
 
+Operator-facing primary in-car path is LTE WAN + TeslaLinux AP at **10.42.0.1** — see [README.md](../README.md). This note is the station-else-AP setup/alternate.
+
 vs `1cb7c04`. Ubuntu Server + XFCE, Raspberry Pi **4 8 GB only**. No AOSP. No Pi 5. No WebRTC. kiss stays **PRIVATE**. Same `.img.xz` flashes SD or USB (Pi 4 USB boot: operator EEPROM).
 
 ## Product path
