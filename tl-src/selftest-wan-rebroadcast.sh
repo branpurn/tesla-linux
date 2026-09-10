@@ -46,6 +46,23 @@ grep -q 'mode.json' "$HELPER" && pass "helper honors mode.json" \
     || bad "helper missing mode.json"
 grep -Eq 'masquerade|MASQUERADE' "$HELPER" && pass "helper has NAT/masquerade" \
     || bad "helper missing masquerade"
+grep -q '1286:4e3c' "$HELPER" && pass "helper knows LTE USB 1286:4e3c" \
+    || bad "helper missing LTE USB 1286:4e3c"
+grep -q 'cdc_ether' "$HELPER" && pass "helper accepts cdc_ether LTE uplink" \
+    || bad "helper missing cdc_ether"
+grep -q 'ensure_lte_wan' "$HELPER" && pass "helper ensure_lte_wan" \
+    || bad "helper missing ensure_lte_wan"
+grep -q 'leave_station' "$HELPER" && pass "helper leave_station (no station+AP dual)" \
+    || bad "helper missing leave_station"
+grep -q 'refuse station join' "$HELPER" && pass "helper refuses station join while WAN on" \
+    || bad "helper missing WAN station-join refuse"
+grep -q 'start_hostapd_ap' "$HELPER" && pass "helper start_hostapd_ap (nl80211 settle)" \
+    || bad "helper missing start_hostapd_ap"
+grep -q 'managed no' "$HELPER" && pass "helper NM managed no before hostapd" \
+    || bad "helper missing managed no"
+awk '/^write_hostapd_conf\(\)/,/^}/' "$HELPER" | grep -q '^channel=6$' \
+    && pass "hostapd channel default unchanged (6)" \
+    || bad "hostapd channel default invented/changed"
 if awk '/^write_nginx_servers\(\)/,/^}/' "$HELPER" | grep -Eq 'listen 0\.0\.0\.0|listen 80;|listen \[::\]'; then
     bad "write_nginx_servers would bind nginx to 0.0.0.0"
 else

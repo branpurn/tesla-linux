@@ -719,6 +719,20 @@ verify_wan_rebroadcast() {
         || { echo "ERROR: tesla-linux-wlan does not honor /etc/tesla-linux/mode.json" >&2; exit 1; }
     grep -q 'wan_mode_on' "$wlan_bin" \
         || { echo "ERROR: tesla-linux-wlan missing wan_mode_on" >&2; exit 1; }
+    grep -q '1286:4e3c' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing LTE USB 1286:4e3c" >&2; exit 1; }
+    grep -q 'cdc_ether' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing cdc_ether LTE uplink" >&2; exit 1; }
+    grep -q 'ensure_lte_wan' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing ensure_lte_wan" >&2; exit 1; }
+    grep -q 'leave_station' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing leave_station (WAN must not dual station+AP)" >&2; exit 1; }
+    grep -q 'start_hostapd_ap' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing start_hostapd_ap (nl80211 settle)" >&2; exit 1; }
+    grep -q 'managed no' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing NM managed no before hostapd" >&2; exit 1; }
+    awk '/^write_hostapd_conf\(\)/,/^}/' "$wlan_bin" | grep -q '^channel=6$' \
+        || { echo "ERROR: hostapd channel default must stay 6 (do not invent channel)" >&2; exit 1; }
     grep -q 'ignore_broadcast_ssid=0' "$wlan_bin" \
         || { echo "ERROR: TeslaLinux SSID would be hidden" >&2; exit 1; }
     if awk '/^write_nginx_servers\(\)/,/^}/' "$wlan_bin" | grep -Eq 'listen 0\.0\.0\.0|listen 80;|listen \[::\]'; then
@@ -844,12 +858,13 @@ install -m755 "$HERE/ta_wlan_api.py" /usr/local/sbin/ta_wlan_api.py
 install -m644 "$HERE/tesla-linux-wlan-api.service" /etc/systemd/system/tesla-linux-wlan-api.service
 
 # NM dispatcher: wifi → maybe-ap (station else TeslaLinux AP); ethernet → nginx-bind
-# WAN rebroadcast: ethernet up may bring a DHCP WAN — refresh wan-up (AP stays, NAT).
+# WAN rebroadcast: ethernet/USB LTE up may bring a DHCP WAN — refresh wan-up (AP stays, NAT).
+# wan-ap leaves station first — never station+AP dual.
 install -d /etc/NetworkManager/dispatcher.d
 cat > /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan <<'EOF'
 #!/bin/sh
 # WAVE 1 — wifi: maybe-ap. ethernet/VM tap: nginx-bind only (not 0.0.0.0).
-# WAN mode: maybe-ap → wan-up; ethernet up refreshes NAT when the uplink appears.
+# WAN mode: maybe-ap → wan-up; ethernet/USB LTE (enx*/cdc_ether) up refreshes NAT.
 IFACE="$1"
 ACTION="$2"
 if [ -e "/sys/class/net/$IFACE/wireless" ]; then
