@@ -16,11 +16,12 @@ START=1
 # xserver-xorg-input-libinput is required so USB HID attaches to Xorg :0.
 # python3-evdev is the uinput touch backend, not the Xorg HID driver.
 # firefox is Mozilla apt .deb (packages.mozilla.org), not the Ubuntu snap stub.
+# ristretto is the lightweight XFCE image viewer (piecemeal XFCE; not a desktop meta).
 PKGS="xserver-xorg-core xserver-xorg-input-libinput \
 xinit x11-utils x11-xserver-utils xinput \
 gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
 python3-gi python3-gst-1.0 python3-websockets python3-evdev \
-xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar dbus-x11 \
+xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar ristretto dbus-x11 \
 xarchiver thunar-archive-plugin 7zip unzip \
 pipewire pipewire-pulse pipewire-audio wireplumber pulseaudio-utils gstreamer1.0-pipewire \
 nginx openssl network-manager hostapd iw dnsmasq rfkill firefox"
