@@ -538,15 +538,59 @@ collect_bind_ips() {
     fi
 }
 
-write_nginx_servers() {
-    local ips="$1" ip
-    mkdir -p "$(dirname "$NGINX_HTTP")"
-    if [ -z "$ips" ]; then
-        # No address yet — do not emit a listen (avoids 0.0.0.0 and a dead bind).
-        echo "# no AP/station IPv4 yet; tesla-linux-wlan nginx-bind will rewrite" > "$NGINX_HTTP"
-        echo "# no TLS binds yet" > "$NGINX_HTTPS"
+# Atomic replace so readers never see a truncated include (unexpected EOF).
+write_nginx_file() {
+    local dest="$1" tmp
+    mkdir -p "$(dirname "$dest")"
+    tmp="$(mktemp "${dest}.XXXXXX")"
+    cat > "$tmp"
+    mv -f "$tmp" "$dest"
+}
+
+# Comments/empty or balanced braces — include cannot unexpected-EOF nginx -t.
+nginx_https_include_ok() {
+    local f="${1:-$NGINX_HTTPS}"
+    [ -f "$f" ] || return 1
+    if ! grep -Eqv '^[[:space:]]*(#|$)' "$f"; then
         return 0
     fi
+    awk '
+        {
+            s = $0
+            sub(/#.*/, "", s)
+            n = split(s, chars, "")
+            for (i = 1; i <= n; i++) {
+                if (chars[i] == "{") depth++
+                else if (chars[i] == "}") depth--
+                if (depth < 0) exit 1
+            }
+        }
+        END { exit (depth == 0) ? 0 : 1 }
+    ' "$f"
+}
+
+# Always-valid HTTPS include (FLAG-TLS: HTTP on AP/station/ethernet LAN is enough).
+neutralize_nginx_https() {
+    write_nginx_file "$NGINX_HTTPS" <<'EOF'
+# no TLS binds yet
+EOF
+}
+
+write_nginx_servers() {
+    local ips="$1" ip tmp
+    mkdir -p "$(dirname "$NGINX_HTTP")"
+    # Neutralize TLS first. A crash while rewriting HTTPS used to truncate
+    # tl-https-server.conf in place; nginx -t then failed and reload aborted,
+    # leaving HTTP dead after a station IP change.
+    neutralize_nginx_https
+    if [ -z "$ips" ]; then
+        # No address yet — do not emit a listen (avoids 0.0.0.0 and a dead bind).
+        write_nginx_file "$NGINX_HTTP" <<'EOF'
+# no AP/station IPv4 yet; tesla-linux-wlan nginx-bind will rewrite
+EOF
+        return 0
+    fi
+    tmp="$(mktemp "${NGINX_HTTP}.XXXXXX")"
     {
         echo "server {"
         while IFS= read -r ip; do
@@ -556,8 +600,10 @@ write_nginx_servers() {
         echo "    server_name _;"
         echo "    include $NGINX_LOCS;"
         echo "}"
-    } > "$NGINX_HTTP"
+    } > "$tmp"
+    mv -f "$tmp" "$NGINX_HTTP"
     if [ -f /etc/nginx/certs/tl.crt ] && [ -f /etc/nginx/certs/tl.key ]; then
+        tmp="$(mktemp "${NGINX_HTTPS}.XXXXXX")"
         {
             echo "server {"
             while IFS= read -r ip; do
@@ -569,9 +615,13 @@ write_nginx_servers() {
             echo "    ssl_certificate_key /etc/nginx/certs/tl.key;"
             echo "    include $NGINX_LOCS;"
             echo "}"
-        } > "$NGINX_HTTPS"
-    else
-        echo "# WAVE 0 cert not yet issued; HTTP on AP/station LAN is FLAG-TLS-acceptable" > "$NGINX_HTTPS"
+        } > "$tmp"
+        if nginx_https_include_ok "$tmp"; then
+            mv -f "$tmp" "$NGINX_HTTPS"
+        else
+            rm -f "$tmp"
+            neutralize_nginx_https
+        fi
     fi
 }
 
@@ -579,12 +629,23 @@ reload_nginx() {
     # Listen files are already written. Never systemctl-start or systemctl-restart
     # nginx from this oneshot — that waits for nginx, nginx After=wlan waits here.
     # If nginx is not active yet, systemd starts it after this unit (After=/Wants=).
+    # Invalid/empty/EOF TLS include is fail-soft: neutralize so nginx -t / a later
+    # systemd start still loads HTTP on the current eth + station IPv4s.
+    if ! nginx_https_include_ok; then
+        log "HTTPS snippet invalid/EOF; fail-soft HTTP-only"
+        neutralize_nginx_https
+    fi
     if ! command -v nginx >/dev/null 2>&1; then
         return 0
     fi
     if ! systemctl is-active --quiet nginx 2>/dev/null; then
         return 0
     fi
+    if nginx -t >/dev/null 2>&1; then
+        nginx -s reload 2>/dev/null || true
+        return 0
+    fi
+    neutralize_nginx_https
     nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null || true
 }
 
@@ -954,6 +1015,99 @@ cmd_selftest() {
     if grep -E 'systemctl' "$ng_log"; then
         echo "FAIL: reload_nginx used systemctl start/restart"; fail=1
     fi
+    unset -f systemctl nginx
+    unset MOCK_NGINX_ACTIVE
+
+    # JUMP LIVE: truncated / empty HTTPS include must not fail nginx -t or HTTP reload.
+    NGINX_HTTP="$dir/failsoft-http.conf"
+    NGINX_HTTPS="$dir/failsoft-https.conf"
+    NGINX_LOCS="$dir/locs.conf"
+    : > "$NGINX_LOCS"
+    write_nginx_servers $'10.42.1.1\n192.168.4.59'
+    grep -q 'listen 10.42.1.1:80;' "$NGINX_HTTP" || { echo "FAIL: failsoft write missing eth HTTP"; fail=1; }
+    grep -q 'listen 192.168.4.59:80;' "$NGINX_HTTP" || { echo "FAIL: failsoft write missing station HTTP"; fail=1; }
+    printf '%s\n' 'server {' '    listen 10.42.1.1:443 ssl;' > "$NGINX_HTTPS"
+    ng_log="$dir/nginx-failsoft"
+    : > "$ng_log"
+    systemctl() {
+        if [ "${1:-}" = is-active ] && [ "${2:-}" = --quiet ]; then
+            [ "${MOCK_NGINX_ACTIVE:-0}" = 1 ]
+            return $?
+        fi
+        echo "systemctl $*" >> "$ng_log"
+        return 1
+    }
+    nginx() {
+        echo "nginx $*" >> "$ng_log"
+        if [ "${1:-}" = "-t" ]; then
+            if [ -f "$NGINX_HTTPS" ] && grep -q 'server {' "$NGINX_HTTPS"; then
+                if ! awk 'BEGIN{d=0} {s=$0; sub(/#.*/,"",s); d+=gsub(/{/, "{", s); d-=gsub(/}/, "}", s)} END{exit d!=0}' "$NGINX_HTTPS"; then
+                    return 1
+                fi
+            fi
+        fi
+        return 0
+    }
+    MOCK_NGINX_ACTIVE=1
+    reload_nginx || { echo "FAIL: reload_nginx truncated HTTPS returned non-zero"; fail=1; }
+    grep -q -- '-t' "$ng_log" || { echo "FAIL: truncated HTTPS skipped nginx -t"; fail=1; }
+    grep -q -- '-s reload' "$ng_log" || { echo "FAIL: truncated HTTPS skipped HTTP reload"; fail=1; }
+    if grep -E 'systemctl' "$ng_log"; then
+        echo "FAIL: failsoft reload used systemctl start/restart"; fail=1
+    fi
+    if grep -q 'server {' "$NGINX_HTTPS"; then
+        awk 'BEGIN{d=0} {s=$0; sub(/#.*/,"",s); d+=gsub(/{/, "{", s); d-=gsub(/}/, "}", s)} END{exit d!=0}' "$NGINX_HTTPS" \
+            || { echo "FAIL: HTTPS still unbalanced after fail-soft"; fail=1; }
+    fi
+    grep -q 'listen 10.42.1.1:80;' "$NGINX_HTTP" || { echo "FAIL: HTTP eth bind lost after fail-soft"; fail=1; }
+    grep -q 'listen 192.168.4.59:80;' "$NGINX_HTTP" || { echo "FAIL: HTTP station bind lost after fail-soft"; fail=1; }
+    : > "$NGINX_HTTPS"
+    : > "$ng_log"
+    reload_nginx || { echo "FAIL: reload_nginx empty HTTPS returned non-zero"; fail=1; }
+    grep -q -- '-s reload' "$ng_log" || { echo "FAIL: empty HTTPS skipped HTTP reload"; fail=1; }
+
+    # Station-join / nginx-bind: rewrite eth+wlan listens; HTTP reload even if TLS is EOF.
+    printf '%s\n' 'server {' '    listen 10.42.0.1:443 ssl;' > "$NGINX_HTTPS"
+    wifi_iface() { printf '%s\n' wlan0; }
+    wired_ifaces() { printf '%s\n' eth0; }
+    iface_ipv4s() {
+        case "$1" in
+            wlan0) printf '%s\n' 192.168.4.59 ;;
+            eth0) printf '%s\n' 10.42.1.1 ;;
+            *) ;;
+        esac
+    }
+    hostapd_running() { return 1; }
+    station_associated() { return 0; }
+    WAN_RUNTIME="$dir/absent-wan-failsoft"
+    MODE_FILE="$dir/absent-mode-failsoft"
+    WAN_REBROADCAST=0
+    : > "$ng_log"
+    MOCK_NGINX_ACTIVE=1
+    if ! cmd_nginx_bind; then
+        echo "FAIL: nginx-bind station-join returned non-zero"; fail=1
+    fi
+    grep -q 'listen 10.42.1.1:80;' "$NGINX_HTTP" || { echo "FAIL: nginx-bind missing eth HTTP after station"; fail=1; }
+    grep -q 'listen 192.168.4.59:80;' "$NGINX_HTTP" || { echo "FAIL: nginx-bind missing station HTTP"; fail=1; }
+    grep -q '10.42.0.1' "$NGINX_HTTP" && { echo "FAIL: nginx-bind kept AP listen in station mode"; fail=1; }
+    grep -q -- '-s reload' "$ng_log" || { echo "FAIL: nginx-bind did not reload HTTP after station join"; fail=1; }
+    if grep -q 'server {' "$NGINX_HTTPS"; then
+        awk 'BEGIN{d=0} {s=$0; sub(/#.*/,"",s); d+=gsub(/{/, "{", s); d-=gsub(/}/, "}", s)} END{exit d!=0}' "$NGINX_HTTPS" \
+            || { echo "FAIL: nginx-bind left HTTPS EOF"; fail=1; }
+    fi
+
+    : > "$ng_log"
+    printf '%s\n' 'server {' > "$NGINX_HTTPS"
+    have_nft() { return 1; }
+    have_iptables() { return 1; }
+    remove_wan_nat() { rm -f "$WAN_RUNTIME"; }
+    if ! cmd_maybe_ap; then
+        echo "FAIL: maybe-ap station-join returned non-zero"; fail=1
+    fi
+    grep -q 'listen 10.42.1.1:80;' "$NGINX_HTTP" || { echo "FAIL: maybe-ap missing eth HTTP"; fail=1; }
+    grep -q 'listen 192.168.4.59:80;' "$NGINX_HTTP" || { echo "FAIL: maybe-ap missing station HTTP"; fail=1; }
+    grep -q -- '-s reload' "$ng_log" || { echo "FAIL: maybe-ap did not reload HTTP"; fail=1; }
+
     unset -f systemctl nginx
     unset MOCK_NGINX_ACTIVE
 
