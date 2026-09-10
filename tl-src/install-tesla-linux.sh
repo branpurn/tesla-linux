@@ -947,6 +947,7 @@ cat > /etc/nginx/tl-locations.conf <<'EOF'
 # /api/wlan → loopback ta_wlan_api.py :9094 (save-wlan kick + nmcli scan). 501 gone.
 # /api/reboot → same loopback :9094 (system reboot kick; next boot joins saved WLAN).
 # /api/mode → same loopback :9094 (WAN-rebroadcast intent; persist only).
+# /api/lte → same loopback :9094 (GET stick health for the Frontend LTE pane).
 root /var/www/tl;
 index index.html;
 location ~* \.wasm$ { default_type application/wasm; }
@@ -969,6 +970,11 @@ location /api/mode {
     proxy_set_header Host $host;
     proxy_set_header Content-Type $http_content_type;
     client_max_body_size 8k;
+}
+location /api/lte {
+    proxy_pass http://127.0.0.1:9094;
+    proxy_set_header Host $host;
+    client_max_body_size 1k;
 }
 EOF
 # Placeholder until tesla-linux-wlan nginx-bind sees an AP/station/ethernet IPv4.

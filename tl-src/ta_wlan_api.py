@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Tesla Linux — loopback HTTP /api/wlan + /api/reboot + /api/mode.
+"""Tesla Linux — loopback HTTP /api/wlan + /api/reboot + /api/mode + /api/lte.
 
 Stdlib only. Binds TA_BIND (default 127.0.0.1) — never 0.0.0.0.
 nginx on the AP/station LAN proxies origin-relative /api/wlan, /api/reboot,
-and /api/mode here.
+/api/mode, and /api/lte here.
 
 POST JSON {ssid, psk} kicks save-wlan in a background thread and returns 200
 without waiting on WAIT_SEC. GET /api/wlan returns {ssids:[...]} (empty on scan fail).
@@ -13,6 +13,9 @@ GET|POST /api/mode persists WAN-rebroadcast intent then kicks tesla-linux-wlan
 wan-ap / wan-off in a background thread (200 after persist+kick-started).
 Default mode is station. GET still reports nat:false and uplink none until
 Infra status is readable without dual-writing the helper.
+
+GET /api/lte is live stick health for the Frontend LTE pane (sysfs/nmcli/ip).
+Do not stuff LTE into /api/mode. No fake health=ok.
 """
 import json
 import os
@@ -27,6 +30,11 @@ BIND = os.environ.get("TA_BIND") or "127.0.0.1"
 PORT = int(os.environ.get("TA_WLAN_PORT") or "9094")
 WLAN = os.environ.get("TA_WLAN_BIN") or "/usr/local/sbin/tesla-linux-wlan"
 NMCLI = os.environ.get("TA_NMCLI") or "nmcli"
+IP_BIN = os.environ.get("TA_IP") or "ip"
+SYS_NET = os.environ.get("TA_SYS_NET") or "/sys/class/net"
+LTE_VIDPID = (os.environ.get("TA_LTE_VIDPID") or "1286:4e3c").lower()
+ETH_ADDR_PLAIN = (os.environ.get("TA_ETH_ADDR") or "10.42.1.1").split("/")[0]
+AP_ADDR_PLAIN = (os.environ.get("TA_AP_ADDR") or "10.42.0.1/24").split("/")[0]
 # Optional override for tests; default is systemctl reboot then /sbin/reboot.
 REBOOT_BIN = os.environ.get("TA_REBOOT_BIN") or ""
 BODY_MAX = 8192
@@ -64,6 +72,10 @@ def _is_mode_path(path):
     return path == "/api/mode"
 
 
+def _is_lte_path(path):
+    return path == "/api/lte"
+
+
 def _read_mode():
     """Persisted intent, else station. Corrupt/missing file is station."""
     try:
@@ -97,6 +109,160 @@ def _mode_status():
         "uplink": {"kind": "none", "iface": None, "addr": None},
         "nat": False,
     }
+
+
+def _read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _lte_driver(iface):
+    link = os.path.join(SYS_NET, iface, "device", "driver")
+    try:
+        return os.path.basename(os.path.realpath(link))
+    except OSError:
+        pass
+    for line in _read_text(os.path.join(SYS_NET, iface, "device", "uevent")).splitlines():
+        if line.startswith("DRIVER="):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def _lte_usb_id(iface):
+    for line in _read_text(os.path.join(SYS_NET, iface, "device", "uevent")).splitlines():
+        if line.startswith("PRODUCT="):
+            parts = line.split("=", 1)[1].split("/")
+            if len(parts) >= 2:
+                return ("%s:%s" % (parts[0], parts[1])).lower()
+    vendor = _read_text(os.path.join(SYS_NET, iface, "device", "..", "idVendor")).lower().lstrip("0x")
+    product = _read_text(os.path.join(SYS_NET, iface, "device", "..", "idProduct")).lower().lstrip("0x")
+    if vendor and product:
+        return "%s:%s" % (vendor, product)
+    return ""
+
+
+def _is_lte_iface(iface):
+    if not iface or iface in ("lo", "eth0", "end0"):
+        return False
+    if iface.startswith(("docker", "veth", "br-", "virbr", "tun", "wg")):
+        return False
+    net = os.path.join(SYS_NET, iface)
+    if not os.path.isdir(net):
+        return False
+    if os.path.exists(os.path.join(net, "wireless")):
+        return False
+    typ = _read_text(os.path.join(net, "type"))
+    if typ and typ != "1":
+        return False
+    usb_id = _lte_usb_id(iface)
+    if usb_id == LTE_VIDPID:
+        return True
+    if _lte_driver(iface) in ("cdc_ether", "cdc_ncm", "rndis_host"):
+        return True
+    return iface.startswith(("usb", "wwan", "lte", "enx"))
+
+
+def _lte_ifaces():
+    try:
+        names = sorted(os.listdir(SYS_NET))
+    except OSError:
+        return []
+    return [n for n in names if _is_lte_iface(n)]
+
+
+def _ip_run(args):
+    try:
+        out = subprocess.run(
+            [IP_BIN] + args, capture_output=True, text=True, timeout=2, check=False,
+        )
+        return out.stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _iface_wan_ip(iface):
+    text = _ip_run(["-4", "-o", "addr", "show", "dev", iface])
+    for token in text.replace("/", " ").split():
+        if token.count(".") != 3:
+            continue
+        if token in (ETH_ADDR_PLAIN, AP_ADDR_PLAIN, "0.0.0.0") or token.startswith(("127.", "169.254.")):
+            continue
+        return token
+    return None
+
+
+def _default_route_dev():
+    text = _ip_run(["-4", "route", "show", "default"])
+    parts = text.split()
+    for i, p in enumerate(parts):
+        if p == "dev" and i + 1 < len(parts):
+            return parts[i + 1]
+    return ""
+
+
+def _station_associated():
+    try:
+        out = subprocess.run(
+            [NMCLI, "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    for line in (out.stdout or "").splitlines():
+        bits = line.split(":")
+        if len(bits) < 4:
+            continue
+        _dev, typ, state, conn = bits[0], bits[1], bits[2], bits[3]
+        if typ != "wifi" or state != "connected" or not conn:
+            continue
+        if conn == AP_SSID:
+            continue
+        return True
+    return False
+
+
+def _lte_status():
+    """Live LTE stick health. Never invent health=ok. Not stuffed into /api/mode."""
+    with _MODE_LOCK:
+        mode = _read_mode()
+    wan = mode == "wan_rebroadcast"
+    ifaces = _lte_ifaces()
+    stick = bool(ifaces)
+    picked = None
+    usb_id = None
+    ip = None
+    for iface in ifaces:
+        cand_ip = _iface_wan_ip(iface)
+        cand_id = _lte_usb_id(iface) or None
+        if picked is None or cand_ip:
+            picked, usb_id, ip = iface, cand_id, cand_ip
+            if cand_ip:
+                break
+    gw = _default_route_dev()
+    default_route = bool(picked) and gw == picked
+    if not stick:
+        health = "no_stick"
+    elif wan and _station_associated():
+        health = "station_conflict"
+    elif not ip:
+        health = "no_ip"
+    elif not default_route:
+        health = "no_route"
+    else:
+        health = "ok"
+    return {
+        "stick_present": stick,
+        "usb_id": usb_id,
+        "iface": picked,
+        "ip": ip,
+        "default_route": default_route,
+        "wan_rebroadcast": wan,
+        "health": health,
+    }
+
 
 def _ssid_ok(ssid):
     if not isinstance(ssid, str):
@@ -212,7 +378,12 @@ class Handler(BaseHTTPRequestHandler):
     def _method_not_allowed(self):
         self._drain_body()
         path = _norm_path(self.path)
-        allow = "POST" if _is_reboot_path(path) else "GET, POST"
+        if _is_reboot_path(path):
+            allow = "POST"
+        elif _is_lte_path(path):
+            allow = "GET"
+        else:
+            allow = "GET, POST"
         self._json(405, {"error": "method not allowed"}, extra={"Allow": allow})
 
     def _json(self, code, obj, extra=None):
@@ -235,6 +406,9 @@ class Handler(BaseHTTPRequestHandler):
         if _is_mode_path(path):
             self._json(200, _mode_status())
             return
+        if _is_lte_path(path):
+            self._json(200, _lte_status())
+            return
         if not _is_wlan_path(path):
             self._json(404, {"error": "not found"})
             return
@@ -246,6 +420,10 @@ class Handler(BaseHTTPRequestHandler):
             self._drain_body()
             _kick_reboot()
             self._json(200, {"ok": True})
+            return
+        if _is_lte_path(path):
+            self._drain_body()
+            self._json(405, {"error": "method not allowed"}, extra={"Allow": "GET"})
             return
         if _is_mode_path(path):
             self._post_mode()
@@ -480,6 +658,112 @@ def _selftest():
         check(status == 405 and allow == "POST", "GET /api/reboot still 405")
         status, obj, _, _ = req("GET", "/api/nope")
         check(status == 404, "unknown path 404")
+
+        # GET /api/lte — planted sysfs + ip/nmcli stubs. No hardware. No /api/mode dual-write.
+        sys_net = os.path.join(tmp, "sys-net")
+        os.makedirs(sys_net, exist_ok=True)
+        addr_out = os.path.join(tmp, "ip-addr.out")
+        route_out = os.path.join(tmp, "ip-route.out")
+        nm_out = os.path.join(tmp, "nm.out")
+        ip_bin = os.path.join(tmp, "fake-ip")
+        nmcli_bin = os.path.join(tmp, "fake-nmcli")
+        with open(ip_bin, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/bin/sh\n"
+                'case " $* " in\n'
+                '  *" addr "*) cat "$TA_LTE_ADDR_OUT" ;;\n'
+                '  *" route "*) cat "$TA_LTE_ROUTE_OUT" ;;\n'
+                "esac\n"
+            )
+        with open(nmcli_bin, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\ncat \"$TA_LTE_NM_OUT\"\n")
+        os.chmod(ip_bin, 0o755)
+        os.chmod(nmcli_bin, 0o755)
+        os.environ["TA_LTE_ADDR_OUT"] = addr_out
+        os.environ["TA_LTE_ROUTE_OUT"] = route_out
+        os.environ["TA_LTE_NM_OUT"] = nm_out
+        open(addr_out, "w").close()
+        open(route_out, "w").close()
+        open(nm_out, "w").close()
+        global SYS_NET, IP_BIN, NMCLI
+        SYS_NET = sys_net
+        IP_BIN = ip_bin
+        NMCLI = nmcli_bin
+
+        locked_keys = [
+            "stick_present", "usb_id", "iface", "ip",
+            "default_route", "wan_rebroadcast", "health",
+        ]
+        status, obj, raw, _ = req("GET", "/api/lte")
+        check(status == 200, "GET /api/lte empty status")
+        check(obj == {
+            "stick_present": False,
+            "usb_id": None,
+            "iface": None,
+            "ip": None,
+            "default_route": False,
+            "wan_rebroadcast": False,
+            "health": "no_stick",
+        }, "GET /api/lte no_stick JSON")
+        check(list(obj.keys()) == locked_keys, "GET /api/lte field order")
+
+        status, obj, _, allow = req("POST", "/api/lte", {})
+        check(status == 405 and allow == "GET", "POST /api/lte 405 Allow GET")
+        status, obj, _, allow = req("PUT", "/api/lte")
+        check(status == 405 and allow == "GET", "PUT /api/lte 405 Allow GET")
+
+        usb0 = os.path.join(sys_net, "usb0")
+        os.makedirs(os.path.join(usb0, "device"), exist_ok=True)
+        with open(os.path.join(usb0, "type"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(usb0, "device", "uevent"), "w", encoding="utf-8") as f:
+            f.write(
+                "DEVTYPE=usb_interface\nDRIVER=cdc_ether\n"
+                "PRODUCT=1286/4e3c/100\nINTERFACE=usb0\n"
+            )
+
+        status, obj, _, _ = req("GET", "/api/lte")
+        check(status == 200 and obj.get("health") == "no_ip", "GET /api/lte no_ip")
+        check(obj.get("stick_present") is True and obj.get("iface") == "usb0", "no_ip iface")
+        check(obj.get("usb_id") == "1286:4e3c" and obj.get("ip") is None, "no_ip usb_id")
+
+        with open(addr_out, "w", encoding="utf-8") as f:
+            f.write("4: usb0    inet 10.20.30.2/24 brd 10.20.30.255 scope global usb0\n")
+        status, obj, _, _ = req("GET", "/api/lte")
+        check(obj.get("health") == "no_route" and obj.get("ip") == "10.20.30.2", "GET /api/lte no_route")
+        check(obj.get("default_route") is False, "no_route default_route false")
+
+        with open(route_out, "w", encoding="utf-8") as f:
+            f.write("default via 10.20.30.1 dev usb0 proto dhcp metric 100\n")
+        with open(mode_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"mode": "wan_rebroadcast"}) + "\n")
+        status, obj, _, _ = req("GET", "/api/lte")
+        check(obj == {
+            "stick_present": True,
+            "usb_id": "1286:4e3c",
+            "iface": "usb0",
+            "ip": "10.20.30.2",
+            "default_route": True,
+            "wan_rebroadcast": True,
+            "health": "ok",
+        }, "GET /api/lte health=ok locked JSON")
+
+        status, mode_obj, _, _ = req("GET", "/api/mode")
+        check(mode_obj["uplink"] == {"kind": "none", "iface": None, "addr": None}, "GET /api/mode not dual-written")
+        check(mode_obj["nat"] is False, "GET /api/mode nat stays false")
+
+        with open(nm_out, "w", encoding="utf-8") as f:
+            f.write("wlan0:wifi:connected:Eero\n")
+        status, obj, _, _ = req("GET", "/api/lte")
+        check(obj.get("health") == "station_conflict", "GET /api/lte station_conflict")
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        install = os.path.join(here, "install-tesla-linux.sh")
+        with open(install, encoding="utf-8") as f:
+            locs = f.read()
+        check("location /api/lte" in locs and "127.0.0.1:9094" in locs, "nginx location /api/lte → :9094")
+        src = open(os.path.abspath(__file__), encoding="utf-8").read()
+        check('MODE_KICK = {"wan_rebroadcast": "wan-ap", "station": "wan-off"}' in src, "/api/mode kick argv stays wan-ap/wan-off")
     finally:
         httpd.shutdown()
         shutil.rmtree(tmp, ignore_errors=True)
