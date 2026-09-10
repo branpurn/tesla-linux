@@ -1708,7 +1708,8 @@ cmd_selftest() {
     grep -q 'MASQUERADE' "$ipt_log" || { echo "FAIL: iptables MASQUERADE"; fail=1; }
 
     # wan_mode without LTE: factory eth stays manual + 10.42.1.1 / never-default yes.
-    unset -f cmd_eth_up
+    # Earlier selftest stubs replaced cmd_eth_up; restore the real helper body.
+    eval "$(awk '/^cmd_eth_up\(\)/,/^}/' "$helper_src")"
     WAN_REBROADCAST=1
     WAN_RUNTIME="$dir/wan-eth-lock"
     : > "$WAN_RUNTIME"
