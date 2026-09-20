@@ -9,17 +9,17 @@ Product + `wan-verify` **FAIL** if nginx listens on `0.0.0.0` or bare `:80`. Bin
 ## Cause
 `wait_station` returns on **association**; `cmd_nginx_bind` often runs **before DHCP** assigns the station IPv4, so the listen list omits that address.
 
-## Fix
-Apply `tl-src/patches/station-nginx-bind.patch` (or land the equivalent hunk into `tl-src/tesla-linux-wlan.sh`):
+## Land the helper (MCP cannot push ~78KB `tesla-linux-wlan.sh`)
+From repo root on branch `fix/station-nginx-bind-ipv4`:
 
 ```bash
-cd /path/to/tesla-linux
-git apply tl-src/patches/station-nginx-bind.patch
-# or: patch -p1 < tl-src/patches/station-nginx-bind.patch
-bash -n tl-src/tesla-linux-wlan.sh
+bash tl-src/patches/apply-station-nginx-wlan.sh
+git add tl-src/tesla-linux-wlan.sh
+git commit -m 'fix(wlan): wait for station DHCP IPv4 before nginx-bind'
+git push
 ```
 
-Adds `wait_station_ipv4` and calls it from `cmd_nginx_bind` / save-wlan / boot / maybe-ap.
+Or: `patch -p1 < tl-src/patches/station-nginx-bind-ipv4.patch` (fallback name: `station-nginx-bind.patch`).
 
 ## Live unblock (no rebuild)
 ```bash
