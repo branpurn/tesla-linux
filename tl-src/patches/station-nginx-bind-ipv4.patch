@@ -1,0 +1,71 @@
+--- a/tl-src/tesla-linux-wlan.sh
++++ b/tl-src/tesla-linux-wlan.sh
+@@ -509,6 +509,30 @@
+     return 1
+ }
+ 
++# Association ≠ DHCP. nginx-bind must wait for station IPv4 (e.g. 192.168.1.199).
++# Never bind 0.0.0.0 — wan-verify fails that; listen on the concrete DHCP address.
++wait_station_ipv4() {
++    local iface="$1" i ip
++    [ -n "$iface" ] || return 1
++    if wan_mode_on; then
++        return 1
++    fi
++    i=0
++    while [ "$i" -lt "${WAIT_SEC:-20}" ]; do
++        while IFS= read -r ip; do
++            if is_bindable_ipv4 "$ip"; then
++                printf '%s\n' "$ip"
++                return 0
++            fi
++        done < <(iface_ipv4s "$iface")
++        i=$((i + 1))
++        sleep 1
++    done
++    log "station $iface associated but no bindable IPv4 within ${WAIT_SEC}s (nginx may miss http://<dhcp-ip>/)"
++    return 1
++}
++
++
+ hostapd_running() {
+     [ -f "$HOSTAPD_PID" ] && kill -0 "$(cat "$HOSTAPD_PID" 2>/dev/null)" 2>/dev/null
+ }
+@@ -812,6 +836,11 @@
+ cmd_nginx_bind() {
+     local iface ips
+     iface="$(wifi_iface 2>/dev/null || true)"
++    # Station/Join: wait for DHCP before collecting binds (fixes http://<dhcp-ip>/ refused).
++    # Never listen 0.0.0.0 — wan-verify fails that; bind the concrete station IPv4 instead.
++    if [ -n "$iface" ] && ! wan_mode_on && station_associated "$iface" 2>/dev/null; then
++        wait_station_ipv4 "$iface" >/dev/null || true
++    fi
+     ips="$(collect_bind_ips "$iface" || true)"
+     write_nginx_servers "$ips"
+     if [ -n "$ips" ]; then
+@@ -964,6 +993,7 @@
+             || nmcli device connect "$iface" 2>/dev/null \
+             || true
+         wait_station "$iface" || log "save-wlan: NM did not associate within ${WAIT_SEC}s"
++        wait_station_ipv4 "$iface" >/dev/null || true
+     fi
+     cmd_nginx_bind
+ }
+@@ -1154,6 +1184,9 @@
+             log "saved infra WLAN present; waiting ${WAIT_SEC}s for NM autoconnect"
+             if wait_station "$iface"; then
+                 log "associated as station"
++                if ip="$(wait_station_ipv4 "$iface")"; then
++                    log "station IPv4 $ip — nginx will bind http://$ip/"
++                fi
+                 cmd_nginx_bind
+                 return 0
+             fi
+@@ -1197,6 +1230,7 @@
+     fi
+     if has_saved_infra; then
+         if wait_station "$iface"; then
++            wait_station_ipv4 "$iface" >/dev/null || true
+             cmd_nginx_bind
+             return 0
+         fi
