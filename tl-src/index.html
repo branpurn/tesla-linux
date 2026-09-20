@@ -24,6 +24,8 @@ a{color:#8ecdff}
 .lte div{display:flex;gap:12px;margin:0 0 2px}
 .lte dt{flex:0 0 11em;color:#9ab}
 .lte dd{margin:0}
+#footer-nav button#reboot{font:inherit;padding:4px 10px;border:1px solid #2a6ea8;border-radius:6px;background:#1b4f7a;color:#fff;cursor:pointer;vertical-align:baseline}
+#footer-nav button#reboot:disabled{opacity:.5;cursor:wait}
 </style>
 <h1>Wi-Fi</h1>
 <div class="modes" role="group" aria-label="Mode">
@@ -59,7 +61,7 @@ a{color:#8ecdff}
   </dl>
 </div>
 <p id="status"></p>
-<p><a href="desktop.html">Desktop</a> · <a href="probe.html">Probe</a></p>
+<p id="footer-nav"><a href="desktop.html">Desktop</a> · <a href="probe.html">Probe</a> · <button type="button" id="reboot">Reboot</button></p>
 <script>
 const wlanApi='/api/wlan';
 const modeApi='/api/mode';
@@ -68,6 +70,13 @@ const STATION='station';
 const WAN='wan_rebroadcast';
 const LTE_HEALTH=['ok','no_stick','no_ip','no_route','station_conflict'];
 const $=id=>document.getElementById(id);
+$('reboot').addEventListener('click', async ()=>{
+  const b=$('reboot');
+  if(b.disabled) return;
+  b.disabled=true;
+  try{ await fetch('/api/reboot',{method:'POST',credentials:'same-origin',cache:'no-store'}); }
+  catch(e){}
+});
 const status=m=>{ $('status').innerHTML=m; };
 
 function fail(r){
