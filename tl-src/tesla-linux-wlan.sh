@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tesla Linux WAVE 1 — saved-WLAN station else TeslaLinux hostapd AP.
 # Alternate: WAN rebroadcast — AP stays up; ethernet or USB LTE WAN is NAT'd
-# to AP clients (10.42.0.0/24). USB stick 1286:4e3c is cdc_ether (enx…).
+# to AP clients (10.42.0.0/24). Default LTE stick 1286:4e3c (cdc_ether / enx…);
+# override with WAN_IFACE= or LTE_USB_IDS= (comma VID:PID list) in ap.env.
 #
 # NetworkManager owns infrastructure (station) autoconnect.
 # Fallback AP is hostapd + dnsmasq (not nmcli hotspot), SSID TeslaLinux.
@@ -32,17 +33,26 @@ WAIT_SEC="${WAIT_SEC:-20}"
 # brcmfmac often appears after this oneshot first runs — wait, then fail so systemd restarts.
 IFACE_WAIT_SEC="${IFACE_WAIT_SEC:-60}"
 # Alternate mode: AP stays up; do not join a station WLAN. Ethernet or USB LTE
-# (1286:4e3c cdc_ether) WAN is NAT'd. Backend persist is mode.json (POST /api/mode).
+# WAN is NAT'd. Backend persist is mode.json (POST /api/mode).
 # Missing = station. wan-ap / wan-rebroadcast also plants /run/tesla-linux-wan.
 WAN_REBROADCAST="${WAN_REBROADCAST:-0}"
 WAN_RUNTIME="${WAN_RUNTIME:-/run/tesla-linux-wan}"
 MODE_FILE="${MODE_FILE:-/etc/tesla-linux/mode.json}"
-# Known LTE USB stick (Marvell cdc_ether). Live name is typically enx<MAC>.
-# Backend owns /api/mode uplink.kind; helper only accepts the iface for NAT.
+# Preferred uplink override (e.g. enx… / wwan0). When set and present, NAT prefers it.
+WAN_IFACE="${WAN_IFACE:-}"
+# Known LTE USB stick defaults (Marvell cdc_ether). Live name is typically enx<MAC>.
+# LTE_USB_IDS = comma-separated VID:PID list (defaults to LTE_USB_VID:LTE_USB_PID).
 LTE_USB_VID="${LTE_USB_VID:-1286}"
 LTE_USB_PID="${LTE_USB_PID:-4e3c}"
+LTE_USB_IDS="${LTE_USB_IDS:-${LTE_USB_VID}:${LTE_USB_PID}}"
 LTE_CONN="${LTE_CONN:-tesla-linux-lte}"
 LTE_WAIT_SEC="${LTE_WAIT_SEC:-15}"
+# Wait for WAN IPv4 after NM/dhclient (live console Health=no_ip needs this).
+LTE_DHCP_WAIT_SEC="${LTE_DHCP_WAIT_SEC:-30}"
+# Optional carrier APN for ModemManager simple-connect (blank = skip).
+LTE_APN="${LTE_APN:-}"
+# Try usb_modeswitch when USB ID matches but no net iface (1=on).
+LTE_MODESWITCH="${LTE_MODESWITCH:-1}"
 NET_SYSFS="${NET_SYSFS:-/sys/class/net}"
 USB_SYSFS="${USB_SYSFS:-/sys/bus/usb/devices}"
 
@@ -136,24 +146,87 @@ is_cdc_ether_iface() {
     [ "$(iface_net_driver "$n")" = "cdc_ether" ]
 }
 
-# Known LTE stick 1286:4e3c (cdc_ether, live name often enx…).
+# True if VID:PID is in LTE_USB_IDS (comma list) or matches LTE_USB_VID:LTE_USB_PID.
+lte_id_allowed() {
+    local id="$1" item
+    [ -n "$id" ] || return 1
+    IFS=',' read -r -a _lte_ids <<< "${LTE_USB_IDS:-${LTE_USB_VID:-1286}:${LTE_USB_PID:-4e3c}}"
+    for item in "${_lte_ids[@]}"; do
+        item="$(printf '%s' "$item" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+        [ -n "$item" ] || continue
+        [ "$id" = "$item" ] && return 0
+    done
+    return 1
+}
+
+# Known LTE stick by USB ID (default 1286:4e3c; live name often enx…).
 is_lte_stick_iface() {
     local n="$1" id
     [ -n "$n" ] || return 1
     id="$(iface_usb_vidpid "$n" 2>/dev/null || true)"
-    [ "$id" = "${LTE_USB_VID:-1286}:${LTE_USB_PID:-4e3c}" ]
+    lte_id_allowed "$id"
 }
 
-# WAN NAT candidate: jack eth, USB cdc_ether, or the 1286:4e3c stick (enx…).
+is_qmi_or_rndis_iface() {
+    local n="$1" drv
+    drv="$(iface_net_driver "$n" 2>/dev/null || true)"
+    case "$drv" in
+        qmi_wwan|cdc_mbim|rndis_host|cdc_ncm|huawei_cdc_ncm) return 0 ;;
+    esac
+    case "$n" in
+        wwan*) return 0 ;;
+    esac
+    return 1
+}
+
+# WAN NAT candidate: WAN_IFACE override, known LTE IDs, any cdc_ether/enx,
+# qmi/rndis/mbim sticks, or jack eth.
 is_wan_uplink_candidate() {
     local n="$1"
+    [ -n "${WAN_IFACE:-}" ] && [ "$n" = "$WAN_IFACE" ] && return 0
     is_lte_stick_iface "$n" && return 0
     is_cdc_ether_iface "$n" && return 0
+    is_qmi_or_rndis_iface "$n" && return 0
     is_wired_iface "$n"
+}
+
+# USB devices matching allowed LTE IDs (may still be mass-storage before modeswitch).
+usb_lte_ids_present() {
+    local d vid pid id
+    for d in "${USB_SYSFS:-/sys/bus/usb/devices}"/*; do
+        [ -f "$d/idVendor" ] && [ -f "$d/idProduct" ] || continue
+        vid="$(tr -d '[:space:]' < "$d/idVendor" | tr 'A-F' 'a-f')"
+        pid="$(tr -d '[:space:]' < "$d/idProduct" | tr 'A-F' 'a-f')"
+        id="${vid}:${pid}"
+        if lte_id_allowed "$id"; then
+            printf '%s\n' "$id"
+            return 0
+        fi
+    done
+    return 1
+}
+
+try_usb_modeswitch() {
+    local id vid pid
+    case "${LTE_MODESWITCH:-1}" in 0|no|false|off|OFF) return 1 ;; esac
+    command -v usb_modeswitch >/dev/null 2>&1 || return 1
+    id="$(usb_lte_ids_present 2>/dev/null || true)"
+    [ -n "$id" ] || return 1
+    vid="${id%%:*}"
+    pid="${id##*:}"
+    log "usb_modeswitch: trying -v $vid -p $pid (stick present; waiting for net iface)"
+    usb_modeswitch -v "0x$vid" -p "0x$pid" -J >/dev/null 2>&1 \
+        || usb_modeswitch -v "0x$vid" -p "0x$pid" >/dev/null 2>&1 \
+        || true
+    return 0
 }
 
 lte_wan_iface() {
     local n
+    if [ -n "${WAN_IFACE:-}" ] && [ -e "${NET_SYSFS:-/sys/class/net}/$WAN_IFACE" ]; then
+        printf '%s\n' "$WAN_IFACE"
+        return 0
+    fi
     for n in "${NET_SYSFS:-/sys/class/net}"/*; do
         [ -e "$n" ] || continue
         n="$(basename "$n")"
@@ -165,6 +238,13 @@ lte_wan_iface() {
         [ -e "$n" ] || continue
         n="$(basename "$n")"
         is_cdc_ether_iface "$n" || continue
+        printf '%s\n' "$n"
+        return 0
+    done
+    for n in "${NET_SYSFS:-/sys/class/net}"/*; do
+        [ -e "$n" ] || continue
+        n="$(basename "$n")"
+        is_qmi_or_rndis_iface "$n" || continue
         printf '%s\n' "$n"
         return 0
     done
@@ -293,6 +373,12 @@ iface_has_wan_ipv4() {
 # Backend owns uplink.kind; this does not invent a mode API.
 wan_uplink_iface() {
     local n ip gw lte
+    if [ -n "${WAN_IFACE:-}" ] && [ -e "${NET_SYSFS:-/sys/class/net}/$WAN_IFACE" ]; then
+        if iface_has_wan_ipv4 "$WAN_IFACE" || is_wan_uplink_candidate "$WAN_IFACE"; then
+            printf '%s\n' "$WAN_IFACE"
+            return 0
+        fi
+    fi
     lte="$(lte_wan_iface 2>/dev/null || true)"
     if [ -n "$lte" ] && iface_has_wan_ipv4 "$lte"; then
         printf '%s\n' "$lte"
@@ -317,24 +403,103 @@ wan_uplink_iface() {
     return 1
 }
 
-# Bring the LTE stick link up so NM/cdc_ether can get a WAN IPv4. Do not assign
-# factory 10.42.1.1. Do not invent Backend uplink pick — accept iface when present.
-ensure_lte_wan() {
-    local n
-    modprobe cdc_ether >/dev/null 2>&1 || true
-    n="$(lte_wan_iface 2>/dev/null || true)"
-    if [ -z "$n" ]; then
-        log "no LTE USB ${LTE_USB_VID:-1286}:${LTE_USB_PID:-4e3c} / cdc_ether yet; eth WAN path unchanged"
-        return 0
-    fi
+# Force DHCP on a detected LTE/USB-net iface (Health=no_ip path).
+# NM profile tesla-linux-lte (LTE_CONN), wait LTE_DHCP_WAIT_SEC, then dhclient/dhcpcd/udhcpc.
+# Optional LTE_APN → mmcli --simple-connect when ModemManager sees a modem.
+ensure_lte_dhcp() {
+    local n="$1" wait="${LTE_DHCP_WAIT_SEC:-30}" i=0 modem
+    [ -n "$n" ] || return 1
     ip link set "$n" up >/dev/null 2>&1 || true
-    if command -v nmcli >/dev/null 2>&1; then
-        nmcli device set "$n" managed yes >/dev/null 2>&1 || true
-        if ! iface_has_wan_ipv4 "$n"; then
-            nmcli device connect "$n" >/dev/null 2>&1 || true
+
+    if [ -n "${LTE_APN:-}" ] && command -v mmcli >/dev/null 2>&1; then
+        modem="$(mmcli -L 2>/dev/null | sed -n 's/.*\/Modem\/\([0-9][0-9]*\).*/\1/p' | head -n1 || true)"
+        if [ -n "$modem" ]; then
+            log "LTE_APN set — mmcli -m $modem --simple-connect=apn=${LTE_APN}"
+            mmcli -m "$modem" --simple-connect="apn=${LTE_APN}" >/dev/null 2>&1 || true
         fi
     fi
-    log "LTE WAN candidate $n (1286:4e3c cdc_ether); NAT when it has a WAN IPv4"
+
+    if command -v nmcli >/dev/null 2>&1; then
+        nmcli device set "$n" managed yes >/dev/null 2>&1 || true
+        if ! nmcli -t -f NAME connection show 2>/dev/null | grep -qx "${LTE_CONN}"; then
+            nmcli connection add type ethernet ifname "$n" con-name "${LTE_CONN}" \
+                ipv4.method auto ipv4.never-default no ipv6.method ignore \
+                connection.autoconnect yes >/dev/null 2>&1 || true
+        else
+            nmcli connection modify "${LTE_CONN}" connection.interface-name "$n" \
+                ipv4.method auto ipv4.never-default no >/dev/null 2>&1 || true
+        fi
+        nmcli device disconnect "$n" >/dev/null 2>&1 || true
+        nmcli connection up "${LTE_CONN}" ifname "$n" >/dev/null 2>&1 \
+            || nmcli device connect "$n" >/dev/null 2>&1 || true
+    fi
+
+    i=0
+    while [ "$i" -lt "$wait" ]; do
+        iface_has_wan_ipv4 "$n" && return 0
+        # Mid-wait DHCP clients if NM has not bound yet.
+        if [ $((i % 5)) -eq 2 ]; then
+            if command -v dhclient >/dev/null 2>&1; then
+                timeout 8 dhclient -v "$n" >/dev/null 2>&1 || true
+            elif command -v dhcpcd >/dev/null 2>&1; then
+                timeout 8 dhcpcd -n "$n" >/dev/null 2>&1 || true
+            elif command -v udhcpc >/dev/null 2>&1; then
+                timeout 8 udhcpc -i "$n" -n -q >/dev/null 2>&1 || true
+            fi
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    iface_has_wan_ipv4 "$n"
+}
+
+# Bring the LTE stick link up so NM/cdc_ether (or qmi/rndis) can get a WAN IPv4.
+# Do not assign factory 10.42.1.1. Do not invent Backend uplink pick.
+# Live console Health=no_ip (enx… detected, blank IPv4) → ensure_lte_dhcp.
+ensure_lte_wan() {
+    local n i usb_id wait="${LTE_WAIT_SEC:-15}"
+    modprobe cdc_ether >/dev/null 2>&1 || true
+    modprobe qmi_wwan >/dev/null 2>&1 || true
+    modprobe rndis_host >/dev/null 2>&1 || true
+    modprobe cdc_mbim >/dev/null 2>&1 || true
+    modprobe cdc_ncm >/dev/null 2>&1 || true
+
+    n="$(lte_wan_iface 2>/dev/null || true)"
+    if [ -z "$n" ]; then
+        usb_id="$(usb_lte_ids_present 2>/dev/null || true)"
+        if [ -n "$usb_id" ]; then
+            log "LTE USB $usb_id present but no net iface yet — trying usb_modeswitch / wait ${wait}s"
+            try_usb_modeswitch || true
+            i=0
+            while [ "$i" -lt "$wait" ]; do
+                n="$(lte_wan_iface 2>/dev/null || true)"
+                [ -n "$n" ] && break
+                i=$((i + 1))
+                sleep 1
+            done
+        fi
+    fi
+
+    if [ -z "$n" ]; then
+        if usb_lte_ids_present >/dev/null 2>&1; then
+            log "WARN: LTE USB id matched (${LTE_USB_IDS}) but no WAN net iface — set WAN_IFACE= or LTE_USB_IDS= in ap.env; NAT skipped (AP may still be up → Tesla: Internet is unreachable)"
+        else
+            log "no LTE USB (${LTE_USB_IDS}) / cdc_ether|qmi|rndis yet; eth WAN path unchanged"
+        fi
+        return 0
+    fi
+
+    if iface_has_wan_ipv4 "$n"; then
+        log "LTE/WAN candidate $n has WAN IPv4; NAT will use it"
+        return 0
+    fi
+
+    log "LTE/WAN $n present but Health=no_ip — running ensure_lte_dhcp (NM auto + wait ${LTE_DHCP_WAIT_SEC:-30}s + dhclient/dhcpcd/udhcpc${LTE_APN:+; LTE_APN=$LTE_APN})"
+    if ensure_lte_dhcp "$n"; then
+        log "LTE/WAN candidate $n has WAN IPv4; NAT will use it"
+    else
+        log "WARN: Health=no_ip on $n after ensure_lte_dhcp — SIM/PIN/APN/carrier? set LTE_APN= in ap.env if ModemManager; AP clients will see Internet unreachable until uplink has IPv4"
+    fi
     return 0
 }
 
@@ -344,7 +509,7 @@ apply_wan_nat() {
     local wan net
     net="$(ap_client_net)"
     if ! wan="$(wan_uplink_iface)"; then
-        log "no eth/LTE WAN uplink yet; NAT not applied (factory $ETH_ADDR / AP $AP_ADDR still documented)"
+        log "WARN: no eth/LTE WAN uplink with IPv4 yet; NAT NOT applied (AP $AP_ADDR may be up — Tesla clients will say Internet is unreachable). Check lsusb, WAN_IFACE=, LTE_USB_IDS=, ip -4 route"
         return 0
     fi
     set_ip_forward
@@ -1062,7 +1227,7 @@ cmd_wan_up() {
     local iface
     mkdir -p "$(dirname "$WAN_RUNTIME")"
     : > "$WAN_RUNTIME"
-    log "WAN rebroadcast: leave station (no dual); AP stays; factory $ETH_ADDR stays; NAT ${AP_ADDR%.*}.0/${AP_PREFIX} out LTE or uplink"
+    log "WAN rebroadcast: leave station (no dual); AP stays; factory $ETH_ADDR stays; NAT ${AP_ADDR%.*}.0/${AP_PREFIX} out LTE/WAN_IFACE or uplink"
     leave_station
     ensure_lte_wan
     cmd_eth_up
@@ -1116,8 +1281,8 @@ cmd_wan_verify() {
             || { echo "FAIL: NAT/masquerade helper missing in $helper" >&2; fail=1; }
         grep -q 'apply_wan_nat' "$helper" \
             || { echo "FAIL: apply_wan_nat missing in $helper" >&2; fail=1; }
-        grep -q '1286:4e3c' "$helper" \
-            || { echo "FAIL: LTE USB 1286:4e3c missing in $helper" >&2; fail=1; }
+        grep -Eq '1286:4e3c|LTE_USB_IDS|WAN_IFACE' "$helper" \
+            || { echo "FAIL: LTE USB id / WAN_IFACE helpers missing in $helper" >&2; fail=1; }
         grep -q 'cdc_ether' "$helper" \
             || { echo "FAIL: cdc_ether LTE uplink missing in $helper" >&2; fail=1; }
         grep -q 'ensure_lte_wan' "$helper" \
