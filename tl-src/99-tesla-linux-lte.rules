@@ -1,0 +1,3 @@
+# Kick LTE DHCP recovery when USB-net LTE ifaces appear (Health=no_ip races).
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="enx*", RUN+="/bin/systemctl --no-block start tesla-linux-lte-dhcp.service"
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="wwan*", RUN+="/bin/systemctl --no-block start tesla-linux-lte-dhcp.service"
