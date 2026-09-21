@@ -48,7 +48,10 @@ LTE_USB_IDS="${LTE_USB_IDS:-${LTE_USB_VID}:${LTE_USB_PID}}"
 LTE_CONN="${LTE_CONN:-tesla-linux-lte}"
 LTE_WAIT_SEC="${LTE_WAIT_SEC:-15}"
 # Wait for WAN IPv4 after NM/dhclient (live console Health=no_ip needs this).
-LTE_DHCP_WAIT_SEC="${LTE_DHCP_WAIT_SEC:-30}"
+LTE_DHCP_WAIT_SEC="${LTE_DHCP_WAIT_SEC:-45}"
+# Outer retries when one wait still leaves Health=no_ip (boot race / slow register).
+LTE_DHCP_RETRIES="${LTE_DHCP_RETRIES:-3}"
+LTE_DHCP_RETRY_GAP_SEC="${LTE_DHCP_RETRY_GAP_SEC:-20}"
 # Optional carrier APN for ModemManager simple-connect (blank = skip).
 LTE_APN="${LTE_APN:-}"
 # Try usb_modeswitch when USB ID matches but no net iface (1=on).
@@ -453,6 +456,54 @@ ensure_lte_dhcp() {
     iface_has_wan_ipv4 "$n"
 }
 
+# Retry ensure_lte_dhcp with gap — modem often registers after first boot oneshot.
+ensure_lte_dhcp_retries() {
+    local n="$1" tries="${LTE_DHCP_RETRIES:-3}" gap="${LTE_DHCP_RETRY_GAP_SEC:-20}" t
+    [ -n "$n" ] || return 1
+    t=1
+    while [ "$t" -le "$tries" ]; do
+        log "ensure_lte_dhcp try $t/$tries on $n (wait ${LTE_DHCP_WAIT_SEC:-45}s)"
+        if ensure_lte_dhcp "$n"; then
+            return 0
+        fi
+        if [ "$t" -lt "$tries" ]; then
+            log "Health=no_ip on $n after try $t — gap ${gap}s then retry"
+            sleep "$gap"
+        fi
+        t=$((t + 1))
+    done
+    return 1
+}
+
+# Operator / udev / timer: force DHCP+NAT without bouncing hostapd.
+# Usage: tesla-linux-wlan lte-dhcp [iface]
+cmd_lte_dhcp() {
+    local n="${1:-}" ok=0
+    if [ -z "$n" ]; then
+        n="$(lte_wan_iface 2>/dev/null || true)"
+    fi
+    if [ -z "$n" ] && [ -n "${WAN_IFACE:-}" ] && [ -e "${NET_SYSFS:-/sys/class/net}/$WAN_IFACE" ]; then
+        n="$WAN_IFACE"
+    fi
+    if [ -z "$n" ]; then
+        log "lte-dhcp: no LTE/WAN iface (set WAN_IFACE=enx… or plug stick)"
+        return 1
+    fi
+    if ! wan_mode_on; then
+        log "lte-dhcp: mode is not wan_rebroadcast — still attempting DHCP on $n"
+    fi
+    log "lte-dhcp: bringing WAN IPv4 on $n then applying NAT"
+    if iface_has_wan_ipv4 "$n" || ensure_lte_dhcp_retries "$n"; then
+        ok=1
+        log "lte-dhcp: $n has WAN IPv4"
+    else
+        log "WARN: lte-dhcp Health=no_ip on $n after ${LTE_DHCP_RETRIES:-3} tries — SIM/PIN/APN/carrier? dhclient -v $n; set LTE_APN= if mmcli sees a modem"
+    fi
+    apply_wan_nat || true
+    cmd_nginx_bind || true
+    [ "$ok" -eq 1 ]
+}
+
 # Bring the LTE stick link up so NM/cdc_ether (or qmi/rndis) can get a WAN IPv4.
 # Do not assign factory 10.42.1.1. Do not invent Backend uplink pick.
 # Live console Health=no_ip (enx… detected, blank IPv4) → ensure_lte_dhcp.
@@ -494,11 +545,11 @@ ensure_lte_wan() {
         return 0
     fi
 
-    log "LTE/WAN $n present but Health=no_ip — running ensure_lte_dhcp (NM auto + wait ${LTE_DHCP_WAIT_SEC:-30}s + dhclient/dhcpcd/udhcpc${LTE_APN:+; LTE_APN=$LTE_APN})"
-    if ensure_lte_dhcp "$n"; then
+    log "LTE/WAN $n present but Health=no_ip — running ensure_lte_dhcp_retries (NM auto + wait ${LTE_DHCP_WAIT_SEC:-45}s × ${LTE_DHCP_RETRIES:-3} + dhclient/dhcpcd/udhcpc${LTE_APN:+; LTE_APN=$LTE_APN})"
+    if ensure_lte_dhcp_retries "$n"; then
         log "LTE/WAN candidate $n has WAN IPv4; NAT will use it"
     else
-        log "WARN: Health=no_ip on $n after ensure_lte_dhcp — SIM/PIN/APN/carrier? set LTE_APN= in ap.env if ModemManager; AP clients will see Internet unreachable until uplink has IPv4"
+        log "WARN: Health=no_ip on $n after ensure_lte_dhcp_retries — SIM/PIN/APN/carrier? set LTE_APN= in ap.env if ModemManager; AP clients will see Internet unreachable until uplink has IPv4"
     fi
     return 0
 }
@@ -2143,6 +2194,7 @@ main() {
         wan-ap|wan-rebroadcast|wan-up) cmd_wan_up ;;
         wan-off|wan-down) cmd_wan_down ;;
         wan-verify) cmd_wan_verify "${1:-}" ;;
+        lte-dhcp) cmd_lte_dhcp "${1:-}" ;;
         selftest) cmd_selftest ;;
         -h|--help|help|'') usage ;;
         *) usage >&2; exit 2 ;;

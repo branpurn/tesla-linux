@@ -1,0 +1,11 @@
+[Unit]
+Description=TeslaLinux LTE DHCP retry (Health=no_ip recovery)
+After=network-online.target tesla-linux-wlan.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tesla-linux-wlan lte-dhcp
+
+[Install]
+WantedBy=multi-user.target
