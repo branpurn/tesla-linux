@@ -371,13 +371,14 @@ iface_has_wan_ipv4() {
     return 1
 }
 
-# Accept eth / enx… / cdc_ether / 1286:4e3c once it has a WAN IPv4 or default route.
-# Prefer LTE stick when it has WAN IP; else default-route iface; else any WAN IPv4.
+# Accept eth / enx… / cdc_ether / 1286:4e3c only once it has a WAN IPv4 (or default-route candidate).
+# Prefer LTE stick when it has WAN IP; else default-route iface; else any wired with WAN IPv4.
+# Never return LTE/WAN_IFACE without IPv4 — that caused NAT with Health=no_ip (Tesla: unreachable).
 # Backend owns uplink.kind; this does not invent a mode API.
 wan_uplink_iface() {
     local n ip gw lte
     if [ -n "${WAN_IFACE:-}" ] && [ -e "${NET_SYSFS:-/sys/class/net}/$WAN_IFACE" ]; then
-        if iface_has_wan_ipv4 "$WAN_IFACE" || is_wan_uplink_candidate "$WAN_IFACE"; then
+        if iface_has_wan_ipv4 "$WAN_IFACE"; then
             printf '%s\n' "$WAN_IFACE"
             return 0
         fi
@@ -391,10 +392,6 @@ wan_uplink_iface() {
         | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
     if [ -n "$gw" ] && is_wan_uplink_candidate "$gw"; then
         printf '%s\n' "$gw"
-        return 0
-    fi
-    if [ -n "$lte" ] && is_wan_uplink_candidate "$lte"; then
-        printf '%s\n' "$lte"
         return 0
     fi
     while IFS= read -r n; do
@@ -1737,6 +1734,30 @@ cmd_selftest() {
     is_wan_uplink_candidate() { [ "$1" = "enxac0033aa9633" ] || [ "$1" = "eth0" ]; }
     out="$(wan_uplink_iface)"
     [ "$out" = "enxac0033aa9633" ] || { echo "FAIL: wan_uplink_iface did not prefer LTE $out"; fail=1; }
+    # LTE present but Health=no_ip: must NOT select LTE (no NAT without WAN IPv4).
+    iface_ipv4s() {
+        case "$1" in
+            wlan0) printf '%s\n' 10.42.0.1 ;;
+            eth0) printf '%s\n' 10.42.1.1 203.0.113.8 ;;
+            enxac0033aa9633) ;; # no WAN IPv4
+            *) ;;
+        esac
+    }
+    out="$(wan_uplink_iface || true)"
+    [ "$out" = "eth0" ] || { echo "FAIL: wan_uplink_iface selected LTE without IPv4 ($out)"; fail=1; }
+    WAN_IFACE=enxac0033aa9633
+    out="$(wan_uplink_iface || true)"
+    [ "$out" = "eth0" ] || { echo "FAIL: WAN_IFACE override without IPv4 still selected ($out)"; fail=1; }
+    unset WAN_IFACE
+    # Restore LTE-with-IPv4 stubs for subsequent collect_bind_ips checks.
+    iface_ipv4s() {
+        case "$1" in
+            wlan0) printf '%s\n' 10.42.0.1 ;;
+            eth0) printf '%s\n' 10.42.1.1 ;;
+            enxac0033aa9633) printf '%s\n' 10.64.0.2 ;;
+            *) ;;
+        esac
+    }
     out="$(collect_bind_ips wlan0)"
     echo "$out" | grep -qx '10.64.0.2' && { echo "FAIL: WAN collect bound LTE DHCP"; fail=1; }
     echo "$out" | grep -qx '10.42.0.1' || { echo "FAIL: WAN collect missing AP with LTE"; fail=1; }
