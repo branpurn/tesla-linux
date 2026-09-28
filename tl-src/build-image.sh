@@ -365,9 +365,24 @@ if grep -Eiq '^Before=.*nginx\.service' "$MNT/etc/systemd/system/tesla-linux-wla
   die "wlan still Before=nginx.service (deadlock with nginx After=wlan)"
 fi
 if awk '/^reload_nginx\(\)/,/^}/' "$MNT/usr/local/sbin/tesla-linux-wlan" \
-      | grep -Eq 'systemctl[[:space:]]+(restart|start)[[:space:]]+nginx'; then
+      | grep -Eq 'systemctl[[:space:]]+restart[[:space:]]+nginx'; then
   die "reload_nginx still systemctl restart nginx"
 fi
+if awk '/^reload_nginx\(\)/,/^}/' "$MNT/usr/local/sbin/tesla-linux-wlan" \
+      | grep -q 'systemctl start nginx'; then
+  awk '/^reload_nginx\(\)/,/^}/' "$MNT/usr/local/sbin/tesla-linux-wlan" | grep -q 'tesla-linux-wlan' \
+    || die "reload_nginx systemctl start nginx is not gated on wlan-active"
+fi
+grep -q 'ExecStartPre=/usr/local/sbin/tesla-linux-wlan nginx-bind' \
+     "$MNT/etc/systemd/system/nginx.service.d/tl-after-wlan.conf" \
+  || die "nginx drop-in missing ExecStartPre nginx-bind"
+grep -q 'ExecStartPost=.*tesla-linux-wlan nginx-bind' \
+     "$MNT/etc/systemd/system/tesla-linux-wlan.service" \
+  || die "wlan missing ExecStartPost nginx-bind"
+grep -q 'listen 10.42.0.1' <<<"$(grep -n wait_ap_ipv4 "$MNT/usr/local/sbin/tesla-linux-wlan" || true)" || true
+grep -q '^wait_ap_ipv4()' "$MNT/usr/local/sbin/tesla-linux-wlan" \
+  || die "wlan missing wait_ap_ipv4"
+
 if grep -Eiq '^Before=.*nginx\.service' "$MNT/etc/systemd/system/tesla-linux-firstboot.service"; then
   die "firstboot still Before=nginx.service (deadlock with nginx After=firstboot)"
 fi
