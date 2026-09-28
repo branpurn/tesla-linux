@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry TeslaLinux LTE DHCP after boot / periodically
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=3min
+AccuracySec=30s
+Unit=tesla-linux-lte-dhcp.service
+
+[Install]
+WantedBy=timers.target

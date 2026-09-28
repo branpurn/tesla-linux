@@ -157,3 +157,20 @@ Default remains station. With `mode.json` absent or `station`, `boot` / `maybe-a
 
 - WAN mode: **10.42.0.1** and factory **10.42.1.1** only (not the WAN DHCP IPv4 on eth or LTE).
 - Station mode: existing AP / station / ethernet bind behavior (never `0.0.0.0`).
+
+## Health=no_ip after tip image (ensure_lte_dhcp present)
+
+If the console shows Detected yes / blank IPv4 / Health **no_ip** on an `enx…` stick after flashing a tip that already includes `ensure_lte_dhcp`, the modem likely got **no DHCP offer** (SIM/PIN/APN/carrier) or registered after the first boot wait.
+
+### Quick recovery (parked)
+
+```bash
+echo 'WAN_IFACE=enxac0033aa9633' | sudo tee -a /etc/tesla-linux/ap.env
+# if mmcli -L shows a modem and carrier needs APN:
+# echo 'LTE_APN=your.carrier.apn' | sudo tee -a /etc/tesla-linux/ap.env
+sudo tesla-linux-wlan lte-dhcp
+# or: sudo tesla-linux-wlan lte-dhcp enxac0033aa9633
+sudo dhclient -v enxac0033aa9633   # no DHCPOFFER → SIM/carrier, not VID:PID
+```
+
+Optional units/udev: `tesla-linux-lte-dhcp.timer` (OnBootSec=90s) and `99-tesla-linux-lte.rules` re-kick `lte-dhcp` when `enx*`/`wwan*` appear.
