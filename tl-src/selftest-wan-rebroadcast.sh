@@ -78,6 +78,19 @@ else
     pass "write_nginx_servers never listen 0.0.0.0"
 fi
 
+grep -q '^wait_ap_ipv4()' "$HELPER" && pass "helper wait_ap_ipv4 (AP listen race)" \
+    || bad "helper missing wait_ap_ipv4"
+grep -q 'wait_ap_ipv4' "$HELPER" && pass "helper calls wait_ap_ipv4 before bind" \
+    || bad "helper never calls wait_ap_ipv4"
+WLAN_SVC="$HERE/tesla-linux-wlan.service"
+grep -q 'ExecStartPost=.*tesla-linux-wlan nginx-bind' "$WLAN_SVC" \
+    && pass "wlan.service ExecStartPost nginx-bind" \
+    || bad "wlan.service missing ExecStartPost nginx-bind"
+grep -q 'ExecStartPre=/usr/local/sbin/tesla-linux-wlan nginx-bind' "$INSTALL" \
+    && pass "install seeds nginx ExecStartPre nginx-bind" \
+    || bad "install missing nginx ExecStartPre nginx-bind"
+
+
 TREE="$(mktemp -d /tmp/tl-wan-tree.XXXXXX)"
 cleanup() { rm -rf "$TREE"; }
 trap cleanup EXIT
@@ -89,9 +102,16 @@ plant() {
              "$t/etc/tesla-linux" \
              "$t/etc/nginx" \
              "$t/etc/systemd/system" \
+             "$t/etc/systemd/system/timers.target.wants" \
+             "$t/etc/udev/rules.d" \
              "$t/etc/NetworkManager/dispatcher.d"
     cp "$HELPER" "$t/usr/local/sbin/tesla-linux-wlan"
     chmod +x "$t/usr/local/sbin/tesla-linux-wlan"
+    cp "$HERE/99-tesla-linux-lte.rules" "$t/etc/udev/rules.d/"
+    cp "$HERE/tesla-linux-lte-dhcp.service" "$HERE/tesla-linux-lte-dhcp.timer" \
+        "$t/etc/systemd/system/"
+    ln -sfn /etc/systemd/system/tesla-linux-lte-dhcp.timer \
+        "$t/etc/systemd/system/timers.target.wants/tesla-linux-lte-dhcp.timer"
     cat > "$t/etc/tesla-linux/ap.env" <<'EOF'
 AP_SSID=TeslaLinux
 AP_PSK=teslalinux
@@ -109,6 +129,17 @@ After=NetworkManager.service tesla-linux-firstboot.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/tesla-linux-wlan boot
+ExecStartPost=/usr/local/sbin/tesla-linux-wlan nginx-bind
+EOF
+    mkdir -p "$t/etc/systemd/system/nginx.service.d"
+    cat > "$t/etc/systemd/system/nginx.service.d/tl-after-wlan.conf" <<'EOF'
+[Unit]
+After=tesla-linux-wlan.service
+Wants=tesla-linux-wlan.service
+[Service]
+ExecStartPre=/usr/local/sbin/tesla-linux-wlan nginx-bind
+Restart=on-failure
+RestartSec=2
 EOF
 }
 
