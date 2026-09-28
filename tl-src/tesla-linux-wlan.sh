@@ -745,6 +745,33 @@ wait_station_ipv4() {
     return 1
 }
 
+# AP addr must be on the wifi iface before nginx listen — hostapd_running alone
+# is not enough (bind race → nginx master fails → stays refused; reload_nginx
+# never systemctl-starts during the wlan oneshot).
+wait_ap_ipv4() {
+    local iface="${1:-}" i
+    if [ -z "$iface" ]; then
+        iface="$(wifi_iface 2>/dev/null || true)"
+    fi
+    [ -n "$iface" ] || return 1
+    is_bindable_ipv4 "${AP_ADDR:-}" || return 1
+    if iface_ipv4s "$iface" | grep -qx "$AP_ADDR"; then
+        printf '%s\n' "$AP_ADDR"
+        return 0
+    fi
+    i=0
+    while [ "$i" -lt "${WAIT_SEC:-20}" ]; do
+        if iface_ipv4s "$iface" | grep -qx "$AP_ADDR"; then
+            printf '%s\n' "$AP_ADDR"
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    log "AP $AP_ADDR not on $iface within ${WAIT_SEC}s (nginx may miss http://$AP_ADDR/)"
+    return 1
+}
+
 
 hostapd_running() {
     [ -f "$HOSTAPD_PID" ] && kill -0 "$(cat "$HOSTAPD_PID" 2>/dev/null)" 2>/dev/null
@@ -920,8 +947,16 @@ collect_bind_ips() {
             _emit_ip "$ip"
         done < <(iface_ipv4s "$n")
     done < <(wired_ifaces)
+    # Emit AP_ADDR only when hostapd is up AND the address is (or was just
+    # waited onto) the wifi iface. Avoid listen-before-addr nginx bind fails.
     if hostapd_running && is_bindable_ipv4 "$AP_ADDR"; then
-        _emit_ip "$AP_ADDR"
+        local _wif
+        _wif="$(wifi_iface 2>/dev/null || true)"
+        if [ -n "$_wif" ] && iface_ipv4s "$_wif" | grep -qx "$AP_ADDR"; then
+            _emit_ip "$AP_ADDR"
+        elif [ -z "$_wif" ]; then
+            _emit_ip "$AP_ADDR"
+        fi
     fi
     # Factory ethernet static (10.42.1.1) when assigned — never 0.0.0.0.
     if is_bindable_ipv4 "$ETH_ADDR"; then
@@ -1023,11 +1058,14 @@ EOF
 }
 
 reload_nginx() {
-    # Listen files are already written. Never systemctl-start or systemctl-restart
-    # nginx from this oneshot — that waits for nginx, nginx After=wlan waits here.
-    # If nginx is not active yet, systemd starts it after this unit (After=/Wants=).
-    # Invalid/empty/EOF TLS include is fail-soft: neutralize so nginx -t / a later
-    # systemd start still loads HTTP on the current eth + station IPv4s.
+    # Listen files are already written.
+    # Never systemctl-start nginx from inside the wlan oneshot *before* it is
+    # active — nginx After=wlan waits on this oneshot (deadlock).
+    # Once tesla-linux-wlan is already active (RemainAfterExit), starting a
+    # failed/inactive nginx is safe and required: a first-boot bind race used
+    # to leave nginx failed while AP/DHCP/NAT kept working → ERR_CONNECTION_REFUSED.
+    # Invalid/empty/EOF TLS include is fail-soft: neutralize so nginx -t / start
+    # still loads HTTP on the current eth + AP/station IPv4s.
     if ! nginx_https_include_ok; then
         log "HTTPS snippet invalid/EOF; fail-soft HTTP-only"
         neutralize_nginx_https
@@ -1035,15 +1073,34 @@ reload_nginx() {
     if ! command -v nginx >/dev/null 2>&1; then
         return 0
     fi
-    if ! systemctl is-active --quiet nginx 2>/dev/null; then
+    if systemctl is-active --quiet nginx 2>/dev/null; then
+        if nginx -t >/dev/null 2>&1; then
+            nginx -s reload 2>/dev/null || true
+            return 0
+        fi
+        neutralize_nginx_https
+        nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null || true
         return 0
     fi
-    if nginx -t >/dev/null 2>&1; then
-        nginx -s reload 2>/dev/null || true
-        return 0
+    # nginx inactive: do NOT systemctl-start here during nginx ExecStartPre
+    # (wlan is already active then → nested start deadlocks). Only recover when
+    # nginx is *failed* (first-boot listen/bind race) and wlan is already active,
+    # or when TL_NGINX_MAY_START=1 (tests / explicit operator kick).
+    if systemctl is-failed --quiet nginx 2>/dev/null \
+       || [ "${TL_NGINX_MAY_START:-0}" = 1 ]; then
+        if systemctl is-active --quiet tesla-linux-wlan 2>/dev/null \
+           || [ "${TL_NGINX_MAY_START:-0}" = 1 ]; then
+            if ! nginx -t >/dev/null 2>&1; then
+                neutralize_nginx_https
+            fi
+            if nginx -t >/dev/null 2>&1; then
+                log "nginx failed/inactive; starting after listen rewrite"
+                systemctl reset-failed nginx 2>/dev/null || true
+                systemctl start nginx 2>/dev/null || true
+            fi
+        fi
     fi
-    neutralize_nginx_https
-    nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null || true
+    return 0
 }
 
 cmd_nginx_bind() {
@@ -1053,6 +1110,13 @@ cmd_nginx_bind() {
     # Never listen 0.0.0.0 — wan-verify fails that; bind the concrete station IPv4 instead.
     if [ -n "$iface" ] && ! wan_mode_on && station_associated "$iface" 2>/dev/null; then
         wait_station_ipv4 "$iface" >/dev/null || true
+    fi
+    # Factory/AP / wan-ap: wait until AP_ADDR is on the wifi iface before listen.
+    # Install seeds an empty tl-http-server.conf; without this wait, nginx can
+    # start (or fail-bind) without listen 10.42.0.1:80 → ERR_CONNECTION_REFUSED
+    # while TeslaLinux AP + DHCP + NAT still look healthy.
+    if hostapd_running && [ -n "$iface" ]; then
+        wait_ap_ipv4 "$iface" >/dev/null || true
     fi
     ips="$(collect_bind_ips "$iface" || true)"
     write_nginx_servers "$ips"
@@ -1495,20 +1559,28 @@ cmd_selftest() {
     : > "$ng_log"
     systemctl() {
         if [ "${1:-}" = is-active ] && [ "${2:-}" = --quiet ]; then
-            [ "${MOCK_NGINX_ACTIVE:-0}" = 1 ]
+            case "${3:-}" in
+                nginx) [ "${MOCK_NGINX_ACTIVE:-0}" = 1 ]; return $? ;;
+                tesla-linux-wlan) [ "${MOCK_WLAN_ACTIVE:-0}" = 1 ]; return $? ;;
+                *) return 1 ;;
+            esac
+        fi
+        if [ "${1:-}" = is-failed ] && [ "${2:-}" = --quiet ]; then
+            [ "${3:-}" = nginx ] && [ "${MOCK_NGINX_FAILED:-0}" = 1 ]
             return $?
         fi
         echo "systemctl $*" >> "$ng_log"
-        return 1
+        return 0
     }
     nginx() {
         echo "nginx $*" >> "$ng_log"
         return 0
     }
     MOCK_NGINX_ACTIVE=0
+    MOCK_WLAN_ACTIVE=0
     reload_nginx || { echo "FAIL: reload_nginx inactive returned non-zero"; fail=1; }
     if grep -Eq 'restart|start | -s reload|reload nginx' "$ng_log"; then
-        echo "FAIL: reload_nginx acted while nginx inactive"; fail=1
+        echo "FAIL: reload_nginx acted while nginx inactive and wlan inactive"; fail=1
     fi
     MOCK_NGINX_ACTIVE=1
     : > "$ng_log"
@@ -1516,10 +1588,36 @@ cmd_selftest() {
     grep -q -- '-t' "$ng_log" || { echo "FAIL: no nginx -t when active"; fail=1; }
     grep -q -- '-s reload' "$ng_log" || { echo "FAIL: no nginx -s reload when active"; fail=1; }
     if grep -E 'systemctl' "$ng_log"; then
-        echo "FAIL: reload_nginx used systemctl start/restart"; fail=1
+        echo "FAIL: reload_nginx used systemctl start/restart while nginx active"; fail=1
     fi
+    # wlan active + nginx merely inactive → do NOT start (ExecStartPre safe)
+    MOCK_NGINX_ACTIVE=0
+    MOCK_WLAN_ACTIVE=1
+    MOCK_NGINX_FAILED=0
+    : > "$ng_log"
+    reload_nginx || { echo "FAIL: reload_nginx inactive+wlan-active returned non-zero"; fail=1; }
+    if grep -q 'systemctl start nginx' "$ng_log"; then
+        echo "FAIL: reload_nginx started nginx while merely inactive (ExecStartPre deadlock)"; fail=1
+    fi
+    # wlan active + nginx failed → systemctl start (recover bind race)
+    MOCK_NGINX_FAILED=1
+    : > "$ng_log"
+    reload_nginx || { echo "FAIL: reload_nginx failed-recover returned non-zero"; fail=1; }
+    grep -q 'systemctl start nginx' "$ng_log" \
+        || { echo "FAIL: reload_nginx did not start nginx when failed+wlan-active"; fail=1; }
+    if grep -q 'systemctl restart' "$ng_log"; then
+        echo "FAIL: reload_nginx used systemctl restart"; fail=1
+    fi
+    # Explicit operator/test kick
+    MOCK_NGINX_FAILED=0
+    TL_NGINX_MAY_START=1
+    : > "$ng_log"
+    reload_nginx || { echo "FAIL: reload_nginx TL_NGINX_MAY_START returned non-zero"; fail=1; }
+    grep -q 'systemctl start nginx' "$ng_log" \
+        || { echo "FAIL: TL_NGINX_MAY_START did not start nginx"; fail=1; }
+    unset TL_NGINX_MAY_START
     unset -f systemctl nginx
-    unset MOCK_NGINX_ACTIVE
+    unset MOCK_NGINX_ACTIVE MOCK_WLAN_ACTIVE MOCK_NGINX_FAILED
 
     # JUMP LIVE: truncated / empty HTTPS include must not fail nginx -t or HTTP reload.
     NGINX_HTTP="$dir/failsoft-http.conf"
@@ -1534,7 +1632,14 @@ cmd_selftest() {
     : > "$ng_log"
     systemctl() {
         if [ "${1:-}" = is-active ] && [ "${2:-}" = --quiet ]; then
-            [ "${MOCK_NGINX_ACTIVE:-0}" = 1 ]
+            case "${3:-}" in
+                nginx) [ "${MOCK_NGINX_ACTIVE:-0}" = 1 ]; return $? ;;
+                tesla-linux-wlan) [ "${MOCK_WLAN_ACTIVE:-0}" = 1 ]; return $? ;;
+                *) return 1 ;;
+            esac
+        fi
+        if [ "${1:-}" = is-failed ] && [ "${2:-}" = --quiet ]; then
+            [ "${3:-}" = nginx ] && [ "${MOCK_NGINX_FAILED:-0}" = 1 ]
             return $?
         fi
         echo "systemctl $*" >> "$ng_log"
@@ -1786,6 +1891,34 @@ cmd_selftest() {
     write_nginx_servers "$(collect_bind_ips wlan0)"
     grep -q 'listen 10.42.0.1:80;' "$dir/wan-http.conf" || { echo "FAIL: WAN nginx AP listen"; fail=1; }
     grep -q 'listen 10.42.1.1:80;' "$dir/wan-http.conf" || { echo "FAIL: WAN nginx factory eth listen"; fail=1; }
+    # Durable AP product path: after wan-up nginx-bind, conf must listen on factory AP.
+    NGINX_HTTP="$dir/wan-up-http.conf"
+    NGINX_HTTPS="$dir/wan-up-https.conf"
+    : > "$NGINX_HTTPS"
+    : > "$NGINX_HTTP"
+    wifi_iface() { printf '%s\n' wlan0; }
+    wired_ifaces() { printf '%s\n' eth0; }
+    iface_ipv4s() {
+        case "$1" in
+            wlan0) printf '%s\n' 10.42.0.1 ;;
+            eth0) printf '%s\n' 10.42.1.1 ;;
+            *) ;;
+        esac
+    }
+    hostapd_running() { return 0; }
+    wait_ap_ipv4() { printf '%s\n' 10.42.0.1; return 0; }
+    WAN_REBROADCAST=1
+    WAN_RUNTIME="$dir/wan-up-runtime"
+    : > "$WAN_RUNTIME"
+    cmd_nginx_bind || { echo "FAIL: nginx-bind after wan-up returned non-zero"; fail=1; }
+    grep -q 'listen 10.42.0.1:80;' "$NGINX_HTTP" \
+        || { echo "FAIL: after wan-up nginx-bind missing listen 10.42.0.1:80"; fail=1; }
+    grep -q 'listen 10.42.1.1:80;' "$NGINX_HTTP" \
+        || { echo "FAIL: after wan-up nginx-bind missing listen 10.42.1.1:80"; fail=1; }
+    grep -Eq '0\.0\.0\.0|listen 80;|listen \[::\]' "$NGINX_HTTP" \
+        && { echo "FAIL: after wan-up world listen"; fail=1; }
+    grep -q '^wait_ap_ipv4()' "$0" || { echo "FAIL: wait_ap_ipv4 missing in helper"; fail=1; }
+
     grep -q '203.0.113.8' "$dir/wan-http.conf" && { echo "FAIL: WAN nginx WAN DHCP listen"; fail=1; }
     grep -Eq '0\.0\.0\.0|listen 80;|listen \[::\]' "$dir/wan-http.conf" && { echo "FAIL: WAN world listen"; fail=1; }
 

@@ -906,9 +906,15 @@ verify_autologin_hdmi() {
         echo "ERROR: tesla-linux-wlan must not Before=nginx.service (deadlock with nginx After=wlan)" >&2
         exit 1
     fi
-    if awk '/^reload_nginx\(\)/,/^}/' "$wlan_bin" | grep -Eq 'systemctl[[:space:]]+(restart|start)[[:space:]]+nginx'; then
-        echo "ERROR: reload_nginx still systemctl restart/start nginx (deadlock with nginx After=wlan)" >&2
+    # restart always deadlocks / races; start is allowed only when gated on
+    # wlan-already-active (RemainAfterExit) or TL_NGINX_MAY_START — see reload_nginx.
+    if awk '/^reload_nginx\(\)/,/^}/' "$wlan_bin" | grep -Eq 'systemctl[[:space:]]+restart[[:space:]]+nginx'; then
+        echo "ERROR: reload_nginx still systemctl restart nginx (deadlock with nginx After=wlan)" >&2
         exit 1
+    fi
+    if awk '/^reload_nginx\(\)/,/^}/' "$wlan_bin" | grep -q 'systemctl start nginx'; then
+        awk '/^reload_nginx\(\)/,/^}/' "$wlan_bin" | grep -q 'tesla-linux-wlan' \
+            || { echo "ERROR: reload_nginx systemctl start nginx is not gated on wlan-active" >&2; exit 1; }
     fi
 
     [ -L "$r/etc/systemd/system/graphical.target.wants/tesla-linux-xorg.service" ] \
@@ -1014,6 +1020,15 @@ verify_wan_rebroadcast() {
         echo "ERROR: tesla-linux-wlan write_nginx_servers would bind nginx to 0.0.0.0" >&2
         exit 1
     fi
+    grep -q '^wait_ap_ipv4()' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing wait_ap_ipv4 (AP listen race)" >&2; exit 1; }
+    grep -q 'wait_ap_ipv4' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan never calls wait_ap_ipv4" >&2; exit 1; }
+    # reload_nginx may systemctl-start nginx only after wlan is already active.
+    if awk '/^reload_nginx\(\)/,/^}/' "$wlan_bin" | grep -Eq 'systemctl[[:space:]]+restart[[:space:]]+nginx'; then
+        echo "ERROR: reload_nginx still systemctl restart nginx (deadlock risk)" >&2
+        exit 1
+    fi
 
     if grep -q '^WAN_REBROADCAST=1' "$apenv" \
        || { [ -f "${r}/etc/tesla-linux/mode.json" ] && grep -q 'wan_rebroadcast' "${r}/etc/tesla-linux/mode.json"; }; then
@@ -1041,6 +1056,21 @@ verify_wan_rebroadcast() {
             echo "ERROR: tesla-linux-wlan must not After/Requires xorg or desktop" >&2
             exit 1
         fi
+        grep -q 'ExecStartPost=.*tesla-linux-wlan nginx-bind' "$wlan_svc" \
+            || { echo "ERROR: tesla-linux-wlan.service missing ExecStartPost nginx-bind" >&2; exit 1; }
+    fi
+    nginx_dropin=""
+    if [ -n "$r" ]; then
+        nginx_dropin="$r/etc/systemd/system/nginx.service.d/tl-after-wlan.conf"
+    else
+        nginx_dropin="/etc/systemd/system/nginx.service.d/tl-after-wlan.conf"
+        [ -f "$nginx_dropin" ] || nginx_dropin=""
+    fi
+    if [ -n "$nginx_dropin" ] && [ -f "$nginx_dropin" ]; then
+        grep -q 'ExecStartPre=/usr/local/sbin/tesla-linux-wlan nginx-bind' "$nginx_dropin" \
+            || { echo "ERROR: nginx drop-in missing ExecStartPre nginx-bind ($nginx_dropin)" >&2; exit 1; }
+        grep -q '^Restart=on-failure$' "$nginx_dropin" \
+            || { echo "ERROR: nginx drop-in missing Restart=on-failure" >&2; exit 1; }
     fi
 
 
@@ -1382,6 +1412,16 @@ cat > /etc/systemd/system/nginx.service.d/tl-after-wlan.conf <<'EOF'
 [Unit]
 After=tesla-linux-wlan.service tesla-linux-wlan-api.service tesla-linux-firstboot.service
 Wants=tesla-linux-wlan.service tesla-linux-wlan-api.service
+[Service]
+# Re-run nginx-bind immediately before master start so listen files match the
+# live AP/station/ethernet IPv4s. Install seeds an empty tl-http-server.conf;
+# wlan oneshot writes listens, but a bind race or failed first start used to
+# leave http://10.42.0.1/ ERR_CONNECTION_REFUSED while AP+DHCP+NAT looked fine.
+# ExecStartPre runs after After=wlan is satisfied — no systemctl-start deadlock.
+ExecStartPre=/usr/local/sbin/tesla-linux-wlan nginx-bind
+# Recover from a first-boot listen/bind failure without a manual bounce.
+Restart=on-failure
+RestartSec=2
 EOF
 
 # --- tunables (edit here, not in the units) ----------------------------------

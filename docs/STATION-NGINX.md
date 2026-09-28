@@ -17,7 +17,7 @@ Pi joined home Wi‑Fi as station: DHCP **192.168.1.199**. Car browser → `http
 ```bash
 cd /path/to/tesla-linux
 patch -p1 < tl-src/patches/station-nginx-bind-ipv4.patch
-sudo install -m 0755 tl-src/tesla-linux-wlan.sh /usr/local/bin/tesla-linux-wlan   # or your install path
+sudo install -m 0755 tl-src/tesla-linux-wlan.sh /usr/local/sbin/tesla-linux-wlan   # or your install path
 sudo tesla-linux-wlan nginx-bind
 curl -sS -o /dev/null -w '%{http_code}\n' http://192.168.1.199/
 ```
