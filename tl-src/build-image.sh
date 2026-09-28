@@ -68,6 +68,11 @@ loop_part() {
 
 ensure_loop_parts() {
   local loop="$1" i
+  # Prefer native losetup -P partition nodes. Calling kpartx while those exist
+  # makes resize2fs see "Device or resource busy" on ${loop}pN.
+  if loop_part "$loop" 1 >/dev/null && loop_part "$loop" 2 >/dev/null; then
+    return 0
+  fi
   for i in $(seq 1 20); do
     partx -u "$loop" 2>/dev/null || true
     kpartx -u "$loop" 2>/dev/null || true
@@ -97,7 +102,7 @@ mount "$ROOTDEV" "$MNT"
 mkdir -p "$MNT/boot/firmware"
 mount "$BOOTDEV" "$MNT/boot/firmware"
 for m in dev dev/pts proc sys run; do mount --bind "/$m" "$MNT/$m"; done
-cp /etc/resolv.conf "$MNT/etc/resolv.conf"
+rm -f "$MNT/etc/resolv.conf"; cp /etc/resolv.conf "$MNT/etc/resolv.conf"
 # qemu-user chroot: binfmt F-flag uses the host binary; copy anyway for non-F.
 if [ -x /usr/bin/qemu-aarch64-static ]; then
   mkdir -p "$MNT/usr/bin"
