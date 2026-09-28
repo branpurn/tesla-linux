@@ -102,7 +102,7 @@ mount "$ROOTDEV" "$MNT"
 mkdir -p "$MNT/boot/firmware"
 mount "$BOOTDEV" "$MNT/boot/firmware"
 for m in dev dev/pts proc sys run; do mount --bind "/$m" "$MNT/$m"; done
-rm -f "$MNT/etc/resolv.conf"; cp /etc/resolv.conf "$MNT/etc/resolv.conf"
+rm -f "$MNT/etc/resolv.conf"; cp -L /etc/resolv.conf "$MNT/etc/resolv.conf" 2>/dev/null || cp /etc/resolv.conf "$MNT/etc/resolv.conf"
 # qemu-user chroot: binfmt F-flag uses the host binary; copy anyway for non-F.
 if [ -x /usr/bin/qemu-aarch64-static ]; then
   mkdir -p "$MNT/usr/bin"
@@ -115,6 +115,8 @@ mkdir -p "$MNT/tmp/tl-src"
 cp "$SRC"/install-tesla-linux.sh "$SRC"/ta_*.py "$SRC"/*.html \
    "$SRC"/tesla-linux-wlan.sh "$SRC"/tesla-linux-wlan.service \
    "$SRC"/tesla-linux-wlan-api.service "$SRC"/ap.env \
+   "$SRC"/99-tesla-linux-lte.rules \
+   "$SRC"/tesla-linux-lte-dhcp.service "$SRC"/tesla-linux-lte-dhcp.timer \
    "$MNT/tmp/tl-src/" 2>/dev/null || true
 # Stage authorized_keys for teslalinux (never print the key). Not ubuntu — ubuntu is DOA.
 if [ -f "$SRC/authorized_keys" ]; then
