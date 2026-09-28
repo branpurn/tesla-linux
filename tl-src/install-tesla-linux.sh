@@ -1069,7 +1069,8 @@ verify_wan_rebroadcast() {
     # When units are installed under /etc (chroot or live), timer must be wanted.
     case "$lte_timer" in
         /etc/systemd/system/*|"$r"/etc/systemd/system/*)
-            [ -e "$lte_timer_want" ] \
+            # -L: symlink target is absolute /etc/... inside the image; -e from host follows host path.
+            { [ -L "$lte_timer_want" ] || [ -e "$lte_timer_want" ]; } \
                 || { echo "ERROR: tesla-linux-lte-dhcp.timer not enabled into timers.target.wants" >&2; exit 1; }
             ;;
     esac
