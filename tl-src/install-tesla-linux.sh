@@ -27,7 +27,7 @@ xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar ristrett
 xubuntu-wallpapers \
 xarchiver thunar-archive-plugin 7zip unzip \
 pipewire pipewire-pulse pipewire-audio wireplumber pulseaudio-utils gstreamer1.0-pipewire \
-nginx openssl network-manager hostapd iw dnsmasq rfkill firefox"
+nginx openssl network-manager hostapd iw dnsmasq rfkill isc-dhcp-client firefox"
 
 MOZILLA_APT_KEY_URL=https://packages.mozilla.org/apt/repo-signing-key.gpg
 MOZILLA_APT_FP=35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3
@@ -1043,6 +1043,41 @@ verify_wan_rebroadcast() {
         fi
     fi
 
+
+    # LTE DHCP retry units must land in the image (Health=no_ip recovery).
+    if [ -n "$r" ]; then
+        udev_lte="$r/etc/udev/rules.d/99-tesla-linux-lte.rules"
+        lte_svc="$r/etc/systemd/system/tesla-linux-lte-dhcp.service"
+        lte_timer="$r/etc/systemd/system/tesla-linux-lte-dhcp.timer"
+        lte_timer_want="$r/etc/systemd/system/timers.target.wants/tesla-linux-lte-dhcp.timer"
+    else
+        udev_lte="/etc/udev/rules.d/99-tesla-linux-lte.rules"
+        [ -f "$udev_lte" ] || udev_lte="$(cd "$(dirname "$0")" && pwd)/99-tesla-linux-lte.rules"
+        lte_svc="/etc/systemd/system/tesla-linux-lte-dhcp.service"
+        [ -f "$lte_svc" ] || lte_svc="$(cd "$(dirname "$0")" && pwd)/tesla-linux-lte-dhcp.service"
+        lte_timer="/etc/systemd/system/tesla-linux-lte-dhcp.timer"
+        [ -f "$lte_timer" ] || lte_timer="$(cd "$(dirname "$0")" && pwd)/tesla-linux-lte-dhcp.timer"
+        lte_timer_want="/etc/systemd/system/timers.target.wants/tesla-linux-lte-dhcp.timer"
+    fi
+    [ -f "$udev_lte" ] || { echo "ERROR: missing 99-tesla-linux-lte.rules ($udev_lte)" >&2; exit 1; }
+    [ -f "$lte_svc" ] || { echo "ERROR: missing tesla-linux-lte-dhcp.service ($lte_svc)" >&2; exit 1; }
+    [ -f "$lte_timer" ] || { echo "ERROR: missing tesla-linux-lte-dhcp.timer ($lte_timer)" >&2; exit 1; }
+    grep -q 'ExecStart=/usr/local/sbin/tesla-linux-wlan lte-dhcp' "$lte_svc" \
+        || { echo "ERROR: tesla-linux-lte-dhcp.service ExecStart must use /usr/local/sbin/tesla-linux-wlan" >&2; exit 1; }
+    grep -q 'cmd_lte_dhcp\|lte-dhcp)' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing lte-dhcp CLI" >&2; exit 1; }
+    # When units are installed under /etc (chroot or live), timer must be wanted.
+    case "$lte_timer" in
+        /etc/systemd/system/*|"$r"/etc/systemd/system/*)
+            [ -e "$lte_timer_want" ] \
+                || { echo "ERROR: tesla-linux-lte-dhcp.timer not enabled into timers.target.wants" >&2; exit 1; }
+            ;;
+    esac
+    case "$PKGS" in
+        *isc-dhcp-client*) ;;
+        *) echo "ERROR: PKGS missing isc-dhcp-client (dhclient fallback for Health=no_ip)" >&2; exit 1 ;;
+    esac
+
     if [ -f "$dispatcher" ]; then
         grep -q 'tesla-linux-wlan' "$dispatcher" \
             || { echo "ERROR: NM dispatcher missing tesla-linux-wlan" >&2; exit 1; }
@@ -1204,6 +1239,12 @@ rm -f /usr/local/sbin/tesla-linux-hdmi-clone \
 install -m644 "$HERE/tesla-linux-wlan.service" /etc/systemd/system/tesla-linux-wlan.service
 install -m755 "$HERE/ta_wlan_api.py" /usr/local/sbin/ta_wlan_api.py
 install -m644 "$HERE/tesla-linux-wlan-api.service" /etc/systemd/system/tesla-linux-wlan-api.service
+
+# LTE Health=no_ip recovery: udev kick + oneshot + periodic timer (retries DHCP without bouncing hostapd).
+install -d /etc/udev/rules.d /etc/systemd/system
+install -m644 "$HERE/99-tesla-linux-lte.rules" /etc/udev/rules.d/99-tesla-linux-lte.rules
+install -m644 "$HERE/tesla-linux-lte-dhcp.service" /etc/systemd/system/tesla-linux-lte-dhcp.service
+install -m644 "$HERE/tesla-linux-lte-dhcp.timer" /etc/systemd/system/tesla-linux-lte-dhcp.timer
 
 # NM dispatcher: wifi → maybe-ap (station else TeslaLinux AP); ethernet → nginx-bind
 # WAN rebroadcast: ethernet/USB LTE up may bring a DHCP WAN — refresh wan-up (AP stays, NAT).
@@ -1574,11 +1615,15 @@ ensure_no_unattended
 mkdir -p /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-user.target.wants
 
 enable_wlan_nginx() {
-    systemctl enable tesla-linux-wlan.service tesla-linux-wlan-api.service nginx.service >/dev/null 2>&1 || true
+    systemctl enable tesla-linux-wlan.service tesla-linux-wlan-api.service nginx.service \
+                     tesla-linux-lte-dhcp.timer >/dev/null 2>&1 || true
     ln -sfn /etc/systemd/system/tesla-linux-wlan.service \
        /etc/systemd/system/multi-user.target.wants/tesla-linux-wlan.service
     ln -sfn /etc/systemd/system/tesla-linux-wlan-api.service \
        /etc/systemd/system/multi-user.target.wants/tesla-linux-wlan-api.service
+    mkdir -p /etc/systemd/system/timers.target.wants
+    ln -sfn /etc/systemd/system/tesla-linux-lte-dhcp.timer \
+       /etc/systemd/system/timers.target.wants/tesla-linux-lte-dhcp.timer
 }
 
 # File-level enable so bake/chroot and live install both leave graphical.target.wants.
