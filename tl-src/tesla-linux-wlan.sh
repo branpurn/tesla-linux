@@ -799,7 +799,7 @@ ensure_ap_dhcp() {
     fi
     log "starting dnsmasq AP DHCP ${AP_DHCP_START}-${AP_DHCP_END} via ${AP_ADDR}"
     stop_pidfile "$DNSMASQ_PID" dnsmasq
-    if ! dnsmasq --conf-file="$DNSMASQ_CONF" --pid-file="$DNSMASQ_PID"; then
+    if ! dnsmasq --conf-file="$DNSMASQ_CONF" --pid-file="$DNSMASQ_PID" 9>&-; then
         log "FAIL: dnsmasq did not start; Tesla clients will not get a lease"
         return 1
     fi
@@ -1157,7 +1157,7 @@ prepare_wifi_for_ap() {
 run_hostapd() {
     local errf="$1" rc=0
     : > "$errf"
-    hostapd -B -P "$HOSTAPD_PID" "$HOSTAPD_CONF" >"$errf" 2>&1 || rc=$?
+    hostapd -B -P "$HOSTAPD_PID" "$HOSTAPD_CONF" >"$errf" 2>&1 9>&- || rc=$?
     if [ "$rc" -eq 0 ]; then
         return 0
     fi
