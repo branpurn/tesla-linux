@@ -1528,6 +1528,7 @@ Section "InputClass"
     MatchIsPointer "on"
     MatchDevicePath "/dev/input/event*"
     Driver "libinput"
+    Option "NaturalScrolling" "true"
 EndSection
 
 Section "InputClass"
@@ -1535,6 +1536,7 @@ Section "InputClass"
     MatchIsTouchpad "on"
     MatchDevicePath "/dev/input/event*"
     Driver "libinput"
+    Option "NaturalScrolling" "true"
 EndSection
 EOF
 
