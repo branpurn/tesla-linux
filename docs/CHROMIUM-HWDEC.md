@@ -1,6 +1,6 @@
 # Chromium with V4L2 hardware H.264 decode (Pi 4)
 
-**Chromium (HW video)** is the **only browser** on Tesla Linux and the system
+**Chromium** is the **only browser** on Tesla Linux and the system
 default (a software-decoding browser managed only ≈144p YouTube on the Pi 4).
 It decodes H.264 on the Pi 4's VideoCore decoder (`/dev/video10`, `bcm2835-codec`, V4L2 stateful).
 
@@ -42,9 +42,12 @@ sudo ./tl-src/install-tesla-linux.sh --verify-chromium
     `--enable-gpu-rasterization`.)
   - `/usr/share/chromium/extensions/tl-h264-only/` — tiny MV3 extension
     (`tl-src/chromium/h264-only`), auto-loaded by the wrapper. See below.
-  - Launcher: `/usr/share/applications/tesla-linux-chromium.desktop` (XFCE menu
-    → Internet → "Chromium (HW video)") and, if `~teslalinux` exists,
-    `~/Desktop/Chromium-HW-video.desktop`.
+  - Launcher (the only one): `/usr/local/share/applications/chromium.desktop`
+    (XFCE menu → Internet → "Chromium", `Exec=/usr/bin/chromium %U`) and, if
+    `~teslalinux` exists, `~/Desktop/Chromium.desktop`. Every launch path also
+    gets Widevine from `/etc/chromium.d/tesla-linux-widevine`
+    ([`CHROMIUM-WIDEVINE.md`](CHROMIUM-WIDEVINE.md)). The old "Chromium (HW
+    video)" / "Chromium (DRM)" launchers are removed on install.
 - Audio needs nothing: Chromium plays to the default Pulse/PipeWire sink,
   which `tesla-linux` already sets to `tesla`. Window: maximized in the
   1088×832 screen.
