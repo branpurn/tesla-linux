@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Host-side plantable gates: Chromium (DRM) = Chromium + Widevine CDM
-# (libwidevinecdm0 from the Pi archive, own apt pin), chromium-drm wrapper with a
-# separate profile + hint file, launcher, probe page. The HW-video Chromium
-# files must stay untouched. (Live proof: see docs/CHROMIUM-WIDEVINE.md.)
+# Host-side plantable gates: Widevine for EVERY Chromium launch path
+# (libwidevinecdm0 from the Pi archive, own apt pin, /etc/chromium.d/tesla-linux-widevine
+# hint-file snippet, chromium-drm compatibility shim, no split launcher, probe page).
+# (Live proof: see docs/CHROMIUM-WIDEVINE.md.)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -84,7 +84,7 @@ grep -q 'TL_SKIP_CHROMIUM_WIDEVINE' "$MAIN" \
 grep -q 'install-chromium-widevine.sh' "$BUILD" \
     && pass "build-image.sh stages install-chromium-widevine.sh" || bad "build-image.sh does not stage it"
 grep -q -- '--verify-chromium-widevine' "$BUILD" \
-    && pass "build-image.sh verifies Chromium (DRM)" || bad "build-image.sh missing --verify-chromium-widevine"
+    && pass "build-image.sh verifies Widevine" || bad "build-image.sh missing --verify-chromium-widevine"
 if "$MAIN" --print-packages | grep -qiE 'firefox|google-chrome'; then
     bad "main PKGS has firefox / chrome"
 else
@@ -106,25 +106,16 @@ plant() {
     local t="$1"
     rm -rf "$t"
     mkdir -p "$t/etc/apt/preferences.d" "$t/usr/local/bin" "$t/usr/share/applications" \
-             "$t/usr/share/tesla-linux/chromium-drm"
+             "$t/usr/share/tesla-linux/chromium-drm" "$t/etc/chromium.d"
     cat > "$t/etc/apt/preferences.d/raspberrypi-widevine" <<'EOF'
 Package: libwidevinecdm0
 Pin: origin archive.raspberrypi.com
 Pin-Priority: 990
 EOF
-    cat > "$t/usr/local/bin/chromium-drm" <<'EOF'
-#!/bin/sh
-hint="$PROFILE/WidevineCdm/latest-component-updated-widevine-cdm"
-exec /usr/bin/chromium --user-data-dir="$PROFILE" "$@"
-EOF
-    chmod +x "$t/usr/local/bin/chromium-drm"
-    cat > "$t/usr/share/applications/tesla-linux-chromium-drm.desktop" <<'EOF'
-[Desktop Entry]
-Name=Chromium (DRM)
-Exec=/usr/local/bin/chromium-drm %U
-Type=Application
-Categories=Network;WebBrowser;
-EOF
+    # Use the installer's own writers so the plant is the real content.
+    bash -c 'set -e; r="$1"; FLAGS_FILE=/etc/chromium.d/tesla-linux-widevine; WRAPPER=/usr/local/bin/chromium-drm
+             eval "$(sed -n "/^write_flags() {/,/^}/p;/^write_wrapper() {/,/^}/p" "$2")"
+             write_flags "$r"; write_wrapper "$r"' _ "$t" "$INST"
     cp "$PROBE/drm.html" "$t/usr/share/tesla-linux/chromium-drm/drm.html"
     cp "$PROBE/probe.py" "$t/usr/share/tesla-linux/chromium-drm/probe.py"
     chmod +x "$t/usr/share/tesla-linux/chromium-drm/probe.py"
@@ -148,28 +139,65 @@ expect_fail "wildcard Pi-archive pin fails gate" "more than libwidevinecdm0" "$I
 plant "$TREE"
 
 rm -f "$TREE/usr/local/bin/chromium-drm"
-expect_fail "missing wrapper fails gate" "missing or not executable" "$INST" --verify "$TREE"
+expect_fail "missing shim fails gate" "missing or not executable" "$INST" --verify "$TREE"
 plant "$TREE"
 
-sed -i 's|exec /usr/bin/chromium --user-data-dir="$PROFILE"|exec /usr/bin/chromium|' "$TREE/usr/local/bin/chromium-drm"
-expect_fail "wrapper without its own profile fails gate" "own profile" "$INST" --verify "$TREE"
+rm -f "$TREE/etc/chromium.d/tesla-linux-widevine"
+expect_fail "missing /etc/chromium.d snippet fails gate" "bare chromium would have no Widevine" "$INST" --verify "$TREE"
 plant "$TREE"
 
-sed -i '/latest-component/d' "$TREE/usr/local/bin/chromium-drm"
-expect_fail "wrapper without the hint file fails gate" "hint file" "$INST" --verify "$TREE"
+sed -i '/latest-component/d' "$TREE/etc/chromium.d/tesla-linux-widevine"
+expect_fail "snippet without the hint file fails gate" "hint file" "$INST" --verify "$TREE"
 plant "$TREE"
 
-echo '# x --no-sandbox' >> "$TREE/usr/local/bin/chromium-drm"
-expect_fail "wrapper with --no-sandbox fails gate" "sandbox" "$INST" --verify "$TREE"
+sed -i 's|--user-data-dir=|--udd=|g' "$TREE/etc/chromium.d/tesla-linux-widevine"
+expect_fail "snippet ignoring --user-data-dir fails gate" "ignores --user-data-dir" "$INST" --verify "$TREE"
 plant "$TREE"
 
-rm -f "$TREE/usr/share/applications/tesla-linux-chromium-drm.desktop"
-expect_fail "missing launcher fails gate" "desktop entry missing" "$INST" --verify "$TREE"
+echo 'CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox"' >> "$TREE/etc/chromium.d/tesla-linux-widevine"
+expect_fail "snippet with --no-sandbox fails gate" "sandbox" "$INST" --verify "$TREE"
 plant "$TREE"
 
-sed -i 's|^Exec=.*|Exec=/usr/bin/chromium %U|' "$TREE/usr/share/applications/tesla-linux-chromium-drm.desktop"
-expect_fail "launcher not running the wrapper fails gate" "does not run" "$INST" --verify "$TREE"
+printf '#!/bin/sh\nexec /usr/bin/chromium --user-data-dir=/home/x/.config/chromium-drm "$@"\n' > "$TREE/usr/local/bin/chromium-drm"
+expect_fail "shim forcing a separate profile fails gate" "separate profile" "$INST" --verify "$TREE"
 plant "$TREE"
+
+printf '#!/bin/sh\necho nope\n' > "$TREE/usr/local/bin/chromium-drm"
+expect_fail "shim not exec'ing /usr/bin/chromium fails gate" "does not exec" "$INST" --verify "$TREE"
+plant "$TREE"
+
+touch "$TREE/usr/share/applications/tesla-linux-chromium-drm.desktop"
+expect_fail "leftover split DRM launcher fails gate" "split launcher" "$INST" --verify "$TREE"
+plant "$TREE"
+
+touch "$TREE/usr/share/applications/tesla-linux-chromium.desktop"
+expect_fail "leftover split HW-video launcher fails gate" "split launcher" "$INST" --verify "$TREE"
+plant "$TREE"
+
+# --- behaviour of the /etc/chromium.d snippet (what every launch path runs) --
+SNIP="$TREE/etc/chromium.d/tesla-linux-widevine"
+SB="$OUT/snip"; rm -rf "$SB"; mkdir -p "$SB/cdm" "$SB/h" "$SB/old/WidevineCdm/9.9" "$SB/dangling"
+echo '{"version":"4.10.2662.3"}' > "$SB/cdm/manifest.json"
+echo '{"version":"4.10.9999.0"}' > "$SB/old/WidevineCdm/9.9/manifest.json"
+sed "s|/opt/WidevineCdm|$SB/cdm|g" "$SNIP" > "$SB/snip.sh"
+run_snip() { env -i HOME="$SB/h" XDG_CONFIG_HOME="$SB/h/.config" sh -c '. "$1"; shift' _ "$SB/snip.sh" "$@" ; }
+hint() { cat "$1/WidevineCdm/latest-component-updated-widevine-cdm" 2>/dev/null || true; }
+run_snip
+[ "$(hint "$SB/h/.config/chromium")" = "{\"Path\":\"$SB/cdm\"}" ] \
+    && pass "snippet: bare launch writes the hint into the default profile" || bad "snippet: default profile hint ($(hint "$SB/h/.config/chromium"))"
+run_snip --user-data-dir="$SB/p1" about:blank
+[ "$(hint "$SB/p1")" = "{\"Path\":\"$SB/cdm\"}" ] \
+    && pass "snippet: --user-data-dir profile gets the hint" || bad "snippet: --user-data-dir hint"
+mkdir -p "$SB/p2/WidevineCdm"; printf '{"Path":"%s"}\n' "$SB/old/WidevineCdm/9.9" > "$SB/p2/WidevineCdm/latest-component-updated-widevine-cdm"
+run_snip --user-data-dir="$SB/p2"
+[ "$(hint "$SB/p2")" = "{\"Path\":\"$SB/old/WidevineCdm/9.9\"}" ] \
+    && pass "snippet: a working component-updated CDM is not clobbered" || bad "snippet: clobbered updated CDM"
+mkdir -p "$SB/p3/WidevineCdm"; printf '{"Path":"%s/gone"}\n' "$SB" > "$SB/p3/WidevineCdm/latest-component-updated-widevine-cdm"
+run_snip --user-data-dir="$SB/p3"
+[ "$(hint "$SB/p3")" = "{\"Path\":\"$SB/cdm\"}" ] \
+    && pass "snippet: dangling hint is repaired" || bad "snippet: dangling hint kept"
+rm -rf "$SB/cdm"; run_snip --user-data-dir="$SB/p4"
+[ ! -e "$SB/p4" ] && pass "snippet: no CDM installed -> touches nothing" || bad "snippet: wrote a hint without a CDM"
 
 rm -f "$TREE/usr/share/tesla-linux/chromium-drm/probe.py"
 expect_fail "missing probe fails gate" "probe not installed" "$INST" --verify "$TREE"
@@ -180,8 +208,8 @@ TL_SKIP_CHROMIUM_WIDEVINE=1 "$INST" >"$OUT/skip.out" 2>&1 \
     && grep -q skipping "$OUT/skip.out" && pass "TL_SKIP_CHROMIUM_WIDEVINE=1 is a no-op" \
     || bad "TL_SKIP_CHROMIUM_WIDEVINE=1 did not skip ($(cat "$OUT/skip.out"))"
 TL_SKIP_CHROMIUM=1 "$INST" >"$OUT/skip2.out" 2>&1 \
-    && grep -q skipping "$OUT/skip2.out" && pass "TL_SKIP_CHROMIUM=1 also skips Chromium (DRM)" \
-    || bad "TL_SKIP_CHROMIUM=1 did not skip Chromium (DRM)"
+    && grep -q skipping "$OUT/skip2.out" && pass "TL_SKIP_CHROMIUM=1 also skips Widevine" \
+    || bad "TL_SKIP_CHROMIUM=1 did not skip Widevine"
 TL_SKIP_CHROMIUM_WIDEVINE=1 bash "$MAIN" --verify-chromium-widevine "$TREE/nonexistent" >/dev/null 2>&1 \
     && pass "main --verify-chromium-widevine honours the skip env" || bad "main verify ignores skip env"
 
@@ -190,12 +218,10 @@ if [ -f /opt/WidevineCdm/manifest.json ] && [ -x /usr/local/bin/chromium-drm ]; 
     expect_ok "live: --verify" "$INST" --verify
     ver="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' /opt/WidevineCdm/manifest.json)"
     [ -n "$ver" ] && pass "live: Widevine CDM $ver on disk" || bad "live: no CDM version"
-    [ "$(readlink -f /etc/alternatives/x-www-browser)" != "$(readlink -f /usr/bin/chromium)" ] \
-        && pass "live: Chromium is not x-www-browser" || bad "live: Chromium became default browser"
     if [ -n "${DISPLAY:-}" ] && command -v python3 >/dev/null 2>&1 && python3 -c 'import websockets' 2>/dev/null; then
         prof="$(mktemp -d /tmp/tl-wv-prof.XXXXXX)"
-        if TL_DRM_PROFILE="$prof" timeout 90 python3 "$PROBE/probe.py" --exe /usr/local/bin/chromium-drm \
-              --own-profile --profile "$prof" --eme-only --json "$OUT/eme.json" >/dev/null 2>&1 \
+        if timeout 90 python3 "$PROBE/probe.py" --exe /usr/bin/chromium \
+              --profile "$prof" --eme-only --json "$OUT/eme.json" >/dev/null 2>&1 \
            && python3 -c 'import json,sys; e=json.load(open(sys.argv[1]))["eme"]; sys.exit(0 if e["SW_SECURE_CRYPTO"]=="ok" and e["default"]=="ok" else 1)' "$OUT/eme.json"; then
             pass "live: navigator.requestMediaKeySystemAccess('com.widevine.alpha') ok"
         else

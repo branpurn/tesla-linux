@@ -9,7 +9,7 @@ Product path is the Tesla-browser web console (`desktop.html`) at a stable known
 | File | Description |
     10|| ------------------------- | ---------------------------------------------------------------------------- |
 | `tl-src/install-chromium-hwdec.sh` | Installs Chromium with V4L2 HW H.264 decode (+ policies, flags, launcher) |
-| `tl-src/install-chromium-widevine.sh` | Adds Widevine (arm64 CDM) + the `Chromium (DRM)` launcher/profile next to it |
+| `tl-src/install-chromium-widevine.sh` | Adds the Widevine (arm64 CDM) to every Chromium launch via `/etc/chromium.d/tesla-linux-widevine` (single "Chromium" launcher; `chromium-drm` is a compat shim) |
 | `tl-src/build-image.sh` | Bakes Ubuntu Server arm64 raspi into `tesla-linux-YYYYMMDD-pi.img.xz` |
 | `tl-src/install-tesla-linux.sh` | Installs the XFCE / Xorg / stream / WLAN stack inside the image chroot |
 | `tl-src/desktop.html` | Tesla-browser console (in-car product path) |
@@ -64,8 +64,8 @@ WIFI_PSK=yourpsk
 - Ethernet **10.42.1.1/24** is lab/debug, not the in-car primary
 - nginx serving the console on AP / ethernet / station IPv4
 - Piecemeal XFCE (not `xubuntu-desktop`): no Firefox/snap browser (Chromium is the only browser, see below); **ristretto** + **tumbler**; **xubuntu-wallpapers** default; **xarchiver** + **thunar-archive-plugin** + **unzip** + **7zip**
-- **Chromium (HW video)**: Raspberry Pi archive Chromium with V4L2 hardware H.264 decode (`/dev/video10`), pinned to chromium packages only, plus an H.264-only YouTube extension — 720p YouTube plays where software decode manages ~144p. It is the **only browser** and the system default (Firefox and Google Chrome were removed: Chrome arm64 has no V4L2 decoder). See [`docs/CHROMIUM-HWDEC.md`](docs/CHROMIUM-HWDEC.md)
-- **Chromium (DRM)**: the same Chromium plus Raspberry Pi's Widevine CDM (arm64 — no 32-bit browser needed), own profile and launcher; Widevine L3 only (≤720p on Netflix-class services, software-decoded: 480p smooth, 720p marginal under the car-stream load; clear H.264 still gets V4L2). See [`docs/CHROMIUM-WIDEVINE.md`](docs/CHROMIUM-WIDEVINE.md)
+- **Chromium** (single launcher): Raspberry Pi archive Chromium with V4L2 hardware H.264 decode (`/dev/video10`), pinned to chromium packages only, plus an H.264-only YouTube extension — 720p YouTube plays where software decode manages ~144p. It is the **only browser** and the system default (Firefox and Google Chrome were removed: Chrome arm64 has no V4L2 decoder). See [`docs/CHROMIUM-HWDEC.md`](docs/CHROMIUM-HWDEC.md)
+- **Widevine in every Chromium launch**: Raspberry Pi's arm64 Widevine CDM (no 32-bit browser needed) is wired in through `/etc/chromium.d/tesla-linux-widevine`, so bare `chromium`, the menu/Desktop icon, `xdg-open` and `x-www-browser` all get HW H.264 decode **and** DRM; Widevine L3 only (≤720p on Netflix-class services, software-decoded). See [`docs/CHROMIUM-WIDEVINE.md`](docs/CHROMIUM-WIDEVINE.md)
 - Misc. from Ubuntu Server 26.04 + XFCE (standard GNU tools, etc.)
 
 ## What/Why?:
