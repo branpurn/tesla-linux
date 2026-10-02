@@ -131,7 +131,11 @@ write_flags() {
 # build; the wrapper already adds --use-angle=gles (V3D GLES) and
 # /etc/chromium.d/default-flags adds --enable-gpu-rasterization.
 # Extension tl-h264-only is picked up from /usr/share/chromium/extensions/.
+# --disable-frame-rate-limit: measured on this Pi (live stream pipeline loading
+# Xorg), dropped video frames at 720p30 fell from ~70% to ~30%; vsync-only
+# flags did nothing. See docs/CHROMIUM-HWDEC.md.
 export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --ozone-platform=x11 --start-maximized"
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --disable-frame-rate-limit"
 export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-first-run --password-store=basic"
 export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --disable-session-crashed-bubble --hide-crash-restore-bubble"
 EOF
