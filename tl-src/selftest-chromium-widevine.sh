@@ -2,7 +2,7 @@
 # Host-side plantable gates: Chromium (DRM) = Chromium + Widevine CDM
 # (libwidevinecdm0 from the Pi archive, own apt pin), chromium-drm wrapper with a
 # separate profile + hint file, launcher, probe page. The HW-video Chromium
-# files and Firefox must stay untouched. (Live proof: see docs/CHROMIUM-WIDEVINE.md.)
+# files must stay untouched. (Live proof: see docs/CHROMIUM-WIDEVINE.md.)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -85,8 +85,11 @@ grep -q 'install-chromium-widevine.sh' "$BUILD" \
     && pass "build-image.sh stages install-chromium-widevine.sh" || bad "build-image.sh does not stage it"
 grep -q -- '--verify-chromium-widevine' "$BUILD" \
     && pass "build-image.sh verifies Chromium (DRM)" || bad "build-image.sh missing --verify-chromium-widevine"
-"$MAIN" --print-packages | grep -q firefox \
-    && pass "main PKGS still has firefox" || bad "main PKGS lost firefox"
+if "$MAIN" --print-packages | grep -qiE 'firefox|google-chrome'; then
+    bad "main PKGS has firefox / chrome"
+else
+    pass "main PKGS has no firefox / google-chrome"
+fi
 
 # --- probe page / runner ----------------------------------------------------
 [ -f "$PROBE/drm.html" ] && [ -f "$PROBE/probe.py" ] && [ -f "$PROBE/blank.html" ] && [ -f "$PROBE/clear.html" ] \

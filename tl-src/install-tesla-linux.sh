@@ -15,7 +15,8 @@ START=1
 # image bake. `install-tesla-linux.sh --print-packages` emits it for the chroot.
 # xserver-xorg-input-libinput is required so USB HID attaches to Xorg :0.
 # python3-evdev is the uinput touch backend, not the Xorg HID driver.
-# firefox is Mozilla apt .deb (packages.mozilla.org), not the Ubuntu snap stub.
+# The only browser is Raspberry Pi archive Chromium (install-chromium-hwdec.sh);
+# no browser package belongs in this list.
 # ristretto is the lightweight XFCE image viewer (piecemeal XFCE; not a desktop meta).
 # tumbler is the Thunar thumbnailer (piecemeal XFCE; not a desktop meta).
 # xubuntu-wallpapers ships /usr/share/xfce4/backdrops/xubuntu-wallpaper.png (not xubuntu-desktop).
@@ -27,10 +28,8 @@ xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar ristrett
 xubuntu-wallpapers \
 xarchiver thunar-archive-plugin 7zip unzip \
 pipewire pipewire-pulse pipewire-audio wireplumber pulseaudio-utils gstreamer1.0-pipewire \
-nginx openssl network-manager hostapd iw dnsmasq rfkill isc-dhcp-client firefox"
+nginx openssl network-manager hostapd iw dnsmasq rfkill isc-dhcp-client"
 
-MOZILLA_APT_KEY_URL=https://packages.mozilla.org/apt/repo-signing-key.gpg
-MOZILLA_APT_FP=35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3
 
 # Factory console user (documented like AP PSK teslalinux). chpasswd must stick.
 # Fail the bake/install if the password is not written — no `|| true`.
@@ -441,71 +440,9 @@ EOF
         || { echo "ERROR: Update-Package-Lists 0 did not stick" >&2; exit 1; }
 }
 
-# Ubuntu's archive firefox is a snap stub (fails offline / in-car). Prefer the
-# Mozilla apt .deb so XFCE has a real /usr/bin/firefox + desktop entry.
-firefox_is_snap_stub() {
-    local bin="$1" target
-    [ -e "$bin" ] || return 1
-    target="$(readlink -f "$bin" 2>/dev/null || printf '%s' "$bin")"
-    case "$target" in
-        /snap/*|*/snap/*)
-            return 0
-            ;;
-    esac
-    if grep -Eiq 'snap[[:space:]]+run[[:space:]]+firefox|/snap/bin/firefox|ubuntu-browser-launcher' \
-            "$bin" 2>/dev/null; then
-        return 0
-    fi
-    return 1
-}
-
-ensure_firefox_deb_apt() {
-    local key=/etc/apt/keyrings/packages.mozilla.org.asc
-    local fp=""
-    export DEBIAN_FRONTEND=noninteractive
-    install -d -m0755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d
-    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-        apt-get install -y -q --no-install-recommends ca-certificates curl
-    fi
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$MOZILLA_APT_KEY_URL" -o "$key"
-    else
-        wget -qO "$key" "$MOZILLA_APT_KEY_URL"
-    fi
-    chmod 644 "$key"
-    if command -v gpg >/dev/null 2>&1; then
-        fp="$(gpg --show-keys --with-colons "$key" 2>/dev/null | awk -F: '/^fpr:/ {print $10; exit}')"
-        [ "$fp" = "$MOZILLA_APT_FP" ] \
-            || { echo "ERROR: Mozilla apt key fingerprint mismatch" >&2; exit 1; }
-    fi
-    cat > /etc/apt/sources.list.d/mozilla.list <<'EOF'
-deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main
-EOF
-    cat > /etc/apt/preferences.d/mozilla <<'EOF'
-Package: *
-Pin: origin packages.mozilla.org
-Pin-Priority: 1000
-
-Package: firefox*
-Pin: release o=Ubuntu
-Pin-Priority: -1
-EOF
-}
-
-ensure_firefox_deb() {
-    ensure_firefox_deb_apt
-    if [ -e /usr/bin/firefox ] && ! firefox_is_snap_stub /usr/bin/firefox \
-       && [ -f /usr/share/applications/firefox.desktop ]; then
-        return 0
-    fi
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -q
-    apt-get install -y -q --no-install-recommends firefox
-}
-
 # Chromium with V4L2 HW H.264 decode for the Pi 4 (Raspberry Pi archive build,
-# pinned to the chromium packages only). Additive: Firefox stays the default
-# browser. Delegates to install-chromium-hwdec.sh next to this script.
+# pinned to the chromium packages only). This is the ONLY browser and the
+# system default (x-www-browser, mimeapps, XFCE preferred app). Delegates to install-chromium-hwdec.sh next to this script.
 # TL_SKIP_CHROMIUM=1 skips it (e.g. low-disk bakes).
 chromium_hwdec_script() {
     local d
@@ -549,69 +486,6 @@ ensure_chromium_widevine() {
 verify_chromium_widevine() {
     chromium_widevine_skipped && return 0
     bash "$(chromium_widevine_script)" --verify "${1:-}"
-}
-
-# Google Chrome (ARM64) from Google's apt repo (pinned to google-chrome-stable),
-# bundled newer Widevine CDM, launcher "Google Chrome (DRM)". Additive; Firefox
-# stays default. Delegates to install-google-chrome-arm64.sh next to this script.
-# TL_SKIP_GOOGLE_CHROME=1 skips it (e.g. low-disk bakes; needs ~900 MB free).
-google_chrome_script() {
-    local d
-    d="$(cd "$(dirname "$0")" && pwd)"
-    [ -f "$d/install-google-chrome-arm64.sh" ] \
-        || { echo "ERROR: install-google-chrome-arm64.sh missing next to $0" >&2; exit 1; }
-    printf '%s' "$d/install-google-chrome-arm64.sh"
-}
-
-ensure_google_chrome() {
-    [ "${TL_SKIP_GOOGLE_CHROME:-0}" = "1" ] && return 0
-    bash "$(google_chrome_script)"
-}
-
-verify_google_chrome() {
-    [ "${TL_SKIP_GOOGLE_CHROME:-0}" = "1" ] && return 0
-    bash "$(google_chrome_script)" --verify "${1:-}"
-}
-
-# Host-side / live / bake: Mozilla apt Firefox .deb, XFCE desktop entry,
-# not the Ubuntu snap stub. Optional prefix ($1) is an image / plant root.
-verify_firefox() {
-    local r="${1:-}"
-    local bin desk list pin
-
-    case "$PKGS" in
-        *firefox*) ;;
-        *)
-            echo "ERROR: PKGS missing firefox" >&2
-            exit 1
-            ;;
-    esac
-
-    list="$r/etc/apt/sources.list.d/mozilla.list"
-    [ -f "$list" ] || { echo "ERROR: missing Mozilla apt source" >&2; exit 1; }
-    grep -q 'packages.mozilla.org' "$list" \
-        || { echo "ERROR: mozilla.list is not packages.mozilla.org" >&2; exit 1; }
-
-    pin="$r/etc/apt/preferences.d/mozilla"
-    [ -f "$pin" ] || { echo "ERROR: missing Mozilla apt pin" >&2; exit 1; }
-    grep -q 'Pin: origin packages.mozilla.org' "$pin" \
-        || { echo "ERROR: Mozilla apt pin origin missing" >&2; exit 1; }
-    grep -q 'Pin-Priority: 1000' "$pin" \
-        || { echo "ERROR: Mozilla apt pin is not 1000" >&2; exit 1; }
-    grep -q 'Pin: release o=Ubuntu' "$pin" \
-        || { echo "ERROR: Ubuntu firefox snap stub is not pinned out" >&2; exit 1; }
-
-    bin="$r/usr/bin/firefox"
-    [ -e "$bin" ] || { echo "ERROR: firefox binary missing" >&2; exit 1; }
-    if firefox_is_snap_stub "$bin"; then
-        echo "ERROR: firefox is the Ubuntu snap stub" >&2
-        exit 1
-    fi
-
-    desk="$r/usr/share/applications/firefox.desktop"
-    [ -f "$desk" ] || { echo "ERROR: firefox desktop entry missing" >&2; exit 1; }
-    grep -qi '^Exec=.*firefox' "$desk" \
-        || { echo "ERROR: firefox.desktop has no Exec firefox" >&2; exit 1; }
 }
 
 # libinput_drv.so must exist on a real install (live / chroot / mounted bake).
@@ -1252,11 +1126,6 @@ if [ "${1:-}" = "--verify-no-unattended" ]; then
     exit 0
 fi
 
-if [ "${1:-}" = "--verify-firefox" ]; then
-    verify_firefox "${2:-}"
-    exit 0
-fi
-
 if [ "${1:-}" = "--verify-chromium" ]; then
     verify_chromium_hwdec "${2:-}"
     exit 0
@@ -1267,18 +1136,8 @@ if [ "${1:-}" = "--verify-chromium-widevine" ]; then
     exit 0
 fi
 
-if [ "${1:-}" = "--verify-google-chrome" ]; then
-    verify_google_chrome "${2:-}"
-    exit 0
-fi
-
 if [ "${1:-}" = "--verify-wallpaper" ]; then
     verify_xfce_wallpaper "${2:-}"
-    exit 0
-fi
-
-if [ "${1:-}" = "--ensure-firefox-apt" ]; then
-    ensure_firefox_deb_apt
     exit 0
 fi
 
@@ -1293,10 +1152,8 @@ ensure_hdmi_mode
 ensure_never_sleep
 ensure_xfce_wallpaper
 ensure_no_unattended
-ensure_firefox_deb
 ensure_chromium_hwdec
 ensure_chromium_widevine
-ensure_google_chrome
 set_graphical_default
 TL_UID="$(id -u "$TL_USER")"
 
@@ -1790,13 +1647,9 @@ verify_autologin_hdmi
 verify_wan_rebroadcast
 # Fail the bake/install if background apt auto-patch is still enabled.
 verify_no_unattended
-# Fail the bake/install if Mozilla apt Firefox / XFCE desktop entry did not stick.
-verify_firefox
 # Fail the bake/install if Chromium (V4L2 HW decode) apt pin / policy / extension did not stick.
 verify_chromium_hwdec
 # Fail the bake/install if Chromium (DRM) (Widevine CDM pin / wrapper / launcher) did not stick.
 verify_chromium_widevine
-# Fail the bake/install if Google Chrome (apt key/pin, wrapper, launcher, Firefox still default) did not stick.
-verify_google_chrome
 # Fail the bake/install if the Xubuntu wallpaper xfdesktop default did not stick.
 verify_xfce_wallpaper
