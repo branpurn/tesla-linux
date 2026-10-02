@@ -17,16 +17,19 @@ START=1
 # python3-evdev is the uinput touch backend, not the Xorg HID driver.
 # The only browser is Raspberry Pi archive Chromium (install-chromium-hwdec.sh);
 # no browser package belongs in this list.
-# ristretto is the lightweight XFCE image viewer (piecemeal XFCE; not a desktop meta).
-# tumbler is the Thunar thumbnailer (piecemeal XFCE; not a desktop meta).
-# xubuntu-wallpapers ships /usr/share/xfce4/backdrops/xubuntu-wallpaper.png (not xubuntu-desktop).
+# The desktop is the full Xubuntu DE: the `xubuntu-desktop` metapackage (XFCE,
+# Greybird, elementary-xfce icons, xubuntu-default-settings/artwork/wallpapers,
+# Thunar, ...) installed WITH its recommends. The image build installs it in a
+# second apt step (build-image.sh) after the base packages, and ONLY together
+# with the apt pin file from `--print-apt-pins` (TL_XUBUNTU_PINS) which keeps
+# Firefox/Thunderbird (snap launchers), LibreOffice, GIMP, GDM, cloud-init,
+# CUPS/print, speech, Xorg legacy wrapper, ... out. Do not remove the pins.
+# xubuntu-wallpapers ships /usr/share/xfce4/backdrops/xubuntu-wallpaper.png.
 PKGS="xserver-xorg-core xserver-xorg-input-libinput \
 xinit x11-utils x11-xserver-utils xinput \
 gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
 python3-gi python3-gst-1.0 python3-websockets python3-evdev \
-xfce4 xfce4-terminal xfce4-panel xfdesktop4 xfwm4 xfce4-settings thunar ristretto tumbler dbus-x11 \
-xubuntu-wallpapers \
-xarchiver thunar-archive-plugin 7zip unzip \
+dbus-x11 xubuntu-desktop xubuntu-wallpapers 7zip unzip \
 pipewire pipewire-pulse pipewire-audio wireplumber pulseaudio-utils gstreamer1.0-pipewire \
 nginx openssl network-manager hostapd iw dnsmasq rfkill isc-dhcp-client"
 
@@ -1059,6 +1062,140 @@ verify_wan_rebroadcast() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Xubuntu desktop (xubuntu-desktop metapackage WITH recommends) — guard rails.
+# Chromium stays the ONLY browser; the metapackage's heavy/unwanted parts are
+# kept out with an apt pin (priority -1) instead of purging after the fact, so
+# no snap download (Firefox/Thunderbird are snap-launcher debs on Ubuntu), no
+# display manager taking over :0, no cloud-init, no office/GIMP/print stack.
+# printer-driver-* and update-manager are HARD depends of xubuntu-desktop and
+# therefore cannot be pinned out; their daemons stay disabled/idle.
+# ---------------------------------------------------------------------------
+TL_XUBUNTU_PINS=/etc/apt/preferences.d/tesla-linux-xubuntu-exclude.pref
+print_xubuntu_pins() {
+    cat <<'PINEOF'
+# tesla-linux: keep the full xubuntu-desktop metapackage, but never pull in
+# other browsers/mail/office/snap-launching apps or heavy background daemons
+# (Chromium is the only browser; snaps are not used on this appliance).
+Package: firefox* thunderbird* gdm3 cloud-init cloud-init-base gimp* libreoffice* rhythmbox* hexchat* gnome-shell mutter* cups* cups-browsed hplip* system-config-printer* sane-utils simple-scan openvpn network-manager-openvpn* network-manager-pptp* pptp-linux speech-dispatcher* espeak* brltty* whoopsie* apport-gtk update-notifier ubuntu-advantage-desktop-daemon bluez-cups xserver-xorg-legacy xserver-xorg-video-*
+Pin: release *
+Pin-Priority: -1
+PINEOF
+}
+
+# Services xubuntu-desktop enables that an HDMI-appliance does not need.
+# lightdm is MASKED: tesla-linux-xorg/tesla-linux-desktop own :0 (autologin).
+TL_XUBUNTU_MASK="lightdm.service bluetooth.service blueman-mechanism.service \
+anacron.service anacron.timer lpd.service lm-sensors.service plocate-updatedb.timer"
+# System autostarts hidden per user (skel + teslalinux); xfce4-power-manager,
+# xfce4-screensaver, light-locker are hidden system-wide in ensure_never_sleep.
+TL_XUBUNTU_HIDE_AUTOSTART="blueman indicator-messages ayatana-indicator-application \
+onboard-autostart spice-vdagent org.gnome.SettingsDaemon.DiskUtilityNotify \
+polkit-mate-authentication-agent-1 im-launch gnome-keyring-pkcs11 \
+xfce4-clipman-plugin-autostart snap-userd-autostart"
+
+ensure_xubuntu_de() {
+    local u n home d
+    install -d /etc/apt/preferences.d
+    print_xubuntu_pins > "$TL_XUBUNTU_PINS"
+    install -d /etc/systemd/system
+    for u in $TL_XUBUNTU_MASK; do
+        ln -sfn /dev/null "/etc/systemd/system/$u"
+    done
+    # lightdm's postinst aliases display-manager.service to itself.
+    rm -f /etc/systemd/system/display-manager.service
+    # Xubuntu session defaults (Thunar actions, menus, helpers.rc, panel
+    # templates from xubuntu-default-settings) live under xdg-xubuntu; the stock
+    # Xubuntu session script puts it first in XDG_CONFIG_DIRS, our unit starts
+    # xfce4-session directly, so do it here (drop-in: live units keep working).
+    install -d /etc/systemd/system/tesla-linux-desktop.service.d
+    cat > /etc/systemd/system/tesla-linux-desktop.service.d/xubuntu-defaults.conf <<'CONF'
+[Service]
+# Xubuntu session defaults (xubuntu-default-settings: Thunar actions, menus,
+# helpers.rc, panel templates) are found via this XDG path (set by the stock
+# Xubuntu session script; our unit starts xfce4-session directly).
+Environment=XDG_CONFIG_DIRS=/etc/xdg/xdg-xubuntu:/etc/xdg
+Environment=XDG_CURRENT_DESKTOP=XFCE
+CONF
+    for home in /etc/skel /home/teslalinux; do
+        [ "$home" = /etc/skel ] || [ -d "$home" ] || continue
+        d="$home/.config/autostart"
+        install -d "$d"
+        for n in $TL_XUBUNTU_HIDE_AUTOSTART; do
+            printf '[Desktop Entry]\nType=Application\nHidden=true\n' > "$d/$n.desktop"
+        done
+    done
+    # Theme/DPI defaults for NEW homes only (never clobber a live user's xfconf).
+    d=/etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml
+    install -d "$d"
+    cat > "$d/xsettings.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xsettings" version="1.0">
+  <property name="Net" type="empty">
+    <property name="ThemeName" type="string" value="Greybird"/>
+    <property name="IconThemeName" type="string" value="elementary-xfce-dark"/>
+  </property>
+  <property name="Xft" type="empty">
+    <property name="DPI" type="int" value="130"/>
+  </property>
+  <property name="Gtk" type="empty">
+    <property name="CursorThemeSize" type="int" value="32"/>
+  </property>
+</channel>
+XML
+    if [ -d /home/teslalinux ]; then
+        install -d /home/teslalinux/.config/xfce4/xfconf/xfce-perchannel-xml
+        [ -f /home/teslalinux/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml ] \
+            || cp "$d/xsettings.xml" /home/teslalinux/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml
+        if id teslalinux >/dev/null 2>&1; then
+            chown -R teslalinux:teslalinux /home/teslalinux/.config
+        fi
+    fi
+}
+
+# --verify-xubuntu [root]: PKGS carry the metapackage, the apt pin keeps every
+# browser/mail/office/DM/cloud-init out, lightdm is masked, no snap browser,
+# and (when a dpkg database is present) no other browser package is installed.
+verify_xubuntu_de() {
+    local r="${1:-}" pin u pkg
+    pin="$r$TL_XUBUNTU_PINS"
+    case "$PKGS" in
+        *xubuntu-desktop*) ;;
+        *) echo "ERROR: PKGS missing xubuntu-desktop" >&2; exit 1 ;;
+    esac
+    [ -f "$pin" ] || { echo "ERROR: missing apt pin $TL_XUBUNTU_PINS" >&2; exit 1; }
+    for pkg in 'firefox\*' 'thunderbird\*' gdm3 cloud-init 'libreoffice\*' 'gimp\*'; do
+        grep -Eq "^Package:.*(^|[[:space:]])$pkg([[:space:]]|\$)" "$pin" \
+            || { echo "ERROR: apt pin does not exclude ${pkg//\\/}" >&2; exit 1; }
+    done
+    grep -q '^Pin-Priority: -1$' "$pin" \
+        || { echo "ERROR: apt pin priority is not -1" >&2; exit 1; }
+    [ "$(readlink "$r/etc/systemd/system/lightdm.service" 2>/dev/null)" = /dev/null ] \
+        || { echo "ERROR: lightdm.service is not masked" >&2; exit 1; }
+    for u in display-manager.service; do
+        { [ ! -e "$r/etc/systemd/system/$u" ] && [ ! -L "$r/etc/systemd/system/$u" ]; } \
+            || { echo "ERROR: $u exists (a display manager would fight tesla-linux-xorg)" >&2; exit 1; }
+    done
+    grep -q '^Environment=XDG_CONFIG_DIRS=/etc/xdg/xdg-xubuntu:/etc/xdg$' \
+        "$r/etc/systemd/system/tesla-linux-desktop.service.d/xubuntu-defaults.conf" 2>/dev/null \
+        || { echo "ERROR: missing xubuntu-defaults.conf drop-in" >&2; exit 1; }
+    if [ -f "$r/var/lib/dpkg/status" ]; then
+        for pkg in firefox thunderbird epiphany-browser midori falkon gdm3 cloud-init libreoffice-core gimp; do
+            if grep -q "^Package: $pkg\$" "$r/var/lib/dpkg/status" 2>/dev/null \
+               && awk -v p="$pkg" '$1=="Package:"{c=($2==p)} c&&$1=="Status:"{print $0}' \
+                    "$r/var/lib/dpkg/status" | grep -q ' installed$'; then
+                echo "ERROR: $pkg is installed (Chromium must be the only browser)" >&2
+                exit 1
+            fi
+        done
+        if compgen -G "$r/var/lib/snapd/snaps/firefox_*.snap" >/dev/null \
+           || compgen -G "$r/var/lib/snapd/snaps/thunderbird_*.snap" >/dev/null; then
+            echo "ERROR: firefox/thunderbird snap present" >&2
+            exit 1
+        fi
+    fi
+}
+
 # Host-side / live / bake: xubuntu-wallpapers in PKGS and xfdesktop last-image
 # is the factory Xubuntu backdrop. Optional prefix ($1) is an image / plant root.
 verify_xfce_wallpaper() {
@@ -1077,8 +1214,9 @@ verify_xfce_wallpaper() {
             ;;
     esac
     case "$PKGS" in
-        *xubuntu-desktop*)
-            echo "ERROR: PKGS includes xubuntu-desktop meta" >&2
+        *xubuntu-desktop*) ;;
+        *)
+            echo "ERROR: PKGS missing xubuntu-desktop meta" >&2
             exit 1
             ;;
     esac
@@ -1142,6 +1280,8 @@ if [ "${1:-}" = "--verify-wallpaper" ]; then
 fi
 
 if [ "${1:-}" = "--print-packages" ]; then echo "$PKGS"; exit 0; fi
+if [ "${1:-}" = "--print-apt-pins" ]; then print_xubuntu_pins; exit 0; fi
+if [ "${1:-}" = "--verify-xubuntu" ]; then verify_xubuntu_de "${2:-}"; exit 0; fi
 
 ensure_factory_user
 purge_cloud_init_ubuntu
@@ -1151,6 +1291,7 @@ ensure_graphical_vt1
 ensure_hdmi_mode
 ensure_never_sleep
 ensure_xfce_wallpaper
+ensure_xubuntu_de
 ensure_no_unattended
 ensure_chromium_hwdec
 ensure_chromium_widevine
@@ -1661,3 +1802,5 @@ verify_chromium_hwdec
 verify_chromium_widevine
 # Fail the bake/install if the Xubuntu wallpaper xfdesktop default did not stick.
 verify_xfce_wallpaper
+# Fail the bake/install if the Xubuntu DE guard rails (pins, lightdm mask, no browsers) did not stick.
+verify_xubuntu_de

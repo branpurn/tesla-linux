@@ -11,5 +11,5 @@
 - Car browser will not connect to 10.42.0.1; workaround: http://198.18.0.1/desktop.html via nft DNAT (tl-src/tesla-linux-alias.{service,nft}; install to /etc/systemd/system and /etc/tesla-linux-alias.nft, enable).
 - desktop.html: status HUD and bottom bar are overlays so the stream fills the car viewport (804x638 CSS px).
 - Screen once ended up 617x641 (xrandr transform changed); reset with the xrandr line in tesla-linux-desktop.service. Cause unknown; watch for recurrence.
-- DPI set to 130 via xfconf (Xft/DPI), panel 34px, to compensate for ~0.74 browser scaling. Not yet in the image build.
+- DPI set to 130 via xfconf (Xft/DPI), panel 34px, to compensate for ~0.74 browser scaling. New homes get DPI 130 / cursor 32 / Greybird / elementary-xfce-dark from `/etc/skel` (`ensure_xubuntu_de`); panel 34px is still live-only (not in the image build).
 - Optional remote access: tools/remote-access.sh (bore tunnel, key-only SSH).
