@@ -174,7 +174,7 @@ systemctl enable NetworkManager >/dev/null 2>&1 || true
 /tmp/tl-src/install-tesla-linux.sh --verify-no-unattended
 # Chromium (Pi archive build, V4L2 HW H.264 decode; the only browser + system default) is installed by --no-start above.
 /tmp/tl-src/install-tesla-linux.sh --verify-chromium
-# Chromium (DRM): Widevine CDM + chromium-drm wrapper/launcher (also installed by --no-start).
+# Widevine in every Chromium launch: CDM + /etc/chromium.d snippet + single launcher (also installed by --no-start).
 /tmp/tl-src/install-tesla-linux.sh --verify-chromium-widevine
 
 # Fail the bake if factory login / default.target / ssh host keys did not stick.

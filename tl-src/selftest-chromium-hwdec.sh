@@ -167,13 +167,11 @@ EOF
 EOF
     echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --ozone-platform=x11"' > "$t/etc/chromium.d/tesla-linux"
     cp "$EXT/manifest.json" "$EXT/h264only.js" "$t/usr/share/chromium/extensions/tl-h264-only/"
-    cat > "$t/usr/share/applications/tesla-linux-chromium.desktop" <<'EOF'
-[Desktop Entry]
-Name=Chromium (HW video)
-Exec=/usr/bin/chromium %U
-Type=Application
-Categories=Network;WebBrowser;
-EOF
+    mkdir -p "$t/usr/local/share/applications"
+    bash -c 'set -e; r="$1"; TL_USER=nobody; DESKTOP_ID=chromium.desktop; DESKTOP_DIR=/usr/local/share/applications
+             OLD_DESKTOP_IDS="tesla-linux-chromium.desktop tesla-linux-chromium-drm.desktop"
+             eval "$(sed -n "/^write_desktop() {/,/^}/p" "$2")"
+             write_desktop "$r"' _ "$t" "$INST"
     mkdir -p "$t/etc/xdg/xfce4"
     printf '[Default Applications]\nx-scheme-handler/https=chromium.desktop\n' > "$t/etc/xdg/mimeapps.list"
     printf 'WebBrowser=chromium\n' > "$t/etc/xdg/xfce4/helpers.rc"
@@ -222,8 +220,46 @@ rm -f "$TREE/usr/share/chromium/extensions/tl-h264-only/h264only.js"
 expect_fail "missing h264-only extension fails gate" "extension script missing" "$INST" --verify "$TREE"
 plant "$TREE"
 
-rm -f "$TREE/usr/share/applications/tesla-linux-chromium.desktop"
+rm -f "$TREE/usr/local/share/applications/chromium.desktop"
 expect_fail "missing desktop entry fails gate" "desktop entry missing" "$INST" --verify "$TREE"
+plant "$TREE"
+
+sed -i 's|^Name=Chromium$|Name=Chromium (HW video)|' "$TREE/usr/local/share/applications/chromium.desktop"
+expect_fail "launcher renamed away from the single 'Chromium' fails gate" "single" "$INST" --verify "$TREE"
+plant "$TREE"
+
+sed -i 's|^Exec=/usr/bin/chromium %U|Exec=/usr/bin/chromium --user-data-dir=/tmp/x %U|' "$TREE/usr/local/share/applications/chromium.desktop"
+expect_fail "launcher with a custom Exec fails gate" "not plain /usr/bin/chromium" "$INST" --verify "$TREE"
+plant "$TREE"
+
+sed -i 's|^Exec=/usr/bin/chromium %U|Exec=/usr/local/bin/chromium-drm %U|' "$TREE/usr/local/share/applications/chromium.desktop"
+expect_fail "launcher via a wrapper fails gate" "not plain /usr/bin/chromium" "$INST" --verify "$TREE"
+plant "$TREE"
+
+touch "$TREE/usr/share/applications/tesla-linux-chromium-drm.desktop"
+expect_fail "leftover 'Chromium (DRM)' launcher fails gate" "split launcher" "$INST" --verify "$TREE"
+plant "$TREE"
+
+touch "$TREE/usr/share/applications/tesla-linux-chromium.desktop"
+expect_fail "leftover 'Chromium (HW video)' launcher fails gate" "split launcher" "$INST" --verify "$TREE"
+plant "$TREE"
+
+# Desktop icon + old-launcher cleanup on a root with a user home
+mkdir -p "$TREE/home/teslalinux/Desktop" "$TREE/usr/share/applications"
+touch "$TREE/home/teslalinux/Desktop/Chromium-DRM.desktop" "$TREE/home/teslalinux/Desktop/Chromium-HW-video.desktop" \
+      "$TREE/usr/share/applications/tesla-linux-chromium-drm.desktop"
+bash -c 'set -e; r="$1"; TL_USER=teslalinux; DESKTOP_ID=chromium.desktop; DESKTOP_DIR=/usr/local/share/applications
+         OLD_DESKTOP_IDS="tesla-linux-chromium.desktop tesla-linux-chromium-drm.desktop"
+         eval "$(sed -n "/^write_desktop() {/,/^}/p" "$2")"
+         write_desktop "$r"' _ "$TREE" "$INST"
+if [ -x "$TREE/home/teslalinux/Desktop/Chromium.desktop" ] \
+   && [ ! -e "$TREE/home/teslalinux/Desktop/Chromium-DRM.desktop" ] \
+   && [ ! -e "$TREE/home/teslalinux/Desktop/Chromium-HW-video.desktop" ] \
+   && [ ! -e "$TREE/usr/share/applications/tesla-linux-chromium-drm.desktop" ]; then
+    pass "installer collapses the split launchers into one Desktop 'Chromium' icon"
+else
+    bad "split launchers not collapsed"
+fi
 plant "$TREE"
 
 rm -f "$TREE/etc/xdg/mimeapps.list"
