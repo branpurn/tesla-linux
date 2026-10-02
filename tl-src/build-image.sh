@@ -117,6 +117,7 @@ cp "$SRC"/install-tesla-linux.sh "$SRC"/install-chromium-hwdec.sh "$SRC"/ta_*.py
    "$SRC"/tesla-linux-wlan-api.service "$SRC"/ap.env \
    "$SRC"/99-tesla-linux-lte.rules \
    "$SRC"/tesla-linux-lte-dhcp.service "$SRC"/tesla-linux-lte-dhcp.timer \
+   "$SRC"/tesla-linux-alias.service "$SRC"/tesla-linux-alias.nft \
    "$MNT/tmp/tl-src/" 2>/dev/null || true
 # Stage authorized_keys for teslalinux (never print the key). Not ubuntu — ubuntu is DOA.
 if [ -f "$SRC/authorized_keys" ]; then

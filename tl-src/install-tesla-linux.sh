@@ -1305,6 +1305,10 @@ install -m644 "$HERE/99-tesla-linux-lte.rules" /etc/udev/rules.d/99-tesla-linux-
 install -m644 "$HERE/tesla-linux-lte-dhcp.service" /etc/systemd/system/tesla-linux-lte-dhcp.service
 install -m644 "$HERE/tesla-linux-lte-dhcp.timer" /etc/systemd/system/tesla-linux-lte-dhcp.timer
 
+# 198.18.0.1 alias: the Tesla browser refuses 10.42.0.1, so DNAT 198.18.0.1:80 -> 10.42.0.1:80 on wlan0.
+install -m644 "$HERE/tesla-linux-alias.nft" /etc/tesla-linux-alias.nft
+install -m644 "$HERE/tesla-linux-alias.service" /etc/systemd/system/tesla-linux-alias.service
+
 # NM dispatcher: wifi → maybe-ap (station else TeslaLinux AP); ethernet → nginx-bind
 # WAN rebroadcast: ethernet/USB LTE up may bring a DHCP WAN — refresh wan-up (AP stays, NAT).
 # wan-ap leaves station first — never station+AP dual.
@@ -1685,7 +1689,9 @@ mkdir -p /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-us
 
 enable_wlan_nginx() {
     systemctl enable tesla-linux-wlan.service tesla-linux-wlan-api.service nginx.service \
-                     tesla-linux-lte-dhcp.timer >/dev/null 2>&1 || true
+                     tesla-linux-lte-dhcp.timer tesla-linux-alias.service >/dev/null 2>&1 || true
+    ln -sfn /etc/systemd/system/tesla-linux-alias.service \
+       /etc/systemd/system/multi-user.target.wants/tesla-linux-alias.service
     ln -sfn /etc/systemd/system/tesla-linux-wlan.service \
        /etc/systemd/system/multi-user.target.wants/tesla-linux-wlan.service
     ln -sfn /etc/systemd/system/tesla-linux-wlan-api.service \
