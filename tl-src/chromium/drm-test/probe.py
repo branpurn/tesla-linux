@@ -102,6 +102,9 @@ def main():
     ap.add_argument('--extra', default='', help='extra chromium flags')
     ap.add_argument('--profile', default='')
     ap.add_argument('--json', default='')
+    ap.add_argument('--js', default='', help='JS (file path @f or expr) run on the page ~8 s after load, before measuring')
+    ap.add_argument('--report-js', default='', help='JS (@file or expr) evaluated at the end; result in report["js"]')
+    ap.add_argument('--gpu', action='store_true', help='also read chrome://gpu feature status + GL renderer')
     ap.add_argument('--components', action='store_true', help='also read chrome://components (Widevine version/status)')
     ap.add_argument('--own-profile', action='store_true', help="exe picks its own profile (chromium-drm; set TL_DRM_PROFILE); don't pass --user-data-dir. --profile then only says where to log/clean up")
     ap.add_argument('--http-port', type=int, default=0, help='serve this dir on 127.0.0.1 (EME needs a secure origin, not file://)')
@@ -142,9 +145,20 @@ def main():
             i = next((k for k, l in enumerate(ls) if 'idevine' in l), None)
             rep['components_widevine'] = ls[i:i + 4] if i is not None else None
             c.call('Page.navigate', url='about:blank'); time.sleep(1)
+        if a.gpu:
+            c.call('Page.navigate', url='chrome://gpu'); time.sleep(4)
+            txt = c.ev(WALK) or ''
+            ls = [l.strip() for l in txt.splitlines() if l.strip()]
+            keys = ('Canvas', 'Direct Rendering', 'Compositing', 'Multiple Raster', 'Rasterization', 'Video Decode', 'Video Encode', 'Vulkan', 'WebGL', 'Skia', 'GL_RENDERER', 'GL_VENDOR', 'ANGLE', 'Driver', 'Hardware')
+            rep['gpu'] = [l for l in ls if any(l.startswith(k) for k in keys)][:40]
+            rep['gpu_decoders'] = [l for l in ls if 'h264' in l.lower() or 'v4l2' in l.lower()][:12]
+            c.call('Page.navigate', url='about:blank'); time.sleep(1)
         if a.eme_only:
             return finish(rep, a)
         root = pr.pid
+        rd = lambda x: open(x[1:]).read() if x.startswith('@') else x
+        if a.js:
+            time.sleep(8); rep['js_setup'] = c.ev(rd(a.js))
         t0 = time.time(); base = {}
         time.sleep(min(10, a.seconds / 2))                      # let it start + buffer
         pids = tree(root); base = {p: ticks(p) for p in pids}; w0 = time.time()
@@ -164,6 +178,8 @@ def main():
                     if pr_['name'] in ('kVideoDecoderName', 'kAudioDecoderName', 'kIsPlatformVideoDecoder', 'kVideoDecoderName', 'kVideoPlaybackFreezing', 'kVideoEncrypted', 'kIsVideoEncrypted'):
                         dec[pr_['name']] = pr_['value']
         rep['media_props'] = dec
+        if a.report_js:
+            rep['js'] = c.ev(rd(a.report_js))
         rep['loadavg'] = open('/proc/loadavg').read().strip()
         if os.environ.get('TL_PROBE_SHOT'):
             time.sleep(1)
