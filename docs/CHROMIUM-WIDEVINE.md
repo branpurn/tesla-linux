@@ -92,7 +92,7 @@ absolute CPU/dropped numbers are pessimistic.
 | Check | Result |
 | --- | --- |
 | `chrome://components` | "Widevine Content Decryption Module" listed; version shows `0.0.0.0` because a hinted CDM isn't a component-updater install — real CDM version is **4.10.2662.3** (`/opt/WidevineCdm/manifest.json`, host/interface version 10) |
-| `requestMediaKeySystemAccess('com.widevine.alpha')` | **OK** for default and `SW_SECURE_CRYPTO` robustness; **NotSupported** for `SW_SECURE_DECODE` / `HW_SECURE_ALL` (= Widevine **L3 only**) |
+| `requestMediaKeySystemAccess('com.widevine.alpha')` | **OK** for default and `SW_SECURE_CRYPTO` robustness; **NotSupported** for `SW_SECURE_DECODE` / `HW_SECURE_ALL` (this was the packaged 2662.3 CDM in a throwaway profile; the component-updated 4.10.3057.0 in the real profile also accepts `SW_SECURE_DECODE`, see the Prime section — still Widevine **L3**) |
 | License + playback | Shaka Player 4.11 → public Axinom multi-DRM test vector (`TestVectors/v7-MultiDRM-SingleKey/Manifest_1080p.mpd`, H.264, 24 fps, license from `drm-widevine-licensing.axtest.net`): `keySystem=com.widevine.alpha`, `video.mediaKeys` set, time advances |
 | Decoder for DRM video | `kVideoDecoderName = DecryptingVideoDecoder` (CDM decrypts **and decodes**, software), `kIsPlatformVideoDecoder=false`; `/dev/video10` **not** opened by any process |
 | Decoder for clear H.264 in the same launcher | `V4L2VideoDecoder`, `kIsPlatformVideoDecoder=true`, `/dev/video10` held by the `--type=gpu-process` (720p30 clip: 51% of one core, 1280×720) |
@@ -122,10 +122,10 @@ decodes inside the CDM. (Netflix serves L3 clients at most 720p anyway.)
   extension hides VP9/AV1 from the player anyway), and at that rate the Pi
   can't hold 720p smooth under the car-stream load (see table) — pick the 480p/
   "data saver" cap in Netflix playback settings if it stutters. Netflix could
-  also refuse the CDM for being old (4.10.2662.3 is from Oct 2023; Chrome on
-  x86 gets newer CDMs from Google's component updater, which has no ARM-Linux
-  build). If Netflix shows error `M7701`/`M7121`/"unsupported browser", that is
-  the CDM/UA gate; there is no Pi-archive newer CDM to try.
+  also refuse the CDM for being old (the packaged 4.10.2662.3 is from Oct 2023;
+  but Chromium's component updater does fetch newer `linux_arm64` CDMs into the
+  profile, e.g. 4.10.3057.0, and those win). If Netflix shows error
+  `M7701`/`M7121`/"unsupported browser", that is the CDM/UA gate.
 - Other services that need L1 (Disney+/Prime in HD, Hulu) will fall back to SD
   or refuse.
 
@@ -184,41 +184,62 @@ service's own terms. L3 is software DRM: the services cap its quality.
 - No auto-updates (unattended upgrades are off): `sudo apt-get update && sudo
   apt-get install --only-upgrade libwidevinecdm0`.
 
-## Amazon Prime Video error 7031 (investigated 2026-10-02)
+## Amazon Prime Video on this Pi, incl. error 7031 (tested 2026-10-02)
 
-7031 is Amazon's generic "video unavailable / playback failed" code (Amazon
-lists it with 1007, 1022, 7003 ... 9074; remedies: update browser, sign out and
-in, drop VPN/proxy, check HDCP). On Linux Chromium it classically means the
-player rejected the browser/DRM environment. Checked on this Pi (no Amazon
-login, so the trailer/playback path itself could not be exercised):
+**Summary: Prime plays** in the logged-in default profile
+(`~teslalinux/.config/chromium`, normal `chromium` launch, `DISPLAY=:0`), in SD
+only. Error **7031** (`amazon.com/dv/error/7031`, "Video Unavailable") appeared
+**once**, on the first Play after a fresh Chromium launch, and did **not**
+recur on retries (second Play, fresh navigation, full graceful close +
+relaunch all played). Title tested: *Now You See Me: Now You Don't*
+(`/gp/video/detail/B0FZLW2HCF`, ad-supported, Prime-included).
 
-- **Widevine present and loading:** the user's running Chromium maps
-  `~/.config/chromium/WidevineCdm/4.10.3057.0/.../libwidevinecdm.so` (a newer
-  component-updated CDM, downloaded 2026-10-02 13:40 UTC), not the 2662.3 in
-  `/opt`; EME `requestMediaKeySystemAccess` succeeds (default and
-  `SW_SECURE_CRYPTO`). It is **L3 only** (no `SW_SECURE_DECODE`/`HW_SECURE_ALL`).
-- **User agent:** `Mozilla/5.0 (X11; Linux x86_64) ... Chrome/154.0.0.0` — Chromium
-  already reports `x86_64` (the aarch64 is not exposed), so there is nothing for
-  a UA spoof to hide. A Windows UA would not change what the CDM reports in the
-  license request, so it is not recommended (untested: no safe way to test it
-  without playback credentials).
-- **Clock/time zone:** `timedatectl`: NTP synchronized (chrony, offset <1 ms),
-  UTC. Not the cause.
-- **Network:** egress is a T-Mobile US mobile connection (IPv6; no VPN/proxy
-  configured: no proxy env vars, no proxy policy). `amazon.com/gp/video/storefront`
-  returns 200 with no robot check. A mobile/CGNAT or tunnel path is still a
-  documented 7031 trigger, so test on another network if everything else fails.
-- **Most likely causes, in order:** (1) Amazon's server-side rejection of the
-  Widevine **L3 arm64-Linux** client (no VMP/L1; Amazon is known to be strict
-  with non-Google-signed Chromium builds — Chromium (not Chrome) on any distro
-  gets 7031/"browser not supported" reports); (2) a stale session — the cheap
-  documented fix is to sign out and back in, restart the browser, clear
-  cookies for amazon.com; (3) VPN/IP reputation.
-- **Options:** sign out/in and retry; try the website via a different network;
-  use another device for Prime (Netflix caps Widevine L3 at 720p; not tested here, no account);
-  Google Chrome arm64 (removed; see below) bundles a newer CDM but is still L3
-  and gave the same decoder/DRM cost, so it is not expected to fix a server-side
-  rejection.
+Measured while playing:
+
+| Item | Result |
+| --- | --- |
+| Resolution | DRM stream 710x296 -> **960x400** (SD-class); the HD key comes back `output-restricted` (key statuses `usable, usable, output-restricted`) — Widevine **L3**, no HD |
+| Decoder, ad preroll (clear) | `V4L2VideoDecoder` (hardware, `/dev/video10`) |
+| Decoder, movie (DRM) | `DecryptingVideoDecoder` (CDM decrypts and decodes in software), `kIsPlatformVideoDecoder=false`; audio `FFmpegAudioDecoder` |
+| CPU | about 166-197 % of one core |
+| Dropped frames | about 7-9 % (195/2890 over 132 s; 141/1542 in a later run) |
+| CDM actually in use | component-updated **4.10.3057.0** from `~/.config/chromium/WidevineCdm/` (downloaded 2026-10-02 13:40 UTC), **not** `/opt` 2662.3; it accepts `SW_SECURE_DECODE` (2662.3 did not) |
+| Robustness negotiation | `HW_SECURE_ALL` / `HW_SECURE_CRYPTO` -> NotSupported; Amazon falls back to **`SW_SECURE_DECODE`** video + `SW_SECURE_CRYPTO` audio, which is granted |
+| License path (playing runs) | `StartSession`, `GetWidevineLicense` and `UpdateSession` all HTTP 200 |
+
+### The one 7031
+
+- It happened ~46 s after clicking Play. `GetVodPlaybackResources` returned
+  200 and the clear ad preroll played, but the DRM video element (mediaKeys
+  attached) **never made a license request** (no `GetWidevineLicense` call at
+  all): it failed **before the license step**, so it is not a license-server
+  rejection and not a missing/old CDM.
+- Many Amazon telemetry POSTs (atv-ps Clickstream/reportEvent,
+  `unagi.amazon.com` events) fail with `net::ERR_BLOCKED_BY_CLIENT`. The
+  profile has an ad-blocker extension (id `ddkjiahejlhfcafbddmgiahcphecmpfh`,
+  believed to be uBlock Origin Lite) besides `tl-h264-only`. Web reports tie
+  blocked Amazon telemetry to 7031, but playback worked later **with the
+  blocker still active**, so this is a suspect, **not proven** to be the cause.
+- Most likely: a transient first-session player/DRM initialisation failure.
+
+### Other things checked (not the cause)
+
+- **User agent:** `Mozilla/5.0 (X11; Linux x86_64) ... Chrome/154.0.0.0`
+  (aarch64 is not exposed); no UA spoof needed.
+- **Clock:** NTP synchronized (chrony), UTC.
+- **Network:** T-Mobile US mobile egress (IPv6), no VPN/proxy; amazon.com
+  storefront returns 200 with no robot check.
+
+### Options
+
+1. **Retry** after a 7031 (worked every time after the first).
+2. If 7031 keeps showing up on first Play: allowlist `amazon.com`, `atv-ps`
+   and `unagi` in the ad-blocker (or disable it for Prime) and see whether it
+   stops. This changes the user's profile, so **only with the user's OK**.
+3. HD is not available (L3). Google Chrome arm64 (removed; see below) is
+   still L3 with the same decoder/DRM cost, so it would not help.
+4. Do not sign out, clear amazon.com cookies, or kill a decoding Chromium to
+   "fix" it (see the SIGKILL warning above).
 
 ## Why not Google Chrome (arm64)? — measured Oct 2026, then removed
 
