@@ -551,6 +551,28 @@ verify_chromium_widevine() {
     bash "$(chromium_widevine_script)" --verify "${1:-}"
 }
 
+# Google Chrome (ARM64) from Google's apt repo (pinned to google-chrome-stable),
+# bundled newer Widevine CDM, launcher "Google Chrome (DRM)". Additive; Firefox
+# stays default. Delegates to install-google-chrome-arm64.sh next to this script.
+# TL_SKIP_GOOGLE_CHROME=1 skips it (e.g. low-disk bakes; needs ~900 MB free).
+google_chrome_script() {
+    local d
+    d="$(cd "$(dirname "$0")" && pwd)"
+    [ -f "$d/install-google-chrome-arm64.sh" ] \
+        || { echo "ERROR: install-google-chrome-arm64.sh missing next to $0" >&2; exit 1; }
+    printf '%s' "$d/install-google-chrome-arm64.sh"
+}
+
+ensure_google_chrome() {
+    [ "${TL_SKIP_GOOGLE_CHROME:-0}" = "1" ] && return 0
+    bash "$(google_chrome_script)"
+}
+
+verify_google_chrome() {
+    [ "${TL_SKIP_GOOGLE_CHROME:-0}" = "1" ] && return 0
+    bash "$(google_chrome_script)" --verify "${1:-}"
+}
+
 # Host-side / live / bake: Mozilla apt Firefox .deb, XFCE desktop entry,
 # not the Ubuntu snap stub. Optional prefix ($1) is an image / plant root.
 verify_firefox() {
@@ -1245,6 +1267,11 @@ if [ "${1:-}" = "--verify-chromium-widevine" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--verify-google-chrome" ]; then
+    verify_google_chrome "${2:-}"
+    exit 0
+fi
+
 if [ "${1:-}" = "--verify-wallpaper" ]; then
     verify_xfce_wallpaper "${2:-}"
     exit 0
@@ -1269,6 +1296,7 @@ ensure_no_unattended
 ensure_firefox_deb
 ensure_chromium_hwdec
 ensure_chromium_widevine
+ensure_google_chrome
 set_graphical_default
 TL_UID="$(id -u "$TL_USER")"
 
@@ -1768,5 +1796,7 @@ verify_firefox
 verify_chromium_hwdec
 # Fail the bake/install if Chromium (DRM) (Widevine CDM pin / wrapper / launcher) did not stick.
 verify_chromium_widevine
+# Fail the bake/install if Google Chrome (apt key/pin, wrapper, launcher, Firefox still default) did not stick.
+verify_google_chrome
 # Fail the bake/install if the Xubuntu wallpaper xfdesktop default did not stick.
 verify_xfce_wallpaper
