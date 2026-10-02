@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Tesla Linux H.264 only",
+  "version": "1.0",
+  "description": "Hide VP9/AV1 from web video players so sites (YouTube, ...) pick H.264, which the Pi 4 decodes in hardware.",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["h264only.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "world": "MAIN"
+    }
+  ]
+}
