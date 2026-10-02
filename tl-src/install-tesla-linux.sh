@@ -462,9 +462,9 @@ verify_chromium_hwdec() {
     bash "$(chromium_hwdec_script)" --verify "${1:-}"
 }
 
-# Chromium (DRM): the same Chromium + Widevine CDM (libwidevinecdm0 from the Pi
-# archive) behind its own wrapper/profile/launcher "Chromium (DRM)". Additive and
-# parallel to the HW-video launcher. Delegates to install-chromium-widevine.sh.
+# Widevine for every Chromium launch (libwidevinecdm0 from the Pi archive, hint
+# file written by /etc/chromium.d/tesla-linux-widevine); one "Chromium" launcher. Runs
+# after the HW-decode install. Delegates to install-chromium-widevine.sh.
 # TL_SKIP_CHROMIUM_WIDEVINE=1 skips it (TL_SKIP_CHROMIUM=1 skips it too: no browser).
 chromium_widevine_script() {
     local d
@@ -1651,7 +1651,7 @@ verify_wan_rebroadcast
 verify_no_unattended
 # Fail the bake/install if Chromium (V4L2 HW decode) apt pin / policy / extension did not stick.
 verify_chromium_hwdec
-# Fail the bake/install if Chromium (DRM) (Widevine CDM pin / wrapper / launcher) did not stick.
+# Fail the bake/install if Widevine (CDM pin / chromium.d snippet / single launcher) did not stick.
 verify_chromium_widevine
 # Fail the bake/install if the Xubuntu wallpaper xfdesktop default did not stick.
 verify_xfce_wallpaper

@@ -43,7 +43,12 @@ CHROMIUM_PIN_PKGS="chromium chromium-common chromium-sandbox chromium-l10n zenot
 
 EXT_NAME=tl-h264-only
 EXT_DST=/usr/share/chromium/extensions/$EXT_NAME
-DESKTOP_ID=tesla-linux-chromium.desktop
+# The ONE launcher: same desktop id as the Debian package's (so mimeapps,
+# exo, xdg-open and the menu all resolve to it) but placed in /usr/local/share,
+# which wins over /usr/share and survives chromium package upgrades.
+DESKTOP_ID=chromium.desktop
+DESKTOP_DIR=/usr/local/share/applications
+OLD_DESKTOP_IDS="tesla-linux-chromium.desktop tesla-linux-chromium-drm.desktop"
 
 if [ "${1:-}" = "--print-packages" ]; then echo "$CHROMIUM_PKGS"; exit 0; fi
 
@@ -153,28 +158,41 @@ install_extension() {
 }
 
 write_desktop() {
-    local r="${1:-}"
-    install -d -m0755 "$r/usr/share/applications"
-    cat > "$r/usr/share/applications/$DESKTOP_ID" <<'EOF'
+    local r="${1:-}" id
+    install -d -m0755 "$r$DESKTOP_DIR"
+    cat > "$r$DESKTOP_DIR/$DESKTOP_ID" <<'TLHW'
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Chromium (HW video)
+Name=Chromium
 GenericName=Web Browser
-Comment=Chromium with V4L2 hardware H.264 decode (YouTube forced to H.264)
+Comment=Chromium with V4L2 hardware H.264 decode (YouTube forced to H.264) and Widevine DRM
 Exec=/usr/bin/chromium %U
 Icon=chromium
 Terminal=false
 StartupNotify=true
 StartupWMClass=chromium
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
 Categories=Network;WebBrowser;
-EOF
-    chmod 0644 "$r/usr/share/applications/$DESKTOP_ID"
+Actions=new-window;new-private-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=/usr/bin/chromium
+
+[Desktop Action new-private-window]
+Name=New Incognito Window
+Exec=/usr/bin/chromium --incognito
+TLHW
+    chmod 0644 "$r$DESKTOP_DIR/$DESKTOP_ID"
+    # Collapse the former split launchers ("Chromium (HW video)" / "Chromium (DRM)").
+    for id in $OLD_DESKTOP_IDS; do rm -f "$r/usr/share/applications/$id"; done
     # XFCE desktop icon (xfdesktop only shows executable launchers).
     local home="$r/home/$TL_USER"
     if [ -d "$home" ]; then
         install -d "$home/Desktop"
-        install -m0755 "$r/usr/share/applications/$DESKTOP_ID" "$home/Desktop/Chromium-HW-video.desktop"
+        rm -f "$home/Desktop/Chromium-HW-video.desktop" "$home/Desktop/Chromium-DRM.desktop"
+        install -m0755 "$r$DESKTOP_DIR/$DESKTOP_ID" "$home/Desktop/Chromium.desktop"
         if [ -z "$r" ]; then chown -R "$TL_USER:$TL_USER" "$home/Desktop" 2>/dev/null || true; fi
     fi
 }
@@ -237,7 +255,7 @@ verify_default_browser() {
 
 verify_chromium() {
     local r="${1:-}"
-    local list pin key bin pol flags desk ext
+    local list pin key bin pol flags desk ext id
 
     list="$r/etc/apt/sources.list.d/raspberrypi-chromium.list"
     [ -f "$list" ] || { echo "ERROR: missing Raspberry Pi chromium apt source" >&2; exit 1; }
@@ -288,10 +306,19 @@ verify_chromium() {
     [ -f "$ext/manifest.json" ] || { echo "ERROR: h264-only extension manifest missing" >&2; exit 1; }
     [ -f "$ext/h264only.js" ] || { echo "ERROR: h264-only extension script missing" >&2; exit 1; }
 
-    desk="$r/usr/share/applications/$DESKTOP_ID"
+    desk="$r$DESKTOP_DIR/$DESKTOP_ID"
     [ -f "$desk" ] || { echo "ERROR: chromium desktop entry missing" >&2; exit 1; }
-    grep -qi '^Exec=.*chromium' "$desk" \
-        || { echo "ERROR: $DESKTOP_ID has no Exec chromium" >&2; exit 1; }
+    grep -q '^Name=Chromium$' "$desk" \
+        || { echo "ERROR: $DESKTOP_ID is not the single \"Chromium\" launcher" >&2; exit 1; }
+    # Every Exec must be the stock /usr/bin/chromium (flags + Widevine come from
+    # /etc/chromium.d), never a wrapper/profile that could skip them.
+    if grep '^Exec=' "$desk" | grep -Ev '^Exec=/usr/bin/chromium( --incognito)?( %U)?$' | grep -q .; then
+        echo "ERROR: $DESKTOP_ID Exec is not plain /usr/bin/chromium" >&2; exit 1
+    fi
+    for id in $OLD_DESKTOP_IDS; do
+        [ ! -e "$r/usr/share/applications/$id" ] \
+            || { echo "ERROR: split launcher $id still present (single Chromium launcher only)" >&2; exit 1; }
+    done
 
     if [ -z "$r" ]; then
         [ -e /usr/lib/chromium/chromium ] || { echo "ERROR: /usr/lib/chromium/chromium missing" >&2; exit 1; }

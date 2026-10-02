@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tesla Linux — "Chromium (DRM)": the Pi-archive Chromium + Widevine CDM.
+# Tesla Linux — Widevine DRM for the Pi-archive Chromium (all launch paths).
 #
 # Widevine is a proprietary CDM (Google's, redistributed by Raspberry Pi in
 # archive.raspberrypi.com as libwidevinecdm0). Raspberry Pi ships it for BOTH
@@ -7,16 +7,19 @@
 # one loads in the existing 64-bit Chromium — no 32-bit userland needed (see
 # docs/CHROMIUM-WIDEVINE.md for the evidence and why armhf was not installed).
 #
-# What this installs, in parallel with (never changing) the HW-decode browser:
+# What this installs (Chromium is the single browser; EVERY launch path gets DRM):
 #   * libwidevinecdm0 (arm64) from the Pi archive -> /opt/WidevineCdm, via its
 #     own apt pin (only that package may come from archive.raspberrypi.com).
-#   * /usr/local/bin/chromium-drm — wrapper around /usr/bin/chromium with a
-#     SEPARATE profile (~/.config/chromium-drm) whose WidevineCdm hint file
-#     points at /opt/WidevineCdm. /usr/bin/chromium and /etc/chromium.d/* are
-#     untouched, so every shared flag (H.264 HW decode, X11, ...) still applies.
-#   * XFCE menu entry + desktop icon "Chromium (DRM)".
-#
-# Idempotent. Live Pi or image-bake chroot. Firefox / the HW-video Chromium stay.
+#   * /etc/chromium.d/tesla-linux-widevine — sourced by /usr/bin/chromium on
+#     every start. Chromium finds the CDM through a per-profile hint file
+#     (<profile>/WidevineCdm/latest-component-updated-widevine-cdm); this
+#     snippet writes it into whichever profile is about to be used (default
+#     ~/.config/chromium, or --user-data-dir), unless the profile already has a
+#     working, newer component-updated CDM. So bare `chromium`, chromium.desktop,
+#     xdg-open, x-www-browser and the Desktop icon all get Widevine + the
+#     H.264 HW-decode flags/extension from /etc/chromium.d/tesla-linux.
+#   * /usr/local/bin/chromium-drm — only a compatibility shim (-> /usr/bin/chromium).
+#     The old separate "Chromium (DRM)" launcher/profile no longer exists.
 #
 #   install-chromium-widevine.sh                 pin + libwidevinecdm0 + wrapper + launcher
 #   install-chromium-widevine.sh --print-packages
@@ -32,7 +35,8 @@ TL_USER="${TL_USER:-teslalinux}"
 WV_PKGS="libwidevinecdm0"
 WV_DIR=/opt/WidevineCdm
 WRAPPER=/usr/local/bin/chromium-drm
-DESKTOP_ID=tesla-linux-chromium-drm.desktop
+FLAGS_FILE=/etc/chromium.d/tesla-linux-widevine
+OLD_DESKTOP_IDS="tesla-linux-chromium-drm.desktop tesla-linux-chromium.desktop"
 PIN=/etc/apt/preferences.d/raspberrypi-widevine
 PROBE_DST=/usr/share/tesla-linux/chromium-drm
 
@@ -51,54 +55,63 @@ EOF
     chmod 0644 "$r$PIN"
 }
 
+write_flags() {
+    local r="${1:-}"
+    install -d -m0755 "$r/etc/chromium.d"
+    cat > "$r$FLAGS_FILE" <<'TLWV'
+# Tesla Linux — Widevine DRM for EVERY Chromium launch (managed file,
+# install-chromium-widevine.sh). /usr/bin/chromium sources /etc/chromium.d/* on
+# each start, so bare `chromium`, chromium.desktop, xdg-open, x-www-browser and
+# the Desktop icon all pass through here. Chromium (Debian/Pi build) has no
+# bundled-CDM path: it loads the CDM named by a per-profile hint file, so make
+# sure the profile about to be used has one. A working component-updated CDM
+# already in the profile (Chromium's updater fetches linux_arm64 builds) wins.
+tl_cdm=/opt/WidevineCdm
+if [ -f "$tl_cdm/manifest.json" ]; then
+    tl_prof=
+    for tl_a in $CHROMIUM_FLAGS "$@"; do
+        case "$tl_a" in --user-data-dir=*) tl_prof="${tl_a#--user-data-dir=}" ;; esac
+    done
+    [ -n "$tl_prof" ] || tl_prof="${XDG_CONFIG_HOME:-$HOME/.config}/chromium"
+    tl_hint="$tl_prof/WidevineCdm/latest-component-updated-widevine-cdm"
+    tl_cur="$(sed -n 's/.*"Path" *: *"\([^"]*\)".*/\1/p' "$tl_hint" 2>/dev/null)"
+    if [ -z "$tl_cur" ] || [ ! -f "$tl_cur/manifest.json" ]; then
+        { mkdir -p "$tl_prof/WidevineCdm" && printf '{"Path":"%s"}\n' "$tl_cdm" > "$tl_hint"; } 2>/dev/null || true
+    fi
+    unset tl_prof tl_hint tl_cur tl_a
+fi
+unset tl_cdm
+TLWV
+    chmod 0644 "$r$FLAGS_FILE"
+}
+
+# Compatibility shim only: scripts/tools that still call chromium-drm get the
+# same single browser (all launch paths already have Widevine). TL_DRM_PROFILE
+# still selects a throwaway profile for the probe/selftests.
 write_wrapper() {
     local r="${1:-}"
     install -d -m0755 "$r/usr/local/bin"
-    cat > "$r$WRAPPER" <<'EOF'
+    cat > "$r$WRAPPER" <<'TLWV'
 #!/bin/sh
-# Tesla Linux — Chromium (DRM): Chromium + Widevine CDM, own profile.
-# Managed file (install-chromium-widevine.sh). Chromium finds the CDM through a
-# per-profile hint file; it has no bundled-CDM path in the Debian build.
-# Same flags as /usr/bin/chromium (it sources /etc/chromium.d/*).
-CDM_DIR=/opt/WidevineCdm
-PROFILE="${TL_DRM_PROFILE:-${XDG_CONFIG_HOME:-$HOME/.config}/chromium-drm}"
-if [ -f "$CDM_DIR/manifest.json" ]; then
-    mkdir -p "$PROFILE/WidevineCdm"
-    hint="$PROFILE/WidevineCdm/latest-component-updated-widevine-cdm"
-    want="{\"Path\":\"$CDM_DIR\"}"
-    [ "$(cat "$hint" 2>/dev/null)" = "$want" ] || printf '%s\n' "$want" > "$hint"
-else
-    echo "chromium-drm: $CDM_DIR missing (libwidevinecdm0 not installed); DRM will not work" >&2
+# Tesla Linux — compatibility shim. Chromium is the single browser and every
+# launch path (this one included) has HW H.264 decode + Widevine via
+# /etc/chromium.d/tesla-linux and /etc/chromium.d/tesla-linux-widevine.
+if [ -n "${TL_DRM_PROFILE:-}" ]; then
+    exec /usr/bin/chromium --user-data-dir="$TL_DRM_PROFILE" "$@"
 fi
-exec /usr/bin/chromium --user-data-dir="$PROFILE" "$@"
-EOF
+exec /usr/bin/chromium "$@"
+TLWV
     chmod 0755 "$r$WRAPPER"
 }
 
-write_desktop() {
-    local r="${1:-}"
-    install -d -m0755 "$r/usr/share/applications"
-    cat > "$r/usr/share/applications/$DESKTOP_ID" <<EOF
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Chromium (DRM)
-GenericName=Web Browser
-Comment=Chromium with Widevine DRM (Netflix etc., software CDM L3, up to 720p) - separate profile
-Exec=$WRAPPER %U
-Icon=chromium
-Terminal=false
-StartupNotify=true
-Categories=Network;WebBrowser;
-Keywords=Netflix;Widevine;DRM;
-EOF
-    chmod 0644 "$r/usr/share/applications/$DESKTOP_ID"
-    local home="$r/home/$TL_USER"
-    if [ -d "$home" ]; then
-        install -d "$home/Desktop"
-        install -m0755 "$r/usr/share/applications/$DESKTOP_ID" "$home/Desktop/Chromium-DRM.desktop"
-        if [ -z "$r" ]; then chown -R "$TL_USER:$TL_USER" "$home/Desktop" 2>/dev/null || true; fi
-    fi
+# The former separate "Chromium (DRM)" launcher is gone (one "Chromium" launcher
+# is written by install-chromium-hwdec.sh).
+remove_split_launchers() {
+    local r="${1:-}" id
+    for id in $OLD_DESKTOP_IDS; do
+        rm -f "$r/usr/share/applications/$id"
+    done
+    rm -f "$r/home/$TL_USER/Desktop/Chromium-DRM.desktop" "$r/home/$TL_USER/Desktop/Chromium-HW-video.desktop"
 }
 
 # Probe page + runner (Shaka Widevine test vector), for manual/regression checks.
@@ -114,7 +127,7 @@ install_probe() {
 
 verify_widevine() {
     local r="${1:-}"
-    local pin="$r$PIN" w="$r$WRAPPER" d="$r/usr/share/applications/$DESKTOP_ID"
+    local pin="$r$PIN" w="$r$WRAPPER" f="$r$FLAGS_FILE" id
 
     [ -f "$pin" ] || { echo "ERROR: missing Widevine apt pin" >&2; exit 1; }
     grep -q '^Package: libwidevinecdm0$' "$pin" \
@@ -126,21 +139,29 @@ verify_widevine() {
         exit 1
     fi
 
-    [ -x "$w" ] || { echo "ERROR: $WRAPPER missing or not executable" >&2; exit 1; }
-    grep -q 'exec /usr/bin/chromium --user-data-dir=' "$w" \
-        || { echo "ERROR: chromium-drm does not wrap /usr/bin/chromium with its own profile" >&2; exit 1; }
-    grep -q 'latest-component-updated-widevine-cdm' "$w" \
-        || { echo "ERROR: chromium-drm does not write the Widevine hint file" >&2; exit 1; }
-    if grep -q -- '--no-sandbox' "$w"; then
-        echo "ERROR: chromium-drm must not disable the sandbox" >&2
+    [ -f "$f" ] || { echo "ERROR: $FLAGS_FILE missing (bare chromium would have no Widevine)" >&2; exit 1; }
+    grep -q 'latest-component-updated-widevine-cdm' "$f" \
+        || { echo "ERROR: $FLAGS_FILE does not write the Widevine hint file" >&2; exit 1; }
+    grep -q '/opt/WidevineCdm' "$f" \
+        || { echo "ERROR: $FLAGS_FILE does not point at $WV_DIR" >&2; exit 1; }
+    grep -q -- '--user-data-dir=' "$f" \
+        || { echo "ERROR: $FLAGS_FILE ignores --user-data-dir (hint would miss the real profile)" >&2; exit 1; }
+    if grep -Eq -- '--no-sandbox|--disable-gpu([[:space:]"]|$)' "$f"; then
+        echo "ERROR: $FLAGS_FILE must not disable the sandbox / GPU" >&2
         exit 1
     fi
 
-    [ -f "$d" ] || { echo "ERROR: Chromium (DRM) desktop entry missing" >&2; exit 1; }
-    grep -q "^Exec=$WRAPPER" "$d" \
-        || { echo "ERROR: DRM desktop entry does not run $WRAPPER" >&2; exit 1; }
-    grep -q '^Name=Chromium (DRM)$' "$d" \
-        || { echo "ERROR: DRM desktop entry name" >&2; exit 1; }
+    [ -x "$w" ] || { echo "ERROR: $WRAPPER missing or not executable" >&2; exit 1; }
+    grep -q 'exec /usr/bin/chromium' "$w" \
+        || { echo "ERROR: chromium-drm shim does not exec /usr/bin/chromium" >&2; exit 1; }
+    if grep -Eq -- '--no-sandbox|--user-data-dir="?[^$"]' "$w"; then
+        echo "ERROR: chromium-drm shim must not disable the sandbox or force a separate profile" >&2
+        exit 1
+    fi
+    for id in $OLD_DESKTOP_IDS; do
+        [ ! -e "$r/usr/share/applications/$id" ] \
+            || { echo "ERROR: split launcher $id still present (single Chromium launcher only)" >&2; exit 1; }
+    done
 
     [ -f "$r$PROBE_DST/drm.html" ] && [ -x "$r$PROBE_DST/probe.py" ] \
         || { echo "ERROR: DRM probe not installed" >&2; exit 1; }
@@ -154,9 +175,6 @@ verify_widevine() {
         [ "$(head -c4 "$WV_DIR/_platform_specific/linux_arm64/libwidevinecdm.so" | tail -c3)" = "ELF" ] \
             || { echo "ERROR: Widevine CDM library is not an ELF" >&2; exit 1; }
         [ -e /usr/bin/chromium ] || { echo "ERROR: /usr/bin/chromium missing (install-chromium-hwdec.sh)" >&2; exit 1; }
-        case "$(readlink -f /etc/alternatives/x-www-browser 2>/dev/null || true)" in
-            *chromium*) echo "ERROR: x-www-browser switched to chromium" >&2; exit 1 ;;
-        esac
     fi
 }
 
@@ -166,7 +184,7 @@ if [ "${1:-}" = "--verify" ]; then
 fi
 
 if [ "${TL_SKIP_CHROMIUM_WIDEVINE:-0}" = "1" ] || [ "${TL_SKIP_CHROMIUM:-0}" = "1" ]; then
-    echo "TL_SKIP_CHROMIUM_WIDEVINE/TL_SKIP_CHROMIUM=1: skipping Chromium (DRM) install"
+    echo "TL_SKIP_CHROMIUM_WIDEVINE/TL_SKIP_CHROMIUM=1: skipping Chromium Widevine install"
     exit 0
 fi
 
@@ -176,7 +194,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 arch="$(dpkg --print-architecture)"
-[ "$arch" = "arm64" ] || { echo "ERROR: Chromium (DRM) build is arm64-only (this is $arch)" >&2; exit 1; }
+[ "$arch" = "arm64" ] || { echo "ERROR: Widevine Chromium build is arm64-only (this is $arch)" >&2; exit 1; }
 [ -e /usr/bin/chromium ] || { echo "ERROR: /usr/bin/chromium missing - run install-chromium-hwdec.sh first" >&2; exit 1; }
 
 export DEBIAN_FRONTEND=noninteractive
@@ -188,8 +206,9 @@ NEEDRESTART_SUSPEND=1 apt-get install -y -q --no-install-recommends $WV_PKGS
 # The pin must actually have selected the Pi archive build (not a stale/other origin).
 apt-cache policy libwidevinecdm0 | grep -q 'archive.raspberrypi.com' \
     || { echo "ERROR: libwidevinecdm0 is not available from the Pi archive" >&2; exit 1; }
+write_flags ""
 write_wrapper ""
-write_desktop ""
+remove_split_launchers ""
 install_probe ""
 verify_widevine ""
-echo "==> Chromium (DRM) installed: Widevine $(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' $WV_DIR/manifest.json), launch: $WRAPPER"
+echo "==> Chromium Widevine installed: $(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' $WV_DIR/manifest.json) (every launch path, via $FLAGS_FILE)"
