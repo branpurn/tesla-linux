@@ -85,7 +85,10 @@ if "$MAIN" --print-packages | grep -qiE 'firefox|google-chrome'; then
 else
     pass "main PKGS has no firefox / google-chrome (chromium is the only browser)"
 fi
-if grep -qiE 'firefox|mozilla|google-chrome|chrome-stable' "$MAIN" "$BUILD"; then
+# Exclusion/verification of other browsers (apt pin + --verify-xubuntu: comments,
+# `Package:` pin lines, lines that also name thunderbird, snap-file probes) is not a reference.
+if cat "$MAIN" "$BUILD" | grep -vE '^[[:space:]]*#|^Package:|thunderbird|snaps/firefox_' \
+    | grep -qiE 'firefox|mozilla|google-chrome|chrome-stable'; then
     bad "install/build scripts still reference firefox / google-chrome"
 else
     pass "install/build scripts have no firefox / google-chrome references"

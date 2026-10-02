@@ -152,7 +152,17 @@ apt-get install -y -q --no-install-recommends network-manager avahi-daemon libns
 
 PKGS=$(/tmp/tl-src/install-tesla-linux.sh --print-packages)
 echo "installing: $PKGS"
-apt-get install -y -q --no-install-recommends $PKGS
+# Xubuntu DE: the full xubuntu-desktop metapackage WITH its recommends, but only
+# under the apt pin that keeps Firefox/Thunderbird (snap launchers), LibreOffice,
+# GIMP, GDM, cloud-init, CUPS ... out (Chromium is the only browser). The pin must
+# exist BEFORE the install; policy-rc.d keeps lightdm & friends from starting.
+/tmp/tl-src/install-tesla-linux.sh --print-apt-pins > /etc/apt/preferences.d/tesla-linux-xubuntu-exclude.pref
+printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d; chmod +x /usr/sbin/policy-rc.d
+BASE_PKGS=$(printf '%s\n' $PKGS | grep -vx 'xubuntu-desktop' | tr '\n' ' ')
+apt-get install -y -q --no-install-recommends $BASE_PKGS
+apt-get install -y -q -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef \
+    -o APT::Keep-Downloaded-Packages=false xubuntu-desktop
+rm -f /usr/sbin/policy-rc.d
 
 # hand all interfaces to NetworkManager
 rm -f /etc/netplan/*.yaml
@@ -172,6 +182,8 @@ systemctl enable NetworkManager >/dev/null 2>&1 || true
 /tmp/tl-src/install-tesla-linux.sh --verify-autologin
 # No background apt auto-patch — fail the chroot if timers/Unattended-Upgrade did not stick.
 /tmp/tl-src/install-tesla-linux.sh --verify-no-unattended
+# Xubuntu DE guard rails: apt pin, lightdm masked, no other browser/snap browser/cloud-init/office.
+/tmp/tl-src/install-tesla-linux.sh --verify-xubuntu
 # Chromium (Pi archive build, V4L2 HW H.264 decode; the only browser + system default) is installed by --no-start above.
 /tmp/tl-src/install-tesla-linux.sh --verify-chromium
 # Widevine in every Chromium launch: CDM + /etc/chromium.d snippet + single launcher (also installed by --no-start).
@@ -318,6 +330,7 @@ log "verifying unified HDMI / web / KBM Xorg :0"
 "$SRC/install-tesla-linux.sh" --verify-no-unattended "$MNT"
 "$SRC/install-tesla-linux.sh" --verify-chromium "$MNT"
 "$SRC/install-tesla-linux.sh" --verify-chromium-widevine "$MNT"
+"$SRC/install-tesla-linux.sh" --verify-xubuntu "$MNT"
 grep -q '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
   || die "Xorg is not on vt1"
 if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
