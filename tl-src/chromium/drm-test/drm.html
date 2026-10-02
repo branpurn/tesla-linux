@@ -1,0 +1,50 @@
+<!doctype html>
+<!-- Tesla Linux Widevine/EME probe. Not installed by default as a site; used by
+     probe.py and for manual checks:  http://127.0.0.1:8765/drm.html#h=720 (served by probe.py; EME refuses file://)
+     Plays the public Axinom multi-DRM H.264 test vector (24 fps, up to 1080p)
+     through Shaka Player (CDN) with Widevine. Query: #h=<height>&codec=avc1|hev1 -->
+<html><head><meta charset="utf-8"><title>tl-drm</title>
+<style>html,body{margin:0;background:#222;color:#eee;font:14px monospace}video{width:100%;max-height:70vh;background:#000}</style>
+<script src="https://cdn.jsdelivr.net/npm/shaka-player@4.11.0/dist/shaka-player.compiled.js"></script>
+</head><body><video id="v" muted autoplay playsinline></video><pre id="o">starting</pre>
+<script>
+const P = new URLSearchParams(location.hash.slice(1));
+const H = +(P.get('h') || 720), CODEC = P.get('codec') || 'avc1';
+const MPD = 'https://media.axprod.net/TestVectors/v7-MultiDRM-SingleKey/Manifest_1080p.mpd';
+const LIC = 'https://drm-widevine-licensing.axtest.net/AcquireLicense';
+// Public Axinom demo token (same one Shaka Player's own demo uses).
+const TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ2ZXJzaW9uIjoxLCJjb21fa2V5X2lkIjoiYjMzNjRlYjUtNTFmNi00YWUzLThjOTgtMzNjZWQ1ZTMxYzc4IiwibWVzc2FnZSI6eyJ0eXBlIjoiZW50aXRsZW1lbnRfbWVzc2FnZSIsImtleXMiOlt7ImlkIjoiOWViNDA1MGQtZTQ0Yi00ODAyLTkzMmUtMjdkNzUwODNlMjY2IiwiZW5jcnlwdGVkX2tleSI6ImxLM09qSExZVzI0Y3Iya3RSNzRmbnc9PSJ9XX19.4lWwW46k-oWcah8oN18LPj5OLS5ZU-_AQv7fe0JhNjA';
+window.S = {phase: 'init', h: H, codec: CODEC, log: []};
+const log = m => { S.log.push(m); document.getElementById('o').textContent = JSON.stringify(S, null, 1); };
+(async () => {
+  try {
+    shaka.polyfill.installAll();
+    const v = document.getElementById('v');
+    const pl = new shaka.Player(); await pl.attach(v);
+    pl.configure({
+      drm: {servers: {'com.widevine.alpha': LIC},
+            advanced: {'com.widevine.alpha': {headers: {'X-AxDRM-Message': TOKEN}}}},
+      abr: {enabled: false},
+      preferredVideoCodecs: [CODEC],
+    });
+    pl.addEventListener('error', e => { S.error = String(e.detail && (e.detail.code + ' ' + e.detail.message)); log('error'); });
+    S.phase = 'loading'; log('load');
+    await pl.load(MPD);
+    const tr = pl.getVariantTracks().filter(t => t.videoCodec && t.videoCodec.startsWith(CODEC));
+    S.tracks = tr.map(t => t.height + 'p/' + t.videoCodec);
+    let best = tr.filter(t => t.height <= H).sort((a, b) => b.height - a.height)[0] || tr[0];
+    pl.selectVariantTrack(best, true);
+    S.picked = best.height + 'p ' + best.videoCodec;
+    S.keySystem = pl.keySystem();
+    S.phase = 'playing'; log('selected');
+    v.muted = true; await v.play().catch(e => log('play: ' + e));
+    setInterval(() => {
+      const q = v.getVideoPlaybackQuality();
+      S.t = +v.currentTime.toFixed(2); S.vw = v.videoWidth; S.vh = v.videoHeight;
+      S.frames = q.totalVideoFrames; S.dropped = q.droppedVideoFrames;
+      S.paused = v.paused; S.buffering = pl.isBuffering();
+      document.getElementById('o').textContent = JSON.stringify(S, null, 1);
+    }, 500);
+  } catch (e) { S.error = String(e && e.message || e) + ' ' + (e && e.code || ''); try { S.errdata = JSON.stringify(e.data); } catch (_) {} S.phase = 'failed'; log('fail'); }
+})();
+</script></body></html>

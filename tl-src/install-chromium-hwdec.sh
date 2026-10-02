@@ -7,7 +7,7 @@
 # "Video Decode: Hardware accelerated" and the media pipeline picks
 # V4L2VideoDecoder on /dev/video10 (bcm2835-codec, stateful H.264).
 #
-# Idempotent. Live Pi or image-bake chroot. Firefox is left alone.
+# Idempotent. Live Pi or image-bake chroot. Chromium is the ONLY browser and the system default.
 #
 #   install-chromium-hwdec.sh                 apt source + pin + packages + config
 #   install-chromium-hwdec.sh --ensure-apt    only key / sources.list.d / pin
@@ -179,14 +179,60 @@ EOF
     fi
 }
 
-# Chromium must not become the default browser (Firefox stays default).
-verify_default_browser_firefox() {
-    [ -e /usr/bin/firefox ] || return 0
-    local cur
-    cur="$(readlink -f /etc/alternatives/x-www-browser 2>/dev/null || true)"
-    case "$cur" in
-        *chromium*) echo "ERROR: x-www-browser switched to chromium" >&2; exit 1 ;;
-    esac
+# Chromium is the default browser: x-www-browser / gnome-www-browser, XFCE
+# "Preferred Applications" (exo WebBrowser), and the http/https/html mime
+# defaults (system-wide /etc/xdg/mimeapps.list + the factory user's own).
+# $1 = optional image / plant root. update-alternatives only on a live system.
+set_default_browser() {
+    local r="${1:-}" home f ids m
+    home="$r/home/$TL_USER"
+    if [ -z "$r" ]; then
+        update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/chromium 200 >/dev/null 2>&1 || true
+        update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/chromium 200 >/dev/null 2>&1 || true
+        update-alternatives --set x-www-browser /usr/bin/chromium >/dev/null 2>&1 || true
+        update-alternatives --set gnome-www-browser /usr/bin/chromium >/dev/null 2>&1 || true
+    fi
+    ids="x-scheme-handler/http x-scheme-handler/https text/html application/xhtml+xml"
+    install -d "$r/etc/xdg" "$r/etc/xdg/xfce4"
+    {
+        echo "[Default Applications]"
+        for m in $ids; do echo "$m=chromium.desktop"; done
+    } > "$r/etc/xdg/mimeapps.list"
+    # XFCE preferred application (system default, then the user's override).
+    if [ -f "$r/etc/xdg/xfce4/helpers.rc" ]; then
+        sed -i '/^WebBrowser=/d' "$r/etc/xdg/xfce4/helpers.rc"
+    fi
+    printf 'WebBrowser=chromium\n' >> "$r/etc/xdg/xfce4/helpers.rc"
+    if [ -d "$home" ]; then
+        install -d "$home/.config/xfce4"
+        printf 'WebBrowser=chromium\n' > "$home/.config/xfce4/helpers.rc"
+        f="$home/.config/mimeapps.list"
+        # Drop any stale per-user browser association, then pin ours.
+        [ -f "$f" ] && sed -i -E '/^(x-scheme-handler\/(http|https|chrome)|text\/html|application\/(xhtml\+xml|x-extension-[a-z]+))=/d' "$f"
+        { grep -q '^\[Default Applications\]' "$f" 2>/dev/null || echo "[Default Applications]"
+          for m in $ids; do echo "$m=chromium.desktop"; done; } >> "$f"
+        if [ -z "$r" ]; then chown -R "$TL_USER:$TL_USER" "$home/.config" 2>/dev/null || true; fi
+    fi
+}
+
+verify_default_browser() {
+    local r="${1:-}" cur b
+    grep -q '^x-scheme-handler/https=chromium.desktop$' "$r/etc/xdg/mimeapps.list" 2>/dev/null \
+        || { echo "ERROR: https default is not chromium.desktop" >&2; exit 1; }
+    grep -q '^WebBrowser=chromium$' "$r/etc/xdg/xfce4/helpers.rc" 2>/dev/null \
+        || { echo "ERROR: XFCE preferred WebBrowser is not chromium" >&2; exit 1; }
+    if [ -z "$r" ]; then
+        cur="$(readlink -f /etc/alternatives/x-www-browser 2>/dev/null || true)"
+        case "$cur" in
+            */chromium*) ;;
+            *) echo "ERROR: x-www-browser is not chromium ($cur)" >&2; exit 1 ;;
+        esac
+        for b in firefox google-chrome google-chrome-stable; do
+            if command -v "$b" >/dev/null 2>&1; then
+                echo "WARN: $b is still installed; Chromium is meant to be the only browser (apt-get purge it)" >&2
+            fi
+        done
+    fi
 }
 
 verify_chromium() {
@@ -254,8 +300,8 @@ verify_chromium() {
             ldd /usr/lib/chromium/chromium | grep 'not found' >&2
             exit 1
         fi
-        verify_default_browser_firefox
     fi
+    verify_default_browser "$r"
 }
 
 if [ "${1:-}" = "--verify" ]; then
@@ -292,5 +338,6 @@ write_policies ""
 write_flags ""
 install_extension ""
 write_desktop ""
+set_default_browser ""
 verify_chromium ""
 echo "==> Chromium (V4L2 HW H.264 decode) installed: $(chromium --version 2>/dev/null || echo '?')"
