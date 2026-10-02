@@ -525,6 +525,32 @@ verify_chromium_hwdec() {
     bash "$(chromium_hwdec_script)" --verify "${1:-}"
 }
 
+# Chromium (DRM): the same Chromium + Widevine CDM (libwidevinecdm0 from the Pi
+# archive) behind its own wrapper/profile/launcher "Chromium (DRM)". Additive and
+# parallel to the HW-video launcher. Delegates to install-chromium-widevine.sh.
+# TL_SKIP_CHROMIUM_WIDEVINE=1 skips it (TL_SKIP_CHROMIUM=1 skips it too: no browser).
+chromium_widevine_script() {
+    local d
+    d="$(cd "$(dirname "$0")" && pwd)"
+    [ -f "$d/install-chromium-widevine.sh" ] \
+        || { echo "ERROR: install-chromium-widevine.sh missing next to $0" >&2; exit 1; }
+    printf '%s' "$d/install-chromium-widevine.sh"
+}
+
+chromium_widevine_skipped() {
+    [ "${TL_SKIP_CHROMIUM_WIDEVINE:-0}" = "1" ] || [ "${TL_SKIP_CHROMIUM:-0}" = "1" ]
+}
+
+ensure_chromium_widevine() {
+    chromium_widevine_skipped && return 0
+    bash "$(chromium_widevine_script)"
+}
+
+verify_chromium_widevine() {
+    chromium_widevine_skipped && return 0
+    bash "$(chromium_widevine_script)" --verify "${1:-}"
+}
+
 # Host-side / live / bake: Mozilla apt Firefox .deb, XFCE desktop entry,
 # not the Ubuntu snap stub. Optional prefix ($1) is an image / plant root.
 verify_firefox() {
@@ -1214,6 +1240,11 @@ if [ "${1:-}" = "--verify-chromium" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--verify-chromium-widevine" ]; then
+    verify_chromium_widevine "${2:-}"
+    exit 0
+fi
+
 if [ "${1:-}" = "--verify-wallpaper" ]; then
     verify_xfce_wallpaper "${2:-}"
     exit 0
@@ -1237,6 +1268,7 @@ ensure_xfce_wallpaper
 ensure_no_unattended
 ensure_firefox_deb
 ensure_chromium_hwdec
+ensure_chromium_widevine
 set_graphical_default
 TL_UID="$(id -u "$TL_USER")"
 
@@ -1734,5 +1766,7 @@ verify_no_unattended
 verify_firefox
 # Fail the bake/install if Chromium (V4L2 HW decode) apt pin / policy / extension did not stick.
 verify_chromium_hwdec
+# Fail the bake/install if Chromium (DRM) (Widevine CDM pin / wrapper / launcher) did not stick.
+verify_chromium_widevine
 # Fail the bake/install if the Xubuntu wallpaper xfdesktop default did not stick.
 verify_xfce_wallpaper

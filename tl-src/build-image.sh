@@ -112,7 +112,7 @@ fi
 # --------------------------------------------------------------- payload -----
 log "staging payload"
 mkdir -p "$MNT/tmp/tl-src"
-cp "$SRC"/install-tesla-linux.sh "$SRC"/install-chromium-hwdec.sh "$SRC"/ta_*.py "$SRC"/*.html \
+cp "$SRC"/install-tesla-linux.sh "$SRC"/install-chromium-hwdec.sh "$SRC"/install-chromium-widevine.sh "$SRC"/ta_*.py "$SRC"/*.html \
    "$SRC"/tesla-linux-wlan.sh "$SRC"/tesla-linux-wlan.service \
    "$SRC"/tesla-linux-wlan-api.service "$SRC"/ap.env \
    "$SRC"/99-tesla-linux-lte.rules \
@@ -126,11 +126,11 @@ fi
 if [ -d "$SRC/broadway" ]; then
   cp -a "$SRC/broadway" "$MNT/tmp/tl-src/broadway"
 fi
-# Chromium HW-decode helper payload (h264-only extension).
+# Chromium helper payload (h264-only extension, Widevine/DRM probe page).
 if [ -d "$SRC/chromium" ]; then
   cp -a "$SRC/chromium" "$MNT/tmp/tl-src/chromium"
 fi
-chmod +x "$MNT/tmp/tl-src/install-chromium-hwdec.sh"
+chmod +x "$MNT/tmp/tl-src/install-chromium-hwdec.sh" "$MNT/tmp/tl-src/install-chromium-widevine.sh"
 chmod +x "$MNT/tmp/tl-src/install-tesla-linux.sh" "$MNT/tmp/tl-src/tesla-linux-wlan.sh"
 
 # ---------------------------------------------------------------- chroot -----
@@ -179,6 +179,8 @@ systemctl enable NetworkManager >/dev/null 2>&1 || true
 /tmp/tl-src/install-tesla-linux.sh --verify-firefox
 # Chromium (Pi archive build, V4L2 HW H.264 decode) is installed by --no-start above.
 /tmp/tl-src/install-tesla-linux.sh --verify-chromium
+# Chromium (DRM): Widevine CDM + chromium-drm wrapper/launcher (also installed by --no-start).
+/tmp/tl-src/install-tesla-linux.sh --verify-chromium-widevine
 
 # Fail the bake if factory login / default.target / ssh host keys did not stick.
 id teslalinux >/dev/null
@@ -321,6 +323,7 @@ log "verifying unified HDMI / web / KBM Xorg :0"
 "$SRC/install-tesla-linux.sh" --verify-no-unattended "$MNT"
 "$SRC/install-tesla-linux.sh" --verify-firefox "$MNT"
 "$SRC/install-tesla-linux.sh" --verify-chromium "$MNT"
+"$SRC/install-tesla-linux.sh" --verify-chromium-widevine "$MNT"
 grep -q '^ExecStart=/usr/bin/Xorg :0 vt1 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service" \
   || die "Xorg is not on vt1"
 if grep -Eq '^ExecStart=/usr/bin/Xorg :0 vt7 ' "$MNT/etc/systemd/system/tesla-linux-xorg.service"; then
