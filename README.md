@@ -8,6 +8,7 @@ Product path is the Tesla-browser web console (`desktop.html`) at a stable known
 
 | File | Description |
     10|| ------------------------- | ---------------------------------------------------------------------------- |
+| `tl-src/install-chromium-hwdec.sh` | Installs Chromium with V4L2 HW H.264 decode (+ policies, flags, launcher) |
 | `tl-src/build-image.sh` | Bakes Ubuntu Server arm64 raspi into `tesla-linux-YYYYMMDD-pi.img.xz` |
 | `tl-src/install-tesla-linux.sh` | Installs the XFCE / Xorg / stream / WLAN stack inside the image chroot |
 | `tl-src/desktop.html` | Tesla-browser console (in-car product path) |
@@ -15,7 +16,7 @@ Product path is the Tesla-browser web console (`desktop.html`) at a stable known
 | `tl-src/probe.html` | Tesla-browser capability probe |
 | `tl-src/tesla-linux-wlan.sh` | LTE/ethernet WAN + TeslaLinux AP; station alternate; ethernet static |
 | `tl-src/ta_*.py` | Display / touch / audio backends (loopback, nginx-proxied) |
-| `docs/` | Virtual display, WLAN, and qemu notes |
+| `docs/` | Virtual display, WLAN, Chromium HW decode, and qemu notes |
 | `README.md` | The document you are currently reading |
 
 ## Prerequisites:
@@ -62,6 +63,7 @@ WIFI_PSK=yourpsk
 - Ethernet **10.42.1.1/24** is lab/debug, not the in-car primary
 - nginx serving the console on AP / ethernet / station IPv4
 - Piecemeal XFCE (not `xubuntu-desktop`): Mozilla apt Firefox (`.deb` from `packages.mozilla.org`, not the Ubuntu snap stub); **ristretto** + **tumbler**; **xubuntu-wallpapers** default; **xarchiver** + **thunar-archive-plugin** + **unzip** + **7zip**
+- **Chromium (HW video)**: Raspberry Pi archive Chromium with V4L2 hardware H.264 decode (`/dev/video10`), pinned to chromium packages only, plus an H.264-only YouTube extension — 720p YouTube plays where Firefox's software decode manages ~144p. Additive; Firefox stays default. See [`docs/CHROMIUM-HWDEC.md`](docs/CHROMIUM-HWDEC.md)
 - Misc. from Ubuntu Server 26.04 + XFCE (standard GNU tools, etc.)
 
 ## What/Why?:
