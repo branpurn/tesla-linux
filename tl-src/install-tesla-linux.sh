@@ -503,6 +503,28 @@ ensure_firefox_deb() {
     apt-get install -y -q --no-install-recommends firefox
 }
 
+# Chromium with V4L2 HW H.264 decode for the Pi 4 (Raspberry Pi archive build,
+# pinned to the chromium packages only). Additive: Firefox stays the default
+# browser. Delegates to install-chromium-hwdec.sh next to this script.
+# TL_SKIP_CHROMIUM=1 skips it (e.g. low-disk bakes).
+chromium_hwdec_script() {
+    local d
+    d="$(cd "$(dirname "$0")" && pwd)"
+    [ -f "$d/install-chromium-hwdec.sh" ] \
+        || { echo "ERROR: install-chromium-hwdec.sh missing next to $0" >&2; exit 1; }
+    printf '%s' "$d/install-chromium-hwdec.sh"
+}
+
+ensure_chromium_hwdec() {
+    [ "${TL_SKIP_CHROMIUM:-0}" = "1" ] && return 0
+    bash "$(chromium_hwdec_script)"
+}
+
+verify_chromium_hwdec() {
+    [ "${TL_SKIP_CHROMIUM:-0}" = "1" ] && return 0
+    bash "$(chromium_hwdec_script)" --verify "${1:-}"
+}
+
 # Host-side / live / bake: Mozilla apt Firefox .deb, XFCE desktop entry,
 # not the Ubuntu snap stub. Optional prefix ($1) is an image / plant root.
 verify_firefox() {
@@ -1187,6 +1209,11 @@ if [ "${1:-}" = "--verify-firefox" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--verify-chromium" ]; then
+    verify_chromium_hwdec "${2:-}"
+    exit 0
+fi
+
 if [ "${1:-}" = "--verify-wallpaper" ]; then
     verify_xfce_wallpaper "${2:-}"
     exit 0
@@ -1209,6 +1236,7 @@ ensure_never_sleep
 ensure_xfce_wallpaper
 ensure_no_unattended
 ensure_firefox_deb
+ensure_chromium_hwdec
 set_graphical_default
 TL_UID="$(id -u "$TL_USER")"
 
@@ -1698,5 +1726,7 @@ verify_wan_rebroadcast
 verify_no_unattended
 # Fail the bake/install if Mozilla apt Firefox / XFCE desktop entry did not stick.
 verify_firefox
+# Fail the bake/install if Chromium (V4L2 HW decode) apt pin / policy / extension did not stick.
+verify_chromium_hwdec
 # Fail the bake/install if the Xubuntu wallpaper xfdesktop default did not stick.
 verify_xfce_wallpaper
