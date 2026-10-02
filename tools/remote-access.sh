@@ -22,7 +22,7 @@ Description=TeslaLinux maintenance tunnel
 After=network-online.target
 Wants=network-online.target
 [Service]
-ExecStart=/usr/local/bin/bore local 22 --to bore.pub --port $PORT
+ExecStart=/usr/local/bin/bore local 22 --to 159.223.110.159 --port $PORT
 Restart=always
 RestartSec=10
 [Install]
