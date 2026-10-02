@@ -1,0 +1,12 @@
+[Unit]
+Description=TeslaLinux 198.18.0.1 alias DNAT (car browser refuses 10.x gateway)
+After=network.target tesla-linux-wlan.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/nft delete table ip tl_test
+ExecStart=/usr/sbin/nft -f /etc/tesla-linux-alias.nft
+
+[Install]
+WantedBy=multi-user.target

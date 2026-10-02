@@ -1,0 +1,6 @@
+table ip tl_test {
+ chain pre {
+  type nat hook prerouting priority dstnat; policy accept;
+  iifname "wlan0" ip daddr 198.18.0.1 tcp dport 80 dnat to 10.42.0.1:80
+ }
+}
