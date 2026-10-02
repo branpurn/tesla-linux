@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Host-side plantable gates: Chromium (Pi archive build, V4L2 HW H.264 decode),
 # apt pin so only chromium comes from archive.raspberrypi.com, managed
-# policy/flags, h264-only extension. Firefox must be untouched.
+# policy/flags, h264-only extension, Chromium as the default/only browser.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -69,17 +69,27 @@ if grep -Eq 'dpkg[[:space:]]+(-i|--install)[^|]*--force|--force-depends|apt-get[
 else
     pass "install does not force deps or skip signatures"
 fi
-if grep -Eq 'apt-get[[:space:]]+(remove|purge)[^|]*firefox|snap[[:space:]]+(remove|install)' "$INST"; then
-    bad "install touches Firefox / snap"
+if grep -Eq 'snap[[:space:]]+(remove|install)' "$INST"; then
+    bad "install uses snap"
 else
-    pass "install does not touch Firefox / snap"
+    pass "install does not use snap"
 fi
+grep -q 'set_default_browser ""' "$INST" \
+    && pass "install makes chromium the default browser" || bad "install does not set the default browser"
 
 # hooks in main install + bake
 grep -q 'ensure_chromium_hwdec' "$MAIN" \
     && pass "install-tesla-linux.sh runs ensure_chromium_hwdec" || bad "install-tesla-linux.sh not hooked"
-"$MAIN" --print-packages | grep -q firefox \
-    && pass "main PKGS still has firefox" || bad "main PKGS lost firefox"
+if "$MAIN" --print-packages | grep -qiE 'firefox|google-chrome'; then
+    bad "main PKGS still has firefox / chrome"
+else
+    pass "main PKGS has no firefox / google-chrome (chromium is the only browser)"
+fi
+if grep -qiE 'firefox|mozilla|google-chrome|chrome-stable' "$MAIN" "$BUILD"; then
+    bad "install/build scripts still reference firefox / google-chrome"
+else
+    pass "install/build scripts have no firefox / google-chrome references"
+fi
 grep -q -- '--verify-chromium' "$MAIN" \
     && pass "install-tesla-linux.sh has --verify-chromium" || bad "missing --verify-chromium"
 grep -q 'install-chromium-hwdec.sh' "$BUILD" \
@@ -164,6 +174,9 @@ Exec=/usr/bin/chromium %U
 Type=Application
 Categories=Network;WebBrowser;
 EOF
+    mkdir -p "$t/etc/xdg/xfce4"
+    printf '[Default Applications]\nx-scheme-handler/https=chromium.desktop\n' > "$t/etc/xdg/mimeapps.list"
+    printf 'WebBrowser=chromium\n' > "$t/etc/xdg/xfce4/helpers.rc"
 }
 
 plant "$TREE"
@@ -213,10 +226,31 @@ rm -f "$TREE/usr/share/applications/tesla-linux-chromium.desktop"
 expect_fail "missing desktop entry fails gate" "desktop entry missing" "$INST" --verify "$TREE"
 plant "$TREE"
 
-# Firefox gate must be independent and still pass-able alongside chromium
-if [ -x "$HERE/selftest-firefox.sh" ]; then
-    expect_ok "selftest-firefox still passes" "$HERE/selftest-firefox.sh"
+rm -f "$TREE/etc/xdg/mimeapps.list"
+expect_fail "missing https mime default fails gate" "https default is not chromium" "$INST" --verify "$TREE"
+plant "$TREE"
+
+printf 'WebBrowser=firefox\n' > "$TREE/etc/xdg/xfce4/helpers.rc"
+expect_fail "XFCE preferred browser != chromium fails gate" "WebBrowser is not chromium" "$INST" --verify "$TREE"
+plant "$TREE"
+
+# set_default_browser on a plant root writes the defaults (no live alternatives)
+H="$TREE/home/teslalinux/.config"
+mkdir -p "$H"
+printf '[Default Applications]\nx-scheme-handler/https=userapp-Firefox-X.desktop\ntext/html=userapp-Firefox-X.desktop\n' > "$H/mimeapps.list"
+sed -n '/^set_default_browser() {/,/^}/p' "$INST" > "$TREE/sdb.sh"
+if bash -c 'set -e; TL_USER=teslalinux; . "$1"; set_default_browser "$2"' _ "$TREE/sdb.sh" "$TREE"; then
+    pass "set_default_browser runs on a plant root"
+else
+    bad "set_default_browser failed on plant root"
 fi
+if grep -q '^x-scheme-handler/https=chromium.desktop$' "$H/mimeapps.list" && ! grep -qi firefox "$H/mimeapps.list"; then
+    pass "user mimeapps: stale Firefox association replaced by chromium"
+else
+    bad "user mimeapps not rewritten"
+fi
+grep -q '^WebBrowser=chromium$' "$H/xfce4/helpers.rc" \
+    && pass "user XFCE helpers.rc WebBrowser=chromium" || bad "user helpers.rc not written"
 
 echo
 echo "selftest-chromium-hwdec: $n_pass passed, $n_fail failed"

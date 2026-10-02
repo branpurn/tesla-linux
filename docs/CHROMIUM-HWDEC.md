@@ -1,9 +1,8 @@
 # Chromium with V4L2 hardware H.264 decode (Pi 4)
 
-Firefox (Mozilla `.deb`) stays the default browser and decodes video in
-software (≈144p YouTube is its practical limit on the Pi 4). This adds a second
-browser, **Chromium (HW video)**, that decodes H.264 on the Pi 4's VideoCore
-decoder (`/dev/video10`, `bcm2835-codec`, V4L2 stateful).
+**Chromium (HW video)** is the **only browser** on Tesla Linux and the system
+default (a software-decoding browser managed only ≈144p YouTube on the Pi 4).
+It decodes H.264 on the Pi 4's VideoCore decoder (`/dev/video10`, `bcm2835-codec`, V4L2 stateful).
 
 ## What is installed
 
@@ -22,7 +21,7 @@ sudo ./tl-src/install-tesla-linux.sh --verify-chromium
   key fingerprint `CF8A 1AF5 02A2 AA2D 763B AE7E 82B1 2992 7FA3 303E` checked
   at install). `/etc/apt/preferences.d/raspberrypi-chromium` pins the whole Pi
   archive to **-10**, except `chromium chromium-common chromium-sandbox
-  chromium-l10n zenoty` (990) — the Pi archive's kernels, firefox, firmware
+  chromium-l10n zenoty` (990) — the Pi archive's kernels, firmware
   etc. can never be pulled in.
 - **Libraries:** all satisfied from Ubuntu 26.04 except `libjpeg62-turbo`
   (Ubuntu only has `libjpeg-turbo8`, different soname). The installer fetches
@@ -49,7 +48,11 @@ sudo ./tl-src/install-tesla-linux.sh --verify-chromium
 - Audio needs nothing: Chromium plays to the default Pulse/PipeWire sink,
   which `tesla-linux` already sets to `tesla`. Window: maximized in the
   1088×832 screen.
-- Firefox is unchanged and remains `x-www-browser` (priority 100 vs chromium 90).
+- Chromium is the default browser: `x-www-browser` / `gnome-www-browser`
+  (`update-alternatives`), `/etc/xdg/mimeapps.list` (http, https, html),
+  XFCE preferred application `WebBrowser=chromium` (system + `~/.config/xfce4/helpers.rc`).
+  Firefox and Google Chrome are not installed (an Oct 2026 comparison showed
+  Chrome arm64 has no V4L2 decoder: ≈140% vs ≈52% CPU at 720p30).
 
 ## YouTube must be H.264
 
@@ -125,8 +128,8 @@ car never sees more than 30 fps whatever the browser plays.
   "Auto" — it starts at 144p and ramps).
 - **Load:** decode is cheap, but the Pi is already near saturation from the
   capture/encode pipeline (the V4L2 H.264 *encoder* shares the VideoCore with
-  the decoder). Don't expect headroom with several heavy tabs/Firefox open.
-- **Memory:** Chromium is heavier than Firefox at idle (~0.7 GB on disk;
+  the decoder). Don't expect headroom with several heavy tabs open.
+- **Memory:** Chromium is heavy (~0.7 GB on disk;
   ~0.5 GB RSS across browser+GPU+renderer with one video tab). 8 GB Pi: fine.
 - **No auto-updates:** unattended upgrades are off in this image; Chromium
   security updates need a manual `sudo apt-get update && sudo apt-get install

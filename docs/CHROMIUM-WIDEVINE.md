@@ -157,3 +157,25 @@ service's own terms. L3 is software DRM: the services cap its quality.
   use `chromium-drm` or write the hint file there.
 - No auto-updates (unattended upgrades are off): `sudo apt-get update && sudo
   apt-get install --only-upgrade libwidevinecdm0`.
+
+## Why not Google Chrome (arm64)? — measured Oct 2026, then removed
+
+Google Chrome 154 arm64 (Google apt repo) was installed and compared on the Pi 4,
+then removed; Chromium is the single browser. Findings:
+
+- **Widevine:** Chrome bundles **4.10.3112.0** vs **4.10.2662.3** from the Pi
+  archive. Both are L3 only (`SW_SECURE_CRYPTO` ok; `SW_SECURE_DECODE` /
+  `HW_SECURE_ALL` unsupported). The newer CDM is not cheaper to run.
+- **No V4L2 video decoder in Chrome arm64:** clear 720p30 H.264 uses
+  `FFmpegVideoDecoder` (no `/dev/video10`), ≈141–147% CPU and 36% dropped frames
+  vs Chromium V4L2 ≈52% CPU and 15% dropped; `AcceleratedVideoDecodeLinux*`
+  flags do nothing (the decoder code is not compiled in).
+- **DRM (Axinom/Shaka, software CDM decode in both):** Chrome 480p 149%/25%
+  dropped, 720p 189%/36%, 1080p 226%/36%; Chromium(DRM) 480p 182%/4%,
+  720p 201–217%/18–26%, 1080p 240%/43%.
+- Branded Chrome ≥137 ignores `--load-extension`, so keeping YouTube on H.264
+  would need a signed CRX force-installed by policy; without it YouTube serves
+  Chrome AV1 (dav1d, software).
+- Disk: ≈0.5 GB for Chrome.
+
+If a service ever rejects the 2023 CDM, revisit; until then Chromium is enough.
