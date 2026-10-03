@@ -110,6 +110,12 @@ redirect, which is enough); the UA string is pinned to a Chrome/154 Pixel
 string and should be bumped with Chromium majors; the m. layout is the phone UI;
 embedded players on third-party sites use the desktop `/embed` page but their
 sub-requests to youtube.com/googlevideo/ytimg carry the mobile UA.
+Chromium writes the indexed ruleset of an unpacked extension to
+`<ext>/_metadata/generated_indexed_rulesets`, and the browser runs as the desktop
+user, so the installer creates `/usr/share/chromium/extensions/tl-h264-only/_metadata`
+owned by `$TL_USER`; without that the extension fails to load with
+"youtube-mobile-rules.json: Internal error while parsing rules" (`--verify` and the
+selftest gate it).
 Static rulesets are indexed per extension *version*: **bump the manifest
 version whenever the rules change**. New versions are picked up on the next
 Chromium start (close the browser gracefully; never SIGKILL a decoding
