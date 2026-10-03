@@ -69,6 +69,63 @@ as the h264ify extension, but local (no web store, MV3-safe). Verified:
 `avc1.64002a (299)` at 1080p60. H.264 on YouTube tops out at 1080p; 1440p/4K
 are VP9/AV1-only, so they are not offered.
 
+## YouTube mobile site (`youtube-mobile-rules.json`)
+
+The *desktop* YouTube watch page is not decoder-bound on a Pi 4, it is
+JS/compositor-bound: DOMContentLoaded 22-31 s, skeleton UI after ~40 s,
+comments never load, renderer main thread 70-85 %, ~200 % CPU and 30-47 %
+dropped frames even at 240-480p (uBlock Origin Lite, compositor tweaks,
+frame-rate-limit, SW raster/decode: none of it helps). The **mobile site**
+(`m.youtube.com` with a mobile User-Agent) is light: DCL 5-11 s,
+`V4L2VideoDecoder`, 0 dropped frames at 480p/720p (68 early drops at 1080p).
+
+`tl-h264-only` (version >= 1.1) therefore also ships a static
+declarativeNetRequest rule set, `chromium/h264-only/youtube-mobile-rules.json`
+(permission `declarativeNetRequest`; host permissions only
+`*.youtube.com`, `*.googlevideo.com`, `*.ytimg.com`):
+
+1. **Redirect** `http(s)://[www.]youtube.com/<path>?<query>` -> `https://m.youtube.com/<path>?<query>`,
+   **main frame only**. Priority-4 `allow` rules (one `||youtube.com/<prefix>^`
+   urlFilter each; a single big regex is silently dropped by Chrome's RE2
+   memory limit) keep `/embed`, `/api`, `/youtubei`, `/s`, `/yt`, `/tv`,
+   `/live_chat`, `/oauth*`, `/signin`, `/accounts`, `/redirect`, `/get_video`,
+   `/videoplayback`, `/ptracking`, `/generate_204`, `/upload`, `/pagead` on the
+   desktop host. `music.youtube.com`, `studio.youtube.com`, `accounts.youtube.com`
+   and `tv.youtube.com` never match the redirect.
+2. **Mobile `User-Agent`** (+ `sec-ch-ua-mobile: ?1`, `sec-ch-ua-platform: "Android"`)
+   set on requests whose domain is `youtube.com`, `googlevideo.com` or
+   `ytimg.com` (minus music/studio/tv/accounts). Nothing else is touched, so
+   Prime Video and every other site keep the desktop UA and Widevine/DRM
+   behaviour is unchanged.
+
+Verified on the Pi 4 (clone of the real profile, remote debugging): a
+`www.youtube.com/watch?v=...` link lands on `m.youtube.com/watch?...` (307, path and
+query kept), `V4L2VideoDecoder`, 0 dropped frames after ~50 s at 480p (854x364)
+and 720p (1280x546), DCL 4-7 s; `/embed/<id>` stays on www.youtube.com;
+`music.youtube.com` and `amazon.com/gp/video` keep the desktop UA on every request.
+
+Caveats: `navigator.userAgent` in the page still reports the desktop UA (DNR
+only changes the network header; the m. site keys off the header and the
+redirect, which is enough); the UA string is pinned to a Chrome/154 Pixel
+string and should be bumped with Chromium majors; the m. layout is the phone UI;
+embedded players on third-party sites use the desktop `/embed` page but their
+sub-requests to youtube.com/googlevideo/ytimg carry the mobile UA.
+Chromium writes the indexed ruleset of an unpacked extension to
+`<ext>/_metadata/generated_indexed_rulesets`, and the browser runs as the desktop
+user, so the installer creates `/usr/share/chromium/extensions/tl-h264-only/_metadata`
+owned by `$TL_USER`; without that the extension fails to load with
+"youtube-mobile-rules.json: Internal error while parsing rules" (`--verify` and the
+selftest gate it).
+Static rulesets are indexed per extension *version*: **bump the manifest
+version whenever the rules change**. New versions are picked up on the next
+Chromium start (close the browser gracefully; never SIGKILL a decoding
+Chromium). To switch the feature off, set `"enabled": false` for the
+`youtube_mobile` rule resource in `manifest.json` (or delete
+`youtube-mobile-rules.json` from `/usr/share/chromium/extensions/tl-h264-only/`
+*and* its manifest entry) and restart Chromium. `selftest-chromium-hwdec.sh`
+gates the manifest permissions, host scope, redirect/allow/UA rules and the
+version; `install-chromium-hwdec.sh --verify` fails if the rules file is missing.
+
 ## How HW decode was verified (Pi 4, Ubuntu 26.04, kernel 7.0.0-1009-raspi)
 
 1. `chrome://gpu`: *Video Decode: Hardware accelerated*; GL = ANGLE/OpenGL ES

@@ -150,11 +150,20 @@ EOF
 install_extension() {
     local r="${1:-}"
     local src="$HERE/chromium/h264-only"
-    [ -f "$src/manifest.json" ] && [ -f "$src/h264only.js" ] \
+    [ -f "$src/manifest.json" ] && [ -f "$src/h264only.js" ] && [ -f "$src/youtube-mobile-rules.json" ] \
         || { echo "ERROR: $src (h264-only extension) missing" >&2; exit 1; }
     rm -rf "$r$EXT_DST"
     install -d -m0755 "$r$EXT_DST"
-    install -m0644 "$src/manifest.json" "$src/h264only.js" "$r$EXT_DST/"
+    install -m0644 "$src/manifest.json" "$src/h264only.js" \
+        "$src/youtube-mobile-rules.json" "$r$EXT_DST/"
+    # Chromium indexes an unpacked extension's declarativeNetRequest ruleset into
+    # <ext>/_metadata/generated_indexed_rulesets at load time. The browser runs as
+    # $TL_USER, so without a user-writable _metadata the extension fails to load
+    # ("youtube-mobile-rules.json: Internal error while parsing rules").
+    install -d -m0755 "$r$EXT_DST/_metadata"
+    if [ -z "$r" ] && id "$TL_USER" >/dev/null 2>&1; then
+        chown "$TL_USER:$TL_USER" "$EXT_DST/_metadata"
+    fi
 }
 
 write_desktop() {
@@ -305,6 +314,16 @@ verify_chromium() {
     ext="$r$EXT_DST"
     [ -f "$ext/manifest.json" ] || { echo "ERROR: h264-only extension manifest missing" >&2; exit 1; }
     [ -f "$ext/h264only.js" ] || { echo "ERROR: h264-only extension script missing" >&2; exit 1; }
+    [ -f "$ext/youtube-mobile-rules.json" ] \
+        || { echo "ERROR: h264-only extension YouTube mobile rules missing" >&2; exit 1; }
+    # the manifest must actually reference the rules file we just checked
+    [ -d "$ext/_metadata" ] \
+        || { echo "ERROR: h264-only extension _metadata dir missing (DNR index needs it writable)" >&2; exit 1; }
+    if [ -z "$r" ] && id "$TL_USER" >/dev/null 2>&1 && [ "$(stat -c %U "$ext/_metadata")" != "$TL_USER" ]; then
+        echo "ERROR: $ext/_metadata not owned by $TL_USER (DNR index would fail to write)" >&2; exit 1
+    fi
+    grep -q '"youtube-mobile-rules.json"' "$ext/manifest.json" \
+        || { echo "ERROR: h264-only manifest does not reference youtube-mobile-rules.json" >&2; exit 1; }
 
     desk="$r$DESKTOP_DIR/$DESKTOP_ID"
     [ -f "$desk" ] || { echo "ERROR: chromium desktop entry missing" >&2; exit 1; }
