@@ -222,6 +222,7 @@ EOF
 EOF
     echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --ozone-platform=x11"' > "$t/etc/chromium.d/tesla-linux"
     cp "$EXT/manifest.json" "$EXT/h264only.js" "$EXT/youtube-mobile-rules.json" "$t/usr/share/chromium/extensions/tl-h264-only/"
+    mkdir -p "$t/usr/share/chromium/extensions/tl-h264-only/_metadata"
     mkdir -p "$t/usr/local/share/applications"
     bash -c 'set -e; r="$1"; TL_USER=nobody; DESKTOP_ID=chromium.desktop; DESKTOP_DIR=/usr/local/share/applications
              OLD_DESKTOP_IDS="tesla-linux-chromium.desktop tesla-linux-chromium-drm.desktop"
@@ -277,6 +278,10 @@ plant "$TREE"
 
 rm -f "$TREE/usr/share/chromium/extensions/tl-h264-only/youtube-mobile-rules.json"
 expect_fail "missing YouTube mobile rules fail gate" "YouTube mobile rules missing" "$INST" --verify "$TREE"
+plant "$TREE"
+
+rmdir "$TREE/usr/share/chromium/extensions/tl-h264-only/_metadata"
+expect_fail "missing extension _metadata dir (DNR index) fails gate" "_metadata dir missing" "$INST" --verify "$TREE"
 plant "$TREE"
 
 rm -f "$TREE/usr/local/share/applications/chromium.desktop"
