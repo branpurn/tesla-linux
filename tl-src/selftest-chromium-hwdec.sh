@@ -107,7 +107,62 @@ m = json.load(open(sys.argv[1]))
 assert m["manifest_version"] == 3
 cs = m["content_scripts"][0]
 assert cs["world"] == "MAIN" and cs["run_at"] == "document_start" and cs["all_frames"] is True
-assert "permissions" not in m and "host_permissions" not in m
+PY
+    python3 - "$EXT" <<'PY' && pass "extension YouTube-mobile DNR rules: scoped redirect + UA, version bumped" || bad "extension YouTube-mobile DNR rules invalid"
+import json, os, re, sys
+d = sys.argv[1]
+m = json.load(open(os.path.join(d, "manifest.json")))
+ver = tuple(int(x) for x in m["version"].split("."))
+assert ver >= (1, 1), "manifest version must be >= 1.1 (DNR rules shipped)"
+assert m["permissions"] == ["declarativeNetRequest"], m["permissions"]
+# host permissions: YouTube + its media/image CDNs only - never Prime/Amazon or <all_urls>
+hp = m["host_permissions"]
+assert hp and all(re.search(r"(youtube\.com|googlevideo\.com|ytimg\.com)/\*$", h) for h in hp), hp
+assert not any("amazon" in h or "<all_urls>" in h or h.startswith("*://*/") for h in hp), hp
+rr = m["declarative_net_request"]["rule_resources"]
+assert len(rr) == 1 and rr[0]["enabled"] is True
+rules = json.load(open(os.path.join(d, rr[0]["path"])))
+ids = [r["id"] for r in rules]
+assert len(ids) == len(set(ids)), "duplicate rule ids"
+red = [r for r in rules if r["action"]["type"] == "redirect"]
+allow = [r for r in rules if r["action"]["type"] == "allow"]
+hdr = [r for r in rules if r["action"]["type"] == "modifyHeaders"]
+assert len(red) == 1 and len(hdr) == 1 and len(allow) >= 3
+# (1) redirect: youtube.com main frame -> m.youtube.com, path+query kept, desktop-only hosts
+r = red[0]
+assert r["condition"]["resourceTypes"] == ["main_frame"]
+assert r["action"]["redirect"]["regexSubstitution"] == "https://m.youtube.com/\\1"
+rx = re.compile(r["condition"]["regexFilter"])
+for u in ("https://www.youtube.com/watch?v=abc", "https://youtube.com/", "http://www.youtube.com/@x"):
+    assert rx.match(u), u
+for u in ("https://music.youtube.com/", "https://m.youtube.com/watch", "https://studio.youtube.com/",
+          "https://accounts.youtube.com/x", "https://www.amazon.com/youtube.com/x", "https://notyoutube.com/"):
+    assert not rx.match(u), u
+# allow rules (one urlFilter per path prefix; a single big regex exceeds Chrome's RE2
+# memory limit and is silently dropped) must outrank both the redirect and the header rule
+paths = set()
+for a in allow:
+    assert a["priority"] > r["priority"] and a["priority"] > hdr[0]["priority"], "allow must have the highest priority"
+    assert a["condition"]["resourceTypes"] == ["main_frame"]
+    mt = re.fullmatch(r"\|\|youtube\.com/([a-z0-9_]+)\^", a["condition"]["urlFilter"])
+    assert mt, a["condition"]
+    paths.add(mt.group(1))
+for need in ("embed", "api", "youtubei", "oauth", "accounts", "signin"):
+    assert need in paths, need
+for bad in ("watch", "results", "shorts", "feed", "playlist", "channel"):
+    assert bad not in paths, bad
+# (2) UA header: only YouTube/googlevideo/ytimg request domains, never Amazon/Prime or generic
+h = hdr[0]
+dom = h["condition"]["requestDomains"]
+assert sorted(dom) == ["googlevideo.com", "youtube.com", "ytimg.com"], dom
+assert "regexFilter" not in h["condition"] and "urlFilter" not in h["condition"]
+assert not any("amazon" in x or "primevideo" in x for x in dom)
+ex = h["condition"]["excludedRequestDomains"]
+for need in ("music.youtube.com", "studio.youtube.com", "accounts.youtube.com"):
+    assert need in ex, need
+ops = {x["header"].lower(): x for x in h["action"]["requestHeaders"]}
+assert ops["user-agent"]["operation"] == "set" and "Android" in ops["user-agent"]["value"] and "Mobile" in ops["user-agent"]["value"]
+assert ops["sec-ch-ua-mobile"]["value"] == "?1"
 PY
 fi
 if command -v node >/dev/null 2>&1; then
@@ -166,7 +221,7 @@ EOF
 { "HardwareAccelerationModeEnabled": true }
 EOF
     echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --ozone-platform=x11"' > "$t/etc/chromium.d/tesla-linux"
-    cp "$EXT/manifest.json" "$EXT/h264only.js" "$t/usr/share/chromium/extensions/tl-h264-only/"
+    cp "$EXT/manifest.json" "$EXT/h264only.js" "$EXT/youtube-mobile-rules.json" "$t/usr/share/chromium/extensions/tl-h264-only/"
     mkdir -p "$t/usr/local/share/applications"
     bash -c 'set -e; r="$1"; TL_USER=nobody; DESKTOP_ID=chromium.desktop; DESKTOP_DIR=/usr/local/share/applications
              OLD_DESKTOP_IDS="tesla-linux-chromium.desktop tesla-linux-chromium-drm.desktop"
@@ -218,6 +273,10 @@ plant "$TREE"
 
 rm -f "$TREE/usr/share/chromium/extensions/tl-h264-only/h264only.js"
 expect_fail "missing h264-only extension fails gate" "extension script missing" "$INST" --verify "$TREE"
+plant "$TREE"
+
+rm -f "$TREE/usr/share/chromium/extensions/tl-h264-only/youtube-mobile-rules.json"
+expect_fail "missing YouTube mobile rules fail gate" "YouTube mobile rules missing" "$INST" --verify "$TREE"
 plant "$TREE"
 
 rm -f "$TREE/usr/local/share/applications/chromium.desktop"
