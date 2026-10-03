@@ -38,9 +38,9 @@ pkgs="$("$INSTALL" --print-packages)"
 echo "$pkgs" | grep -qw 'xubuntu-wallpapers' \
     && pass "PKGS includes xubuntu-wallpapers" || bad "PKGS missing xubuntu-wallpapers"
 if echo "$pkgs" | grep -qw 'xubuntu-desktop'; then
-    bad "PKGS still includes xubuntu-desktop"
+    pass "PKGS includes the xubuntu-desktop metapackage"
 else
-    pass "PKGS excludes xubuntu-desktop"
+    bad "PKGS missing xubuntu-desktop"
 fi
 if echo "$pkgs" | grep -qw 'xfce4-wallpapers'; then
     bad "PKGS substituted xfce4-wallpapers for xubuntu-wallpapers"
