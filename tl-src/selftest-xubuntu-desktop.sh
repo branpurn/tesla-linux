@@ -59,6 +59,22 @@ grep -Eq 'apt-get install -y -q .*xubuntu-desktop$|xubuntu-desktop$' "$BUILD" \
     && pass "xubuntu-desktop installed WITH recommends" || bad "xubuntu-desktop must install with recommends"
 grep -q 'policy-rc.d' "$BUILD" && pass "services not started during bake install" || bad "policy-rc.d missing"
 grep -q -- '--verify-xubuntu' "$BUILD" && pass "build-image runs --verify-xubuntu" || bad "build-image verify missing"
+# Image size: the desktop pushes the .img.xz near GitHub's 2 GiB asset limit, so the
+# bake must clean apt/logs/tmp, zero free space on its own loop partitions, and gate size.
+grep -q 'rm -f /var/cache/apt/archives/\*.deb' "$BUILD" && grep -q 'rm -rf /var/lib/apt/lists/\*' "$BUILD" \
+    && pass "chroot drops apt archives + lists" || bad "chroot apt cleanup missing"
+grep -q 'command -v zerofree' "$BUILD" && grep -q 'zerofree "\$ROOTDEV"' "$BUILD" \
+    && grep -q 'dd if=/dev/zero of="\$mnt/.zero"' "$BUILD" \
+    && pass "zerofree on root with dd-fill fallback" || bad "free-space zeroing missing"
+awk '/^chroot "\$MNT" \/bin\/bash/{c=NR} /^assert_build_part "\$ROOTDEV" 2/{a=NR} /^ *zerofree "\$ROOTDEV"/{z=NR} /^xz -T0/{x=NR}
+     END{exit !(c && a && z && x && c<a && a<z && z<x)}' "$BUILD" \
+    && pass "zeroing runs after chroot, after the loop guard, before xz" || bad "zeroing order"
+if grep -vE '^[[:space:]]*#' "$BUILD" | grep -Eq '/dev/(sd[a-z]|nvme|mmcblk|vd[a-z]|hd[a-z])'; then
+    bad "build-image references a physical disk"
+else pass "build-image never names a physical disk"; fi
+grep -q '^MAX_IMG_XZ_BYTES=2000000000$' "$BUILD" && grep -q 'ALLOW_BIG_IMAGE:-0}" = 1' "$BUILD" \
+    && awk '/^xz -T0/{x=NR} /-gt "\$MAX_IMG_XZ_BYTES"/{g=NR} END{exit !(x && g && x<g)}' "$BUILD" \
+    && pass "post-pack size gate (2,000,000,000 B, ALLOW_BIG_IMAGE=1)" || bad "size gate missing"
 grep -q 'Do not invent lightdm' "$INSTALL" && pass "desktop unit still forbids a DM" || bad "DM warning gone"
 
 TREE="$(mktemp -d /tmp/tl-xu-tree.XXXXXX)"
