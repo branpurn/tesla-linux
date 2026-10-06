@@ -8,7 +8,7 @@
 | 5 | Security caveats: default password, root SSH, shared host keys, ufw off | open (later) |
 
 ## Added 2026-10-06
-- Image too big for a GitHub release: last `.img.xz` was 3.2 GB (limit 2 GiB) because deleted package downloads leave old data in free blocks. Zeroing free space by hand gave ~1.93 GiB (2,074,426,664 B). FIXED in `build-image.sh`: apt/log/tmp cleanup in the chroot, then `zerofree` on the root (dd-fill fallback) and dd-fill on boot, build's own loop partitions only. A post-pack check fails over 2,000,000,000 B unless `ALLOW_BIG_IMAGE=1`. Still headroom-thin; watch the size on the next build.
+- Image too big for a GitHub release: last `.img.xz` was 3.2 GB (limit 2 GiB) because deleted package downloads leave old data in free blocks. Zeroing free space by hand gave ~1.93 GiB (2,074,426,664 B). FIXED in `build-image.sh`: apt/log/tmp cleanup in the chroot, then `zerofree` on the root (dd-fill fallback) and dd-fill on boot, build's own loop partitions only. A post-pack check fails over 2,140,000,000 B unless `ALLOW_BIG_IMAGE=1`. Still headroom-thin; watch the size on the next build.
 
 ## Added 2026-10-02
 - Car browser will not connect to 10.42.0.1; workaround: http://198.18.0.1/desktop.html via nft DNAT (tl-src/tesla-linux-alias.{service,nft}; install to /etc/systemd/system and /etc/tesla-linux-alias.nft, enable).

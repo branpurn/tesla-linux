@@ -41,7 +41,7 @@ metapackage is 817 packages / ~2.4 GB installed; with the pin 461 packages /
 ~1.2 GB installed, 340 MB download, about 1.4 GB more on `/` in total.
 Image size: those downloads leave old data in free blocks even after `apt-get clean`, so
 `build-image.sh` zeroes free space (`zerofree`) before xz and fails if the
-`.img.xz` is over 2,000,000,000 bytes (the GitHub asset limit is 2 GiB; `ALLOW_BIG_IMAGE=1` to override).
+`.img.xz` is over 2,140,000,000 bytes (the GitHub asset limit is 2 GiB; `ALLOW_BIG_IMAGE=1` to override).
 
 ## Services / autostarts disabled after install
 
