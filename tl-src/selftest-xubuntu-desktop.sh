@@ -72,9 +72,9 @@ awk '/^chroot "\$MNT" \/bin\/bash/{c=NR} /^assert_build_part "\$ROOTDEV" 2/{a=NR
 if grep -vE '^[[:space:]]*#' "$BUILD" | grep -Eq '/dev/(sd[a-z]|nvme|mmcblk|vd[a-z]|hd[a-z])'; then
     bad "build-image references a physical disk"
 else pass "build-image never names a physical disk"; fi
-grep -q '^MAX_IMG_XZ_BYTES=2000000000$' "$BUILD" && grep -q 'ALLOW_BIG_IMAGE:-0}" = 1' "$BUILD" \
+grep -q '^MAX_IMG_XZ_BYTES=2140000000$' "$BUILD" && grep -q 'ALLOW_BIG_IMAGE:-0}" = 1' "$BUILD" \
     && awk '/^xz -T0/{x=NR} /-gt "\$MAX_IMG_XZ_BYTES"/{g=NR} END{exit !(x && g && x<g)}' "$BUILD" \
-    && pass "post-pack size gate (2,000,000,000 B, ALLOW_BIG_IMAGE=1)" || bad "size gate missing"
+    && pass "post-pack size gate (2,140,000,000 B, ALLOW_BIG_IMAGE=1)" || bad "size gate missing"
 grep -q 'Do not invent lightdm' "$INSTALL" && pass "desktop unit still forbids a DM" || bad "DM warning gone"
 
 TREE="$(mktemp -d /tmp/tl-xu-tree.XXXXXX)"

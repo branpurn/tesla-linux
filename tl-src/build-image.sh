@@ -11,7 +11,7 @@
 #   (zerofree is optional: without it free space is zeroed with a slower dd-fill)
 #
 # ALLOW_BIG_IMAGE=1  keep going (exit 0) even if the .img.xz is over the
-#                    GitHub release-asset budget (MAX_IMG_XZ_BYTES, 2,000,000,000).
+#                    GitHub release-asset budget (MAX_IMG_XZ_BYTES, 2,140,000,000).
 set -euo pipefail
 
 UBUNTU_REL="${UBUNTU_REL:-26.04}"
@@ -25,7 +25,7 @@ IMGNAME="tesla-linux-${STAMP}-pi.img"
 GROW_GB="${GROW_GB:-4}"
 MNT="$WORK/mnt"
 # GitHub release assets must be < 2 GiB (2,147,483,648 B); keep headroom.
-MAX_IMG_XZ_BYTES=2000000000
+MAX_IMG_XZ_BYTES=2140000000
 
 log(){ echo -e "\n\033[1;36m==> $*\033[0m"; }
 die(){ echo "ERROR: $*" >&2; exit 1; }

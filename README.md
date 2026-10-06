@@ -38,7 +38,7 @@ sudo ./tl-src/build-image.sh
 
 Then flash `tesla-linux-YYYYMMDD-pi.img.xz` the same way.
 
-Before packing, the build cleans apt caches/lists, logs and `/tmp` inside the image, then zeroes free space on its own loop partitions only (`zerofree` on the ext4 root after `e2fsck -fy`, dd-fill fallback if `zerofree` is missing; dd-fill on the FAT boot partition) so xz does not pack deleted package data. It fails if the `.img.xz` is over 2,000,000,000 bytes (GitHub release assets must be < 2 GiB); `ALLOW_BIG_IMAGE=1` keeps the big image and exits 0.
+Before packing, the build cleans apt caches/lists, logs and `/tmp` inside the image, then zeroes free space on its own loop partitions only (`zerofree` on the ext4 root after `e2fsck -fy`, dd-fill fallback if `zerofree` is missing; dd-fill on the FAT boot partition) so xz does not pack deleted package data. It fails if the `.img.xz` is over 2,140,000,000 bytes (GitHub release assets must be < 2 GiB); `ALLOW_BIG_IMAGE=1` keeps the big image and exits 0.
 
 - Optional pre-seed on the FAT boot partition (`/boot/firmware/tesla-linux.conf`) if you will use station mode (same Wi-Fi network as the car):
 
