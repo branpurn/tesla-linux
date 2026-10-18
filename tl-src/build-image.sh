@@ -7,7 +7,11 @@
 #
 # Run on the build VM as root:   sudo ./build-image.sh
 #
-# Requires: qemu-user-static binfmt-support parted e2fsprogs xz-utils curl
+# Requires: qemu-user-static binfmt-support parted e2fsprogs xz-utils curl zerofree
+#   (zerofree is optional: without it free space is zeroed with a slower dd-fill)
+#
+# ALLOW_BIG_IMAGE=1  keep going (exit 0) even if the .img.xz is over the
+#                    GitHub release-asset budget (MAX_IMG_XZ_BYTES, 2,140,000,000).
 set -euo pipefail
 
 UBUNTU_REL="${UBUNTU_REL:-26.04}"
@@ -20,6 +24,8 @@ STAMP="$(date +%Y%m%d)"
 IMGNAME="tesla-linux-${STAMP}-pi.img"
 GROW_GB="${GROW_GB:-4}"
 MNT="$WORK/mnt"
+# GitHub release assets must be < 2 GiB (2,147,483,648 B); keep headroom.
+MAX_IMG_XZ_BYTES=2140000000
 
 log(){ echo -e "\n\033[1;36m==> $*\033[0m"; }
 die(){ echo "ERROR: $*" >&2; exit 1; }
@@ -31,11 +37,16 @@ mkdir -p "$WORK" "$OUT" "$MNT"
 
 # ---------------------------------------------------------------- cleanup ----
 LOOP=""
-cleanup(){
+unmount_all(){
   set +e
   mountpoint -q "$MNT/boot/firmware" && umount "$MNT/boot/firmware"
   for m in dev/pts dev proc sys run; do mountpoint -q "$MNT/$m" && umount -l "$MNT/$m"; done
   mountpoint -q "$MNT" && umount "$MNT"
+  set -e
+}
+cleanup(){
+  unmount_all
+  set +e
   [ -n "$LOOP" ] && losetup -d "$LOOP" 2>/dev/null
   set -e
 }
@@ -280,8 +291,17 @@ ln -sf /etc/systemd/system/tesla-linux-firstboot.service \
 chown -R teslalinux:teslalinux /home/teslalinux
 # ssh host keys + PasswordAuthentication: install-tesla-linux.sh (ssh-keygen -A).
 systemctl enable ssh >/dev/null 2>&1 || true
+
+# Image size: drop what apt / logs / tmp left behind. The host then zeroes the
+# freed blocks (zerofree) so xz does not pack stale .deb data from free space.
 apt-get clean
-rm -rf /var/lib/apt/lists/* /tmp/tl-src /tmp/provision.sh
+rm -f /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/* /var/cache/apt/*.bin
+rm -rf /var/lib/apt/lists/*          # first `apt update` on the Pi re-fetches the lists
+find /var/log/journal -type f -name '*.journal*' -delete 2>/dev/null || true
+find /var/log -type f \( -name '*.gz' -o -name '*.xz' -o -name '*.[0-9]' -o -name '*.old' \) -delete 2>/dev/null || true
+find /var/log -type f -exec truncate -s 0 {} + 2>/dev/null || true
+# Also removes /tmp/tl-src and this script (bash keeps its open fd).
+find /tmp /var/tmp -mindepth 1 -delete 2>/dev/null || true
 echo "--- provisioning complete ---"
 CHROOT
 
@@ -428,6 +448,50 @@ for stale in \
   [ ! -e "$stale" ] || die "stale tmux/banner path remains: $stale"
 done
 
+# ------------------------------------------------------- zero free space -----
+# Deleted package downloads leave non-zero data in free blocks, which xz has to
+# pack (3.2 GB .img.xz vs ~1.93 GiB zeroed). Zero free space on BOTH partitions.
+# Strict: only ever the build's own loop partitions ($LOOP backed by
+# $WORK/$IMGNAME) — never a physical disk.
+assert_build_part(){
+  local dev="$1" n="$2" back
+  [[ "$LOOP" =~ ^/dev/loop[0-9]+$ ]] || die "refusing to zero: LOOP '$LOOP' is not a loop device"
+  [ "$dev" = "$(loop_part "$LOOP" "$n")" ] || die "refusing to zero: $dev is not partition $n of $LOOP"
+  back="$(losetup -n -O BACK-FILE "$LOOP" 2>/dev/null | sed 's/[[:space:]]*$//')"
+  [ -n "$back" ] && [ "$(readlink -f "$back")" = "$(readlink -f "$WORK/$IMGNAME")" ] \
+    || die "refusing to zero: $LOOP is backed by '$back', not $WORK/$IMGNAME"
+}
+# dd-fill a mounted filesystem with zeros, then delete the fill file.
+zero_fill_mounted(){
+  local mnt="$1" dev="$2" src
+  mountpoint -q "$mnt" || die "refusing to zero: $mnt is not mounted"
+  src="$(findmnt -n -o SOURCE --target "$mnt")"
+  [ "$(readlink -f "$src")" = "$(readlink -f "$dev")" ] \
+    || die "refusing to zero: $mnt is mounted from '$src', not $dev"
+  dd if=/dev/zero of="$mnt/.zero" bs=4M status=none 2>/dev/null || true   # ENOSPC is the goal
+  sync; rm -f "$mnt/.zero"; sync
+}
+
+log "zeroing free space (boot + root on $LOOP)"
+assert_build_part "$BOOTDEV" 1
+assert_build_part "$ROOTDEV" 2
+df -h "$MNT" "$MNT/boot/firmware" || true
+# FAT boot partition is small: dd-fill while mounted.
+zero_fill_mounted "$MNT/boot/firmware" "$BOOTDEV"
+sync
+unmount_all          # keep $LOOP attached; root must be unmounted for zerofree
+if findmnt -rn -S "$ROOTDEV" >/dev/null 2>&1; then die "$ROOTDEV still mounted after unmount"; fi
+rc=0; e2fsck -fy "$ROOTDEV" >/dev/null 2>&1 || rc=$?
+[ "$rc" -lt 4 ] || die "e2fsck -fy $ROOTDEV failed (rc=$rc)"
+if command -v zerofree >/dev/null 2>&1; then
+  zerofree "$ROOTDEV" || die "zerofree $ROOTDEV failed"
+else
+  echo "WARN: zerofree not installed (apt install zerofree); falling back to dd-fill of /" >&2
+  mount "$ROOTDEV" "$MNT"
+  zero_fill_mounted "$MNT" "$ROOTDEV"
+  umount "$MNT"
+fi
+
 # ------------------------------------------------------------------ pack -----
 log "packing"
 sync
@@ -435,4 +499,16 @@ cleanup; trap - EXIT
 mv "$WORK/$IMGNAME" "$OUT/$IMGNAME"
 xz -T0 -6 -f "$OUT/$IMGNAME"
 ls -lh "$OUT/$IMGNAME.xz"
-log "DONE -> $OUT/$IMGNAME.xz   (flash with Raspberry Pi Imager -> Use custom)"
+
+# GitHub refuses release assets >= 2 GiB: fail loudly instead of a late upload error.
+XZ_BYTES="$(stat -c %s "$OUT/$IMGNAME.xz")"
+if [ "$XZ_BYTES" -gt "$MAX_IMG_XZ_BYTES" ]; then
+  echo -e "\n\033[1;31m!!! $OUT/$IMGNAME.xz is $XZ_BYTES bytes > $MAX_IMG_XZ_BYTES" \
+          "— too big for a GitHub release asset (2 GiB limit) !!!\033[0m" >&2
+  if [ "${ALLOW_BIG_IMAGE:-0}" = 1 ]; then
+    echo "WARN: ALLOW_BIG_IMAGE=1 — keeping the oversized image." >&2
+  else
+    die "image too big (kept at $OUT/$IMGNAME.xz); set ALLOW_BIG_IMAGE=1 to accept"
+  fi
+fi
+log "DONE -> $OUT/$IMGNAME.xz ($XZ_BYTES bytes)   (flash with Raspberry Pi Imager -> Use custom)"
