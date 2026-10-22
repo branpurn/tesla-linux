@@ -1,0 +1,10 @@
+// Tesla Linux: never prompt for NetworkManager actions on the :0 desktop.
+// The autologin XFCE session is logind Class=background (no seat), so polkit
+// falls to "implicit any" = auth_admin for e.g. wifi.scan, and nm-applet pops a
+// polkit-gnome password dialog at boot. Members of netdev get all NM actions.
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") == 0 &&
+        subject.isInGroup("netdev")) {
+        return polkit.Result.YES;
+    }
+});

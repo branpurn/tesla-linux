@@ -1654,6 +1654,14 @@ usermod -aG input "$TL_USER"
 
 rm -f /etc/udev/rules.d/60-tesla-linux-kbm-seat0.rules
 
+# --- polkit: no NetworkManager auth prompts for the autologin user ------------
+# Autologin session is logind Class=background → polkit "any" = auth_admin →
+# nm-applet wifi.scan popped a password dialog on :0 at boot. See docs.
+getent group netdev >/dev/null || groupadd -r netdev
+usermod -aG netdev "$TL_USER"
+install -d -m750 -o root -g polkitd /etc/polkit-1/rules.d 2>/dev/null || install -d -m755 /etc/polkit-1/rules.d
+install -m644 "$HERE/49-tesla-linux-networkmanager.rules" /etc/polkit-1/rules.d/49-tesla-linux-networkmanager.rules
+
 # --- PipeWire: always-present virtual sink so headless audio has a target -----
 install -d /etc/pipewire/pipewire.conf.d
 cat > /etc/pipewire/pipewire.conf.d/99-tesla-sink.conf <<'EOF'

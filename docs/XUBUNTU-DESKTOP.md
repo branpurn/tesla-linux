@@ -92,3 +92,15 @@ RSS), CPU idle ~68% -> ~69% (unchanged; the capture stream dominates).
   boots) is untouched.
 - `apt upgrade` will not pull the pinned-out packages back; do not delete the
   pin file.
+
+## No NetworkManager polkit prompts on :0
+
+The autologin XFCE session is a logind `Class=background` session with no seat, so
+polkit evaluates `org.freedesktop.NetworkManager.*` against `allow_any` (`auth_admin`).
+At boot nm-applet requests `wifi.scan`, and polkit-gnome shows a password dialog on
+`:0` (journal: `FAILED to authenticate ... org.freedesktop.NetworkManager.wifi.scan for
+... [nm-applet]`). The installer adds `$TL_USER` to `netdev` and installs
+`/etc/polkit-1/rules.d/49-tesla-linux-networkmanager.rules`, which grants all NM actions
+to `netdev`. Station autoconnect itself is root/NM-driven (system-owned PSK) and is
+unaffected; `tesla-linux-wlan boot` still falls back to the hostapd AP when no saved
+network is in range. Selftest: `tl-src/selftest-polkit-nm.sh`.

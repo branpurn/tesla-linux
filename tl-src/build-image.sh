@@ -126,6 +126,7 @@ mkdir -p "$MNT/tmp/tl-src"
 cp "$SRC"/install-tesla-linux.sh "$SRC"/install-chromium-hwdec.sh "$SRC"/install-chromium-widevine.sh "$SRC"/ta_*.py "$SRC"/*.html \
    "$SRC"/tesla-linux-wlan.sh "$SRC"/tesla-linux-wlan.service \
    "$SRC"/tesla-linux-wlan-api.service "$SRC"/tesla-linux-pin-api.service "$SRC"/ap.env \
+   "$SRC"/49-tesla-linux-networkmanager.rules \
    "$SRC"/99-tesla-linux-lte.rules \
    "$SRC"/tesla-linux-lte-dhcp.service "$SRC"/tesla-linux-lte-dhcp.timer \
    "$SRC"/tesla-linux-alias.service "$SRC"/tesla-linux-alias.nft \
