@@ -1,5 +1,8 @@
 # Station-mode nginx bind (DHCP race)
 
+> **SUPERSEDED:** nginx now listens wildcard on all interfaces — see [NGINX-WILDCARD-LISTEN.md](NGINX-WILDCARD-LISTEN.md). Per-IP / "never 0.0.0.0" guidance below is historical.
+
+
 ## Symptom (live 2026-09-20)
 
 Pi joined home Wi‑Fi as station: DHCP **192.0.2.199**. Car browser → `http://192.0.2.199/` → **ERR_CONNECTION_REFUSED**.

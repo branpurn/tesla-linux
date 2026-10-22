@@ -1,5 +1,8 @@
 # Station mode: http://\<dhcp-ip\>/ connection refused
 
+> **SUPERSEDED:** nginx now listens wildcard on all interfaces — see [NGINX-WILDCARD-LISTEN.md](NGINX-WILDCARD-LISTEN.md). Per-IP / "never 0.0.0.0" guidance below is historical.
+
+
 ## Symptom
 Pi reachable at a station DHCP address (e.g. `192.0.2.199`) but HTTP connection refused. Web UI works on `10.42.0.1` (AP) / `10.42.1.1` (factory eth).
 
