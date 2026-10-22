@@ -1256,10 +1256,32 @@ verify_xfce_wallpaper() {
     fi
 }
 
+# Per-interface source policy routing (two uplinks on one subnet). Optional root $1.
+verify_srcroute() {
+    local r="${1:-}" d c
+    d="$r/etc/NetworkManager/dispatcher.d/50-tesla-linux-srcroute"
+    c="$r/etc/sysctl.d/99-tesla-linux-srcroute.conf"
+    if [ -z "$r" ] && [ ! -f "$d" ]; then
+        d="$(cd "$(dirname "$0")" && pwd)/tesla-linux-srcroute.sh"; c="$(cd "$(dirname "$0")" && pwd)/99-tesla-linux-srcroute.conf"
+    fi
+    [ -f "$d" ] || { echo "ERROR: srcroute dispatcher missing ($d)" >&2; exit 1; }
+    [ -f "$c" ] || { echo "ERROR: srcroute sysctl missing ($c)" >&2; exit 1; }
+    grep -q 'rule add from' "$d" || { echo "ERROR: srcroute dispatcher lacks from-addr rules" >&2; exit 1; }
+    grep -q 'dhcp4-change' "$d" || { echo "ERROR: srcroute dispatcher ignores dhcp4-change" >&2; exit 1; }
+    grep -Eq 'all\.arp_ignore *= *1' "$c" || { echo "ERROR: arp_ignore=1 missing" >&2; exit 1; }
+    grep -Eq 'all\.arp_announce *= *2' "$c" || { echo "ERROR: arp_announce=2 missing" >&2; exit 1; }
+    grep -Eq 'all\.rp_filter *= *2' "$c" || { echo "ERROR: rp_filter=2 missing" >&2; exit 1; }
+}
+
 # --verify-autologin / --verify-kbm [root] checks a live box or a mounted image.
 # Do not run ensure_*. KBM-on-:0 is part of the same fail-hard gate.
 if [ "${1:-}" = "--verify-autologin" ] || [ "${1:-}" = "--verify-kbm" ]; then
     verify_autologin_hdmi "${2:-}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--verify-srcroute" ]; then
+    verify_srcroute "${2:-}"
     exit 0
 fi
 
@@ -1422,6 +1444,14 @@ esac
 exit 0
 EOF
 chmod 755 /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan
+
+# Source policy routing: replies from each address leave the interface that owns
+# it (LTE + Starlink Wi-Fi on the same 192.168.1.0/24). Runs before 99-*-wlan.
+install -m755 "$HERE/tesla-linux-srcroute.sh" /etc/NetworkManager/dispatcher.d/50-tesla-linux-srcroute
+install -m755 "$HERE/tesla-linux-srcroute.sh" /usr/local/sbin/tesla-linux-srcroute
+install -m644 "$HERE/99-tesla-linux-srcroute.conf" /etc/sysctl.d/99-tesla-linux-srcroute.conf
+sysctl -q -p /etc/sysctl.d/99-tesla-linux-srcroute.conf 2>/dev/null || true
+verify_srcroute
 
 # Wired ethernet: static 10.42.1.1/24 (not DHCP, not AP 10.42.0.1/24). NM owns it.
 # shellcheck source=/dev/null
