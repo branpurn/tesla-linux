@@ -37,7 +37,10 @@ sudo ./tl-src/install-tesla-linux.sh --verify-chromium
   - `/etc/chromium.d/tesla-linux` — sourced by the Debian wrapper
     `/usr/bin/chromium`: `--ozone-platform=x11 --start-maximized
     --disable-frame-rate-limit --no-first-run --password-store=basic
-    --disable-session-crashed-bubble --hide-crash-restore-bubble`.
+    --disable-session-crashed-bubble --hide-crash-restore-bubble
+    --top-chrome-touch-ui=disabled`, plus `--force-device-scale-factor=N`
+    only when `TL_CHROMIUM_UI_SCALE=N` is set (see
+    [Compact top chrome](#compact-top-chrome-tab-strip--toolbar-height)).
     (The wrapper itself adds `--use-angle=gles`; Pi's `default-flags` add
     `--enable-gpu-rasterization`.)
   - `/usr/share/chromium/extensions/tl-h264-only/` — tiny MV3 extension
@@ -176,6 +179,62 @@ YouTube (Big Buck Bunny 60 fps, H.264, quality forced, in-car-stream load):
 
 Note the stream to the car is `TA_FPS=30` (`ta_display_backend.py`), so the
 car never sees more than 30 fps whatever the browser plays.
+
+## Compact top chrome (tab strip / toolbar height)
+
+The tab strip + toolbar looked "too thick" in the car. Two things set their
+height on this X11 session:
+
+1. **Touch layout.** Chromium has a taller touch-optimized top chrome
+   (bigger tabs, toolbar buttons and omnibox). `--top-chrome-touch-ui=`
+   `auto|disabled|enabled` is still a valid switch in current Chromium
+   (`ui/base/ui_base_switches.h`, `TouchUiController`; also
+   `chrome://flags/#top-chrome-touch-ui` "Touch UI Layout"). In the default
+   `auto` mode touch UI follows *tablet mode*, which only Windows and ChromeOS
+   report, so on Linux the car's uinput touchscreen does **not** turn it on by
+   itself. Only `enabled` (switch or the labs flag) does. The flags file now
+   pins **`--top-chrome-touch-ui=disabled`** anyway: it changes nothing when
+   things are already compact and guards against `auto` changing behaviour
+   later. A chrome://flags choice is appended after `CHROMIUM_FLAGS` and wins,
+   so leave "Touch UI Layout" on *Default*.
+2. **Device scale factor — this is what makes it thick here.** On X11 Chromium
+   gets its UI scale from GTK's `gtk-xft-dpi` (`GtkUi::GetDisplayConfig`, X11
+   includes the font scale in the device scale): Xft DPI **130** (xfconf)
+   gives **130/96 ≈ 1.35**. So every DIP of tab strip, toolbar and web page
+   is 1.35 px on the 1088×832 screen. `--force-device-scale-factor=N` takes
+   precedence over that, and the whole browser (top chrome **and** pages)
+   renders at N.
+
+Opt-in knob (default **unset**, keeps the Xft-DPI scale):
+
+```
+sudo TL_CHROMIUM_UI_SCALE=1 ./tl-src/install-chromium-hwdec.sh   # or 1.15, 1.2, ...
+sudo ./tl-src/install-tesla-linux.sh --verify-chromium
+# close Chromium normally (window close / chrome://quit) and start it again
+```
+
+Allowed values are plain decimals from 0.5 to 3 (anything else fails before the
+file is written). The installer rewrites `/etc/chromium.d/tesla-linux` every
+run, so **re-running it without the variable removes the override**. The
+`--verify` gate fails if the flags file lacks `--top-chrome-touch-ui=disabled`,
+sets `enabled`/`auto`, or has a malformed, out-of-range or repeated
+`--force-device-scale-factor`.
+
+**Keeping pages readable.** A forced scale shrinks page content too (at
+`1`, text is about 26% smaller than at 1.35). Raise **Settings → Appearance →
+Page zoom** to compensate: 125% with `TL_CHROMIUM_UI_SCALE=1` (pages ≈1.25×,
+close to before, toolbar ≈26% shorter) or 110–125% with `1.15`. That setting is
+per profile: `partition.default_zoom_level` in `~/.config/chromium/Default/Preferences`
+(`{"x": log(zoom)/log(1.2)}`, e.g. 125% = 1.2239). There is **no** Chrome
+policy for the default page zoom, and Chromium rewrites `Preferences` while
+it runs, so the installer does not seed it. Set it in the UI (or edit the
+file only while Chromium is closed).
+
+Things that do *not* help: the GTK vs Classic theme choice (Settings →
+Appearance) changes colors and window-button style, not the tab strip /
+toolbar layout constants or the scale; lowering Xft DPI would shrink the whole
+XFCE desktop, not just Chromium. "Use system title bar and borders" *adds*
+an xfwm title bar above the tabs; keep it off.
 
 ## Known limits
 

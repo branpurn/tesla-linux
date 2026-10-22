@@ -223,7 +223,9 @@ EOF
     cat > "$t/etc/chromium/policies/managed/tesla-linux.json" <<'EOF'
 { "HardwareAccelerationModeEnabled": true }
 EOF
-    echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --ozone-platform=x11"' > "$t/etc/chromium.d/tesla-linux"
+    # the installer's own write_flags (default: TL_CHROMIUM_UI_SCALE unset)
+    env -u TL_CHROMIUM_UI_SCALE bash -c 'set -e; r="$1"; eval "$(sed -n "/^ui_scale_ok() {/,/^}/p; /^write_flags() {/,/^}/p" "$2")"
+             write_flags "$r"' _ "$t" "$INST"
     cp "$EXT/manifest.json" "$EXT/h264only.js" "$EXT/youtube-mobile-rules.json" "$t/usr/share/chromium/extensions/tl-h264-only/"
     mkdir -p "$t/usr/share/chromium/extensions/tl-h264-only/_metadata"
     mkdir -p "$t/usr/local/share/applications"
@@ -273,6 +275,76 @@ plant "$TREE"
 
 echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --disable-accelerated-video-decode"' > "$TREE/etc/chromium.d/tesla-linux"
 expect_fail "flags disabling HW decode fail gate" "disables HW decode" "$INST" --verify "$TREE"
+plant "$TREE"
+
+# --- compact top chrome (no touch UI) + TL_CHROMIUM_UI_SCALE ---------------
+FL="$TREE/etc/chromium.d/tesla-linux"
+# what the Debian wrapper ends up with after sourcing the file
+cr_flags() { bash -c 'CHROMIUM_FLAGS=""; . "$1"; printf "%s" "$CHROMIUM_FLAGS"' _ "$1"; }
+# write_flags with a given TL_CHROMIUM_UI_SCALE into tree $2
+wf() { TL_CHROMIUM_UI_SCALE="$1" bash -c 'set -e; r="$1"; eval "$(sed -n "/^ui_scale_ok() {/,/^}/p; /^write_flags() {/,/^}/p" "$2")"
+          write_flags "$r"' _ "$2" "$INST"; }
+f="$(cr_flags "$FL")"
+case " $f " in
+    *" --top-chrome-touch-ui=disabled "*) pass "default flags pin --top-chrome-touch-ui=disabled" ;;
+    *) bad "default flags lack --top-chrome-touch-ui=disabled ($f)" ;;
+esac
+case "$f" in
+    *--force-device-scale-factor*) bad "default flags force a device scale factor (TL_CHROMIUM_UI_SCALE unset)" ;;
+    *) pass "default flags keep the Xft-DPI scale (no --force-device-scale-factor)" ;;
+esac
+case " $f " in
+    *" --ozone-platform=x11 "*" --disable-frame-rate-limit "*) pass "default flags keep x11 + frame-rate flags" ;;
+    *) bad "default flags lost existing flags ($f)" ;;
+esac
+
+sed -i '/top-chrome-touch-ui=disabled/d' "$FL"
+expect_fail "flags without --top-chrome-touch-ui=disabled fail gate" "top-chrome-touch-ui=disabled" "$INST" --verify "$TREE"
+plant "$TREE"
+
+sed -i 's/^\(export .*top-chrome-touch-ui=disabled.*\)$/# \1/' "$FL"
+expect_fail "commented-out touch-ui flag does not satisfy gate" "top-chrome-touch-ui=disabled" "$INST" --verify "$TREE"
+plant "$TREE"
+
+echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --top-chrome-touch-ui=enabled"' >> "$FL"
+expect_fail "flags enabling touch UI fail gate" "touch-optimized" "$INST" --verify "$TREE"
+plant "$TREE"
+
+echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --top-chrome-touch-ui=auto"' >> "$FL"
+expect_fail "flags with touch UI 'auto' fail gate" "touch-optimized" "$INST" --verify "$TREE"
+plant "$TREE"
+
+for sc in 1 1.15 0.85; do
+    if wf "$sc" "$TREE" 2>"$OUT/wf.err" && f="$(cr_flags "$FL")" \
+       && [ "$(grep -o -- '--force-device-scale-factor=[^ ]*' <<<"$f")" = "--force-device-scale-factor=$sc" ] \
+       && case " $f " in *" --top-chrome-touch-ui=disabled "*) true ;; *) false ;; esac \
+       && "$INST" --verify "$TREE" >/dev/null 2>"$OUT/wf.err"; then
+        pass "TL_CHROMIUM_UI_SCALE=$sc -> --force-device-scale-factor=$sc, verify ok"
+    else
+        bad "TL_CHROMIUM_UI_SCALE=$sc not written/verified ($(tr '\n' ' ' <"$OUT/wf.err"))"
+    fi
+done
+plant "$TREE"
+
+for sc in abc 5 0 1,2 '1 --no-sandbox' '1"; rm -rf /'; do
+    cp "$FL" "$OUT/fl.before"
+    expect_fail "TL_CHROMIUM_UI_SCALE='$sc' rejected" "TL_CHROMIUM_UI_SCALE" wf "$sc" "$TREE"
+    cmp -s "$FL" "$OUT/fl.before" && pass "rejected TL_CHROMIUM_UI_SCALE='$sc' left the flags file alone" \
+        || bad "rejected TL_CHROMIUM_UI_SCALE='$sc' rewrote the flags file"
+done
+plant "$TREE"
+
+echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --force-device-scale-factor=0.1"' >> "$FL"
+expect_fail "hand-edited out-of-range device scale fails gate" "not a decimal" "$INST" --verify "$TREE"
+plant "$TREE"
+
+echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --force-device-scale-factor"' >> "$FL"
+expect_fail "valueless --force-device-scale-factor fails gate" "not a decimal" "$INST" --verify "$TREE"
+plant "$TREE"
+
+wf 1 "$TREE"
+echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --force-device-scale-factor=1.2"' >> "$FL"
+expect_fail "device scale set twice fails gate" "more than once" "$INST" --verify "$TREE"
 plant "$TREE"
 
 rm -f "$TREE/usr/share/chromium/extensions/tl-h264-only/h264only.js"
