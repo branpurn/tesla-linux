@@ -1409,7 +1409,10 @@ install -m644 "$HERE/tesla-linux-lte-dhcp.timer" /etc/systemd/system/tesla-linux
 install -m644 "$HERE/tesla-linux-alias.nft" /etc/tesla-linux-alias.nft
 install -m644 "$HERE/tesla-linux-alias.service" /etc/systemd/system/tesla-linux-alias.service
 
-# Screen guard: re-applies the 1088x832 screen if the session shrinks it (seen as 617x641).
+# Adaptive screen API: loopback :9096 behind the PIN gate (desktop.html Fit: Adaptive).
+install -m755 "$HERE/ta_screen_api.py" /usr/local/sbin/ta_screen_api.py
+install -m644 "$HERE/tesla-linux-screen-api.service" /etc/systemd/system/tesla-linux-screen-api.service
+# Screen guard: enforces /run/tesla-linux/screen-size (default 1088x832); re-applies the screen if the session shrinks it (seen as 617x641).
 install -m755 "$HERE/tl-screen-guard.sh" /usr/local/sbin/tl-screen-guard
 install -m644 "$HERE/tesla-linux-screen-guard.service" /etc/systemd/system/tesla-linux-screen-guard.service
 
@@ -1521,6 +1524,7 @@ cat > /etc/nginx/tl-locations.conf <<'EOF'
 # /api/reboot → same loopback :9094 (system reboot kick; next boot joins saved WLAN).
 # /api/mode → same loopback :9094 (WAN-rebroadcast intent; persist only).
 # /api/lte → same loopback :9094 (GET stick health for the Frontend LTE pane).
+# /api/screen → loopback ta_screen_api.py :9096 (Fit: Adaptive X resize; PIN-gated).
 root /var/www/tl;
 index index.html;
 # Boot-PIN gate (ta_pin_api.py :9095). Every location below inherits
@@ -1566,6 +1570,12 @@ location /api/mode {
     proxy_set_header Host $host;
     proxy_set_header Content-Type $http_content_type;
     client_max_body_size 8k;
+}
+location /api/screen {
+    proxy_pass http://127.0.0.1:9096;
+    proxy_set_header Host $host;
+    proxy_set_header Content-Type $http_content_type;
+    client_max_body_size 1k;
 }
 location /api/lte {
     proxy_pass http://127.0.0.1:9094;
@@ -1854,6 +1864,8 @@ enable_wlan_nginx() {
        /etc/systemd/system/multi-user.target.wants/tesla-linux-alias.service
     ln -sfn /etc/systemd/system/tesla-linux-screen-guard.service \
        /etc/systemd/system/multi-user.target.wants/tesla-linux-screen-guard.service
+    ln -sfn /etc/systemd/system/tesla-linux-screen-api.service \
+       /etc/systemd/system/multi-user.target.wants/tesla-linux-screen-api.service
     ln -sfn /etc/systemd/system/tesla-linux-wlan.service \
        /etc/systemd/system/multi-user.target.wants/tesla-linux-wlan.service
     ln -sfn /etc/systemd/system/tesla-linux-wlan-api.service \

@@ -137,10 +137,21 @@ async function mkDecoder(codec){
   }catch(err){ hudMsg('decoder setup failed: '+err.message); }
 }
 
-const vws=new WebSocket(base+'/sockets/display');
-vws.binaryType='arraybuffer';
-vws.onopen =()=>hudMsg('video socket open…');
-vws.onclose=()=>hudMsg('video socket closed');
+/* Video socket reconnects: Fit: Adaptive restarts the encoder at a new size,
+   so the next stream may have new dimensions. WebCodecs is rebuilt from the
+   new SPS; the canvas bitmap follows f.displayWidth/Height. */
+let vws=null;
+function resetVideo(){
+  if(decKind==='webcodecs'&&dec){ try{dec.close();}catch(e){} dec=null; cfg=false; setup=null; }
+  started=false; spsPps=null;
+}
+function connectVideo(){
+  vws=new WebSocket(base+'/sockets/display');
+  vws.binaryType='arraybuffer';
+  vws.onopen =()=>hudMsg('video socket open…');
+  vws.onclose=()=>{ hudMsg('video socket closed — reconnecting…'); resetVideo(); setTimeout(connectVideo,1000); };
+  vws.onmessage=onVideo;
+}
 function feedNal(b, hasSPS, hasIDR){
   if(!cfg || !dec) return;
   if(!started){ if(!hasIDR) return; started=true; }
@@ -154,7 +165,7 @@ function feedNal(b, hasSPS, hasIDR){
     ts+=33333;
   }catch(e){}
 }
-vws.onmessage=async ev=>{
+async function onVideo(ev){
   const b=new Uint8Array(ev.data); bytes+=b.length;
   const {types,spsOff}=scan(b);
   const hasSPS=types.has(7), hasIDR=types.has(5);
@@ -168,7 +179,8 @@ vws.onmessage=async ev=>{
     await setup;
   }
   feedNal(b, hasSPS, hasIDR);
-};
+}
+connectVideo();
 
 /* ---------- input ---------- */
 const tws=new WebSocket(base+'/sockets/touchscreen');
@@ -200,27 +212,57 @@ document.getElementById('reboot').addEventListener('click', async ()=>{
     await fetch('/api/reboot',{method:'POST',credentials:'same-origin',cache:'no-store'});
   }catch(e){}
 });
-/* ---------- Stretch / Fixed toggle ----------
+/* ---------- Fit: Fixed / Stretch / Adaptive ----------
+   Adaptive = resize the Pi's real X screen to viewport CSS px x devicePixelRatio
+   (multiples of 8, clamped 640x480..1920x1080) via POST /api/screen, so the
+   stream is 1:1 with no bars/stretch. Leaving Adaptive restores 1088x832.
    Fixed = native aspect, letterboxed. Stretch = canvas CSS box is 100vw x 100vh.
    Touch mapping uses canvas.getBoundingClientRect() with independent x/y
    normalisation, so it is correct in both modes (canvas bitmap fills its box). */
 const FIT_KEY='tl.desktop.fit';
+const FIT_MODES=['fixed','stretch','adaptive'], FIT_LABEL={fixed:'Fixed',stretch:'Stretch',adaptive:'Adaptive'};
 let fitMode='fixed';
-try{ if(localStorage.getItem(FIT_KEY)==='stretch') fitMode='stretch'; }catch(e){}
+try{ const v=localStorage.getItem(FIT_KEY); if(FIT_MODES.includes(v)) fitMode=v; }catch(e){}
 const fitBtn=document.getElementById('fit');
 function applyFit(){
   document.body.classList.toggle('fit-stretch', fitMode==='stretch');
-  fitBtn.textContent='Fit: '+(fitMode==='stretch'?'Stretch':'Fixed');
-  fitBtn.setAttribute('aria-pressed', String(fitMode==='stretch'));
+  fitBtn.textContent='Fit: '+FIT_LABEL[fitMode];
+  fitBtn.setAttribute('aria-pressed', String(fitMode!=='fixed'));
 }
+function adaptiveSize(){
+  const dpr=window.devicePixelRatio||1, r8=v=>Math.round(v/8)*8;
+  const w=Math.max(640,Math.min(1920,r8(window.innerWidth*dpr)));
+  const h=Math.max(480,Math.min(1080,r8(window.innerHeight*dpr)));
+  return {w,h};
+}
+let sentSize='', screenTimer=null;
+async function postScreen(body){
+  const key=JSON.stringify(body);
+  if(key===sentSize) return;
+  try{
+    const r=await fetch('/api/screen',{method:'POST',credentials:'same-origin',cache:'no-store',
+      headers:{'Content-Type':'application/json'},body:key});
+    if(r.status===429){ const s=+(r.headers.get('Retry-After')||3); schedScreen(s*1000); return; }
+    if(r.ok) sentSize=key;
+  }catch(e){}
+}
+function schedScreen(ms){
+  clearTimeout(screenTimer);
+  screenTimer=setTimeout(()=>{ if(fitMode==='adaptive') postScreen(adaptiveSize()); }, ms==null?500:ms);
+}
+function onLayout(){ applyFit(); if(fitMode==='adaptive') schedScreen(); }
 fitBtn.addEventListener('click',()=>{
-  fitMode=fitMode==='stretch'?'fixed':'stretch';
+  const prev=fitMode;
+  fitMode=FIT_MODES[(FIT_MODES.indexOf(fitMode)+1)%FIT_MODES.length];
   try{ localStorage.setItem(FIT_KEY,fitMode); }catch(e){}
   applyFit();
+  if(fitMode==='adaptive') schedScreen(0);
+  else if(prev==='adaptive'){ clearTimeout(screenTimer); postScreen({reset:true}); }
 });
-['resize','orientationchange','fullscreenchange','webkitfullscreenchange'].forEach(t=>addEventListener(t,applyFit));
-document.addEventListener('fullscreenchange',applyFit);
+['resize','orientationchange','fullscreenchange','webkitfullscreenchange'].forEach(t=>addEventListener(t,onLayout));
+document.addEventListener('fullscreenchange',onLayout);
 applyFit();
+if(fitMode==='adaptive') schedScreen(0);
 const fsBtn=document.getElementById('fs'), de=document.documentElement;
 const reqFs=de.requestFullscreen||de.webkitRequestFullscreen;
 if(reqFs){

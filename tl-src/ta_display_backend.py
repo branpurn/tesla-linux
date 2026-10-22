@@ -22,6 +22,7 @@ Env:
   TA_FPS       framerate                 (default 30)
   TA_WIDTH     encode width              (default 1088; Tesla-browser native)
   TA_HEIGHT    encode height             (default 832; Tesla-browser native)
+  /run/tesla-linux/screen-size  "WxH" overrides TA_WIDTH/TA_HEIGHT (Fit: Adaptive)
   TA_ENCODER   x264enc | v4l2h264enc     (default: v4l2h264enc if /dev/video11 else x264enc)
 """
 import asyncio, os, threading
@@ -37,6 +38,14 @@ BITRATE = int(os.environ.get("TA_BITRATE", "8000"))
 FPS     = int(os.environ.get("TA_FPS", "30"))
 WIDTH   = int(os.environ.get("TA_WIDTH", "1088"))
 HEIGHT  = int(os.environ.get("TA_HEIGHT", "832"))
+# Fit: Adaptive — ta_screen_api writes the live X size here and restarts us;
+# encode 1:1 at that size (no scaling) so the stream is crisp.
+try:
+    _sw, _sh = open("/run/tesla-linux/screen-size").read().strip().split("x")
+    if 640 <= int(_sw) <= 1920 and 480 <= int(_sh) <= 1080:
+        WIDTH, HEIGHT = int(_sw), int(_sh)
+except (OSError, ValueError):
+    pass
 ENCODER = os.environ.get("TA_ENCODER") or ("v4l2h264enc" if os.path.exists("/dev/video11") else "x264enc")
 
 QUEUE_MAX = 8          # frames buffered per client before we start dropping

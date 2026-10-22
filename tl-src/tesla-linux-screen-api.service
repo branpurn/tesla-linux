@@ -1,0 +1,14 @@
+[Unit]
+Description=Tesla Linux adaptive screen API (loopback /api/screen, behind PIN gate)
+After=local-fs.target
+
+[Service]
+Type=simple
+Environment=TA_BIND=127.0.0.1
+Environment=TA_SCREEN_PORT=9096
+ExecStart=/usr/bin/python3 /usr/local/sbin/ta_screen_api.py
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
