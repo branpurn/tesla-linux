@@ -1,0 +1,14 @@
+[Unit]
+Description=Tesla Linux boot-PIN gate API (loopback /api/pin, nginx auth_request)
+After=local-fs.target
+
+[Service]
+Type=simple
+Environment=TA_BIND=127.0.0.1
+Environment=TA_PIN_PORT=9095
+ExecStart=/usr/bin/python3 /usr/local/sbin/ta_pin_api.py
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

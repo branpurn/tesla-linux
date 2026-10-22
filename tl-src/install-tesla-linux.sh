@@ -1322,7 +1322,7 @@ fi
 for f in ta_display_backend.py ta_touch_backend.py ta_audio_backend.py; do
     [ -f "$HERE/$f" ] && install -m755 "$HERE/$f" "$PREFIX/$f"
 done
-for f in desktop.html probe.html index.html; do
+for f in desktop.html probe.html index.html pin.html; do
     [ -f "$HERE/$f" ] && install -m644 "$HERE/$f" /var/www/tl/$f
 done
 # Broadway software H.264 (HTTP / no VideoDecoder). Worker loads avc.wasm
@@ -1365,6 +1365,12 @@ rm -f /usr/local/sbin/tesla-linux-hdmi-clone \
 install -m644 "$HERE/tesla-linux-wlan.service" /etc/systemd/system/tesla-linux-wlan.service
 install -m755 "$HERE/ta_wlan_api.py" /usr/local/sbin/ta_wlan_api.py
 install -m644 "$HERE/tesla-linux-wlan-api.service" /etc/systemd/system/tesla-linux-wlan-api.service
+# Boot-PIN gate: loopback :9095 (nginx auth_request). Hash lives in
+# /etc/tesla-linux/pin.hash (root 0600, absent = gate off); unlock state in
+# /run/tesla-linux (tmpfs, resets each boot). Never create pin.hash here.
+install -m755 "$HERE/ta_pin_api.py" /usr/local/sbin/ta_pin_api.py
+install -m644 "$HERE/tesla-linux-pin-api.service" /etc/systemd/system/tesla-linux-pin-api.service
+[ -f /etc/tesla-linux/pin.hash ] && chmod 600 /etc/tesla-linux/pin.hash && chown root:root /etc/tesla-linux/pin.hash
 
 # LTE Health=no_ip recovery: udev kick + oneshot + periodic timer (retries DHCP without bouncing hostapd).
 install -d /etc/udev/rules.d /etc/systemd/system
@@ -1473,6 +1479,29 @@ cat > /etc/nginx/tl-locations.conf <<'EOF'
 # /api/lte → same loopback :9094 (GET stick health for the Frontend LTE pane).
 root /var/www/tl;
 index index.html;
+# Boot-PIN gate (ta_pin_api.py :9095). Every location below inherits
+# auth_request; only the PIN page + /api/pin/* are exempt. No pin.hash = 204
+# (open). Locked: HTML → 302 /pin.html, /api/* and /sockets/* → 401.
+auth_request /_tl_pin_check;
+error_page 401 = @tl_locked;
+location = /_tl_pin_check {
+    internal;
+    proxy_pass http://127.0.0.1:9095/api/pin/check;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+}
+location @tl_locked {
+    if ($uri ~ ^/(api|sockets)/) { return 401; }
+    return 302 /pin.html?next=$request_uri;
+}
+location = /pin.html { auth_request off; add_header Cache-Control no-store; }
+location /api/pin/ {
+    auth_request off;
+    proxy_pass http://127.0.0.1:9095;
+    proxy_set_header Host $host;
+    proxy_set_header Content-Type $http_content_type;
+    client_max_body_size 1k;
+}
 location ~* \.wasm$ { default_type application/wasm; }
 location /sockets/display     { proxy_pass http://127.0.0.1:9091; include /etc/nginx/tl-ws.conf; }
 location /sockets/touchscreen { proxy_pass http://127.0.0.1:9092; include /etc/nginx/tl-ws.conf; }
@@ -1519,8 +1548,8 @@ EOF
 ln -sf /etc/nginx/sites-available/tl /etc/nginx/sites-enabled/tl
 cat > /etc/systemd/system/nginx.service.d/tl-after-wlan.conf <<'EOF'
 [Unit]
-After=tesla-linux-wlan.service tesla-linux-wlan-api.service tesla-linux-firstboot.service
-Wants=tesla-linux-wlan.service tesla-linux-wlan-api.service
+After=tesla-linux-wlan.service tesla-linux-wlan-api.service tesla-linux-pin-api.service tesla-linux-firstboot.service
+Wants=tesla-linux-wlan.service tesla-linux-wlan-api.service tesla-linux-pin-api.service
 [Service]
 # Re-run nginx-bind immediately before master start so listen files match the
 # live AP/station/ethernet IPv4s. Install seeds an empty tl-http-server.conf;
@@ -1767,7 +1796,7 @@ ensure_no_unattended
 mkdir -p /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-user.target.wants
 
 enable_wlan_nginx() {
-    systemctl enable tesla-linux-wlan.service tesla-linux-wlan-api.service nginx.service \
+    systemctl enable tesla-linux-wlan.service tesla-linux-wlan-api.service tesla-linux-pin-api.service nginx.service \
                      tesla-linux-lte-dhcp.timer tesla-linux-alias.service >/dev/null 2>&1 || true
     ln -sfn /etc/systemd/system/tesla-linux-alias.service \
        /etc/systemd/system/multi-user.target.wants/tesla-linux-alias.service
@@ -1777,6 +1806,8 @@ enable_wlan_nginx() {
        /etc/systemd/system/multi-user.target.wants/tesla-linux-wlan.service
     ln -sfn /etc/systemd/system/tesla-linux-wlan-api.service \
        /etc/systemd/system/multi-user.target.wants/tesla-linux-wlan-api.service
+    ln -sfn /etc/systemd/system/tesla-linux-pin-api.service \
+       /etc/systemd/system/multi-user.target.wants/tesla-linux-pin-api.service
     mkdir -p /etc/systemd/system/timers.target.wants
     ln -sfn /etc/systemd/system/tesla-linux-lte-dhcp.timer \
        /etc/systemd/system/timers.target.wants/tesla-linux-lte-dhcp.timer
