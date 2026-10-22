@@ -1,0 +1,68 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tesla Linux — PIN</title>
+<style>
+body{margin:0;background:#0b0b0b;color:#e8e8e8;font:20px/1.4 system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;padding:24px;user-select:none}
+h1{font-size:28px;margin:8px 0;color:#8ecdff}
+#dots{font-size:44px;letter-spacing:14px;min-height:60px;margin:8px 0}
+#msg{min-height:1.6em;margin:0 0 14px;color:#aaa}
+.bad{color:#ff7b7b}.ok{color:#7bff9e}
+#pad{display:grid;grid-template-columns:repeat(3,120px);gap:16px}
+#pad button{height:100px;font:600 40px system-ui,sans-serif;border:1px solid #2a6ea8;border-radius:14px;background:#1b4f7a;color:#fff;touch-action:manipulation}
+#pad button.alt{background:#161616;border-color:#333;font-size:28px}
+#pad button:active{filter:brightness(1.4)}
+#pad button:disabled{opacity:.4}
+</style>
+<h1>Enter PIN</h1>
+<div id="dots"></div>
+<div id="msg">4–8 digits, then OK</div>
+<div id="pad"></div>
+<script>
+let pin='', busy=false, timer=null;
+const $=id=>document.getElementById(id);
+const pad=$('pad');
+['1','2','3','4','5','6','7','8','9','⌫','0','OK'].forEach(k=>{
+  const b=document.createElement('button'); b.type='button'; b.textContent=k;
+  if(k==='⌫'||k==='OK') b.className='alt';
+  b.addEventListener('click',()=>press(k)); pad.appendChild(b);
+});
+function draw(){ $('dots').textContent='●'.repeat(pin.length); }
+function msg(t,c){ const m=$('msg'); m.textContent=t; m.className=c||''; }
+function lock(s){ pad.querySelectorAll('button').forEach(b=>b.disabled=s); }
+function next(){
+  const n=new URLSearchParams(location.search).get('next')||'/';
+  return (n.startsWith('/')&&!n.startsWith('//')&&!n.startsWith('/pin.html'))?n:'/';
+}
+function countdown(w){
+  clearInterval(timer); lock(true);
+  timer=setInterval(()=>{ if(w<=0){clearInterval(timer);lock(false);msg('Try again');return;}
+    msg('Too many attempts — wait '+w+'s','bad'); w--; },1000);
+}
+async function press(k){
+  if(busy) return;
+  if(k==='⌫'){ pin=pin.slice(0,-1); draw(); return; }
+  if(k!=='OK'){ if(pin.length<8){pin+=k; draw();} return; }
+  if(pin.length<4){ msg('PIN is 4–8 digits','bad'); return; }
+  busy=true; lock(true); msg('Checking…');
+  try{
+    const r=await fetch('/api/pin/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin}),cache:'no-store'});
+    const j=await r.json().catch(()=>({}));
+    pin=''; draw();
+    if(r.ok){ msg('Unlocked','ok'); location.replace(next()); return; }
+    if(j.wait>0){ busy=false; countdown(j.wait); return; }
+    msg(j.msg||'Wrong PIN','bad');
+  }catch(e){ msg('Error — try again','bad'); }
+  busy=false; lock(false);
+}
+document.addEventListener('keydown',e=>{
+  if(/^[0-9]$/.test(e.key)) press(e.key);
+  else if(e.key==='Backspace') press('⌫');
+  else if(e.key==='Enter') press('OK');
+});
+fetch('/api/pin/status',{cache:'no-store'}).then(r=>r.json()).then(s=>{
+  if(!s.locked){ location.replace(next()); return; }
+  if(s.wait>0) countdown(s.wait);
+}).catch(()=>{});
+draw();
+</script>

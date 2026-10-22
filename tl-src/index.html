@@ -26,6 +26,8 @@ a{color:#8ecdff}
 .lte dd{margin:0}
 #footer-nav button#reboot{font:inherit;padding:4px 10px;border:1px solid #2a6ea8;border-radius:6px;background:#1b4f7a;color:#fff;cursor:pointer;vertical-align:baseline}
 #footer-nav button#reboot:disabled{opacity:.5;cursor:wait}
+.pinbox{max-width:28em;margin:0 0 16px}
+.pinbox summary{cursor:pointer;color:#8ecdff;margin:0 0 8px}
 </style>
 <h1>Wi-Fi</h1>
 <div class="modes" role="group" aria-label="Mode">
@@ -61,6 +63,17 @@ a{color:#8ecdff}
   </dl>
 </div>
 <p id="status"></p>
+<details id="pinbox" class="pinbox">
+  <summary>Security PIN</summary>
+  <p id="pin-state">PIN: checking…</p>
+  <p>When set, the web GUI asks for this PIN once after every cold boot (one entry unlocks every device until reboot). Leave unset to keep the GUI open.</p>
+  <form id="pin-form" onsubmit="return false">
+    <label id="pin-cur-row">Current PIN<input id="pin-cur" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></label>
+    <label>New PIN (4–8 digits)<input id="pin-new" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></label>
+    <div class="psk-row"><button type="button" id="pin-set">Set PIN</button><button type="button" id="pin-clear">Clear PIN</button></div>
+  </form>
+  <p id="pin-msg"></p>
+</details>
 <p id="footer-nav"><a href="desktop.html">Desktop</a> · <a href="probe.html">Probe</a> · <button type="button" id="reboot">Reboot</button></p>
 <script>
 const wlanApi='/api/wlan';
@@ -295,4 +308,31 @@ $('pick-station').addEventListener('click',()=>selectMode(STATION));
 $('pick-wan').addEventListener('click',()=>selectMode(WAN));
 
 loadMode();
+
+// Boot-PIN gate settings (/api/pin/*, ta_pin_api.py). Recovery: sudo rm /etc/tesla-linux/pin.hash
+async function pinStatus(){
+  try{
+    const s=await (await fetch('/api/pin/status',{cache:'no-store'})).json();
+    $('pin-state').textContent='PIN: '+(s.set?'set (required once per boot)':'not set (GUI open)');
+    $('pin-cur-row').hidden=!s.set; $('pin-clear').hidden=!s.set;
+    $('pin-set').textContent=s.set?'Change PIN':'Set PIN';
+  }catch(e){ $('pin-state').textContent='PIN: status unavailable'; }
+}
+async function pinPost(url,body){
+  const m=$('pin-msg');
+  try{
+    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),cache:'no-store'});
+    const j=await r.json().catch(()=>({}));
+    m.className=r.ok?'ok':'bad'; m.textContent=j.msg||(r.ok?'Done':'Failed');
+    if(r.ok){ $('pin-cur').value=''; $('pin-new').value=''; }
+  }catch(e){ m.className='bad'; m.textContent='Error'; }
+  pinStatus();
+}
+$('pin-set').addEventListener('click',()=>{
+  const n=$('pin-new').value;
+  if(!/^[0-9]{4,8}$/.test(n)){ $('pin-msg').className='bad'; $('pin-msg').textContent='PIN must be 4–8 digits'; return; }
+  pinPost('/api/pin/set',{current:$('pin-cur').value,pin:n});
+});
+$('pin-clear').addEventListener('click',()=>pinPost('/api/pin/clear',{current:$('pin-cur').value}));
+pinStatus();
 </script>

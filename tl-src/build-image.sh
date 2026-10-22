@@ -125,7 +125,7 @@ log "staging payload"
 mkdir -p "$MNT/tmp/tl-src"
 cp "$SRC"/install-tesla-linux.sh "$SRC"/install-chromium-hwdec.sh "$SRC"/install-chromium-widevine.sh "$SRC"/ta_*.py "$SRC"/*.html \
    "$SRC"/tesla-linux-wlan.sh "$SRC"/tesla-linux-wlan.service \
-   "$SRC"/tesla-linux-wlan-api.service "$SRC"/ap.env \
+   "$SRC"/tesla-linux-wlan-api.service "$SRC"/tesla-linux-pin-api.service "$SRC"/ap.env \
    "$SRC"/99-tesla-linux-lte.rules \
    "$SRC"/tesla-linux-lte-dhcp.service "$SRC"/tesla-linux-lte-dhcp.timer \
    "$SRC"/tesla-linux-alias.service "$SRC"/tesla-linux-alias.nft \
@@ -401,6 +401,12 @@ if grep -Eiq '^After=.*tesla-linux-(xorg|desktop)|^Requires=.*tesla-linux-(xorg|
       "$MNT/etc/systemd/system/tesla-linux-wlan.service"; then
   die "wlan After/Requires xorg or desktop"
 fi
+# Boot-PIN gate staged (auth_request + API unit + page); image ships with NO pin.hash.
+grep -q 'auth_request /_tl_pin_check;' "$MNT/etc/nginx/tl-locations.conf" || die "nginx PIN gate missing"
+[ -x "$MNT/usr/local/sbin/ta_pin_api.py" ] || die "ta_pin_api.py missing"
+[ -f "$MNT/var/www/tl/pin.html" ] || die "pin.html missing"
+[ -e "$MNT/etc/systemd/system/multi-user.target.wants/tesla-linux-pin-api.service" ] || die "pin-api not enabled"
+[ ! -e "$MNT/etc/tesla-linux/pin.hash" ] || die "image must not ship a pin.hash"
 if grep -Eiq '^Before=.*nginx\.service' "$MNT/etc/systemd/system/tesla-linux-wlan.service"; then
   die "wlan still Before=nginx.service (deadlock with nginx After=wlan)"
 fi
