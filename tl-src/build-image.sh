@@ -134,6 +134,7 @@ cp "$SRC"/install-tesla-linux.sh "$SRC"/install-chromium-hwdec.sh "$SRC"/install
    "$SRC"/90-tesla-linux-uap0.conf \
    "$SRC"/tesla-linux-alias.service "$SRC"/tesla-linux-alias.nft \
    "$SRC"/tl-screen-guard.sh "$SRC"/tesla-linux-screen-guard.service \
+   "$SRC"/tesla-linux-screen-api.service \
    "$MNT/tmp/tl-src/" 2>/dev/null || true
 # Stage authorized_keys for teslalinux (never print the key). Not ubuntu — ubuntu is DOA.
 if [ -f "$SRC/authorized_keys" ]; then
@@ -445,10 +446,12 @@ fi
 for f in etc/tesla-linux-alias.nft etc/systemd/system/tesla-linux-alias.service \
          etc/NetworkManager/conf.d/90-tesla-linux-uap0.conf \
          etc/systemd/system/tesla-linux-wlan-rejoin.service etc/systemd/system/tesla-linux-wlan-rejoin.timer \
-         usr/local/sbin/tl-screen-guard etc/systemd/system/tesla-linux-screen-guard.service; do
+         usr/local/sbin/tl-screen-guard etc/systemd/system/tesla-linux-screen-guard.service \
+         usr/local/sbin/ta_screen_api.py etc/systemd/system/tesla-linux-screen-api.service; do
   [ -f "$MNT/$f" ] || die "missing on image: /$f"
 done
-for u in tesla-linux-alias.service tesla-linux-screen-guard.service; do
+grep -q 'location /api/screen' "$MNT/etc/nginx/tl-locations.conf" || die "nginx /api/screen missing"
+for u in tesla-linux-alias.service tesla-linux-screen-guard.service tesla-linux-screen-api.service; do
   [ -L "$MNT/etc/systemd/system/multi-user.target.wants/$u" ] || die "$u not enabled"
 done
 [ -L "$MNT/etc/systemd/system/timers.target.wants/tesla-linux-wlan-rejoin.timer" ] \
