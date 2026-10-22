@@ -1,0 +1,10 @@
+[Unit]
+Description=TeslaLinux Wi-Fi: re-align AP channel to station; solo AP rejoins saved Wi-Fi
+After=tesla-linux-wlan.service NetworkManager.service
+ConditionPathExists=/usr/local/sbin/tesla-linux-wlan
+
+[Service]
+Type=oneshot
+# hostapd/dnsmasq (re)started here must outlive this oneshot: never kill the cgroup leftovers.
+KillMode=process
+ExecStart=/usr/local/sbin/tesla-linux-wlan rejoin-probe

@@ -1,0 +1,10 @@
+[Unit]
+Description=TeslaLinux Wi-Fi rejoin / AP channel probe (every 30s; scans only when solo, every REJOIN_SCAN_SEC)
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=30
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target
