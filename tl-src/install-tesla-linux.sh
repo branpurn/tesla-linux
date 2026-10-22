@@ -889,7 +889,7 @@ verify_autologin_hdmi() {
 }
 
 # Host-side plantable WAN rebroadcast skeleton (like --verify-kbm).
-# Fail-hard: factory AP addr missing, nginx listen 0.0.0.0, NAT helper missing
+# Fail-hard: factory AP addr missing, nginx IP-specific listen / sshd ListenAddress, NAT helper missing
 # when WAN_REBROADCAST is selected. Optional prefix ($1) is an image / plant root.
 verify_wan_rebroadcast() {
     local r="${1:-}"
@@ -963,8 +963,9 @@ verify_wan_rebroadcast() {
         || { echo "ERROR: cmd_eth_up missing never-default yes lock" >&2; exit 1; }
     grep -q 'ignore_broadcast_ssid=0' "$wlan_bin" \
         || { echo "ERROR: TeslaLinux SSID would be hidden" >&2; exit 1; }
-    if awk '/^write_nginx_servers\(\)/,/^}/' "$wlan_bin" | grep -Eq 'listen 0\.0\.0\.0|listen 80;|listen \[::\]'; then
-        echo "ERROR: tesla-linux-wlan write_nginx_servers would bind nginx to 0.0.0.0" >&2
+    if ! awk '/^write_nginx_servers\(\)/,/^}/' "$wlan_bin" | grep -q 'listen \[::\]:80;' \
+       || awk '/^write_nginx_servers\(\)/,/^}/' "$wlan_bin" | grep -q 'listen \${ip}'; then
+        echo "ERROR: tesla-linux-wlan write_nginx_servers must emit wildcard listens only (no per-IP)" >&2
         exit 1
     fi
     grep -q '^wait_ap_ipv4()' "$wlan_bin" \
@@ -983,15 +984,23 @@ verify_wan_rebroadcast() {
             || { echo "ERROR: WAN mode selected but NAT/masquerade helper missing" >&2; exit 1; }
     fi
 
-    if [ -f "$nginx_http" ] && grep -Eq '0\.0\.0\.0|listen[[:space:]]+80;|listen[[:space:]]+\[::\]' "$nginx_http"; then
-        echo "ERROR: nginx listen includes 0.0.0.0 / world bind ($nginx_http)" >&2
-        exit 1
-    fi
-    if [ -f "$nginx_https" ] && grep -Eq '0\.0\.0\.0|listen[[:space:]]+443' "$nginx_https"; then
-        if grep -Eq '0\.0\.0\.0|listen[[:space:]]+443;|listen[[:space:]]+\[::\]' "$nginx_https"; then
-            echo "ERROR: nginx TLS listen includes 0.0.0.0 / world bind ($nginx_https)" >&2
+    # Wildcard only: GUI must answer on ANY interface/network at the Pi's IP.
+    for f in "$nginx_http" "$nginx_https"; do
+        if [ -f "$f" ] && grep -Eq 'listen[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:' "$f"; then
+            echo "ERROR: nginx listen is IP-specific; must be wildcard (listen 80 / [::]:80 / 443 ssl) ($f)" >&2
             exit 1
         fi
+    done
+    # sshd must stay wildcard (no ListenAddress) and unfiltered by source.
+    for f in "${r}/etc/ssh/sshd_config" "${r}"/etc/ssh/sshd_config.d/*.conf; do
+        if [ -f "$f" ] && grep -Eiq '^[[:space:]]*ListenAddress' "$f"; then
+            echo "ERROR: sshd ListenAddress set in $f (SSH must listen on all interfaces)" >&2
+            exit 1
+        fi
+    done
+    if [ -f "${r}/etc/hosts.deny" ] && grep -Eiq '^[[:space:]]*(sshd|ALL)[[:space:]]*:' "${r}/etc/hosts.deny"; then
+        echo "ERROR: /etc/hosts.deny restricts sshd by source" >&2
+        exit 1
     fi
 
     if [ -f "$wlan_svc" ]; then
@@ -1377,7 +1386,7 @@ install -m644 "$HERE/tesla-linux-screen-guard.service" /etc/systemd/system/tesla
 install -d /etc/NetworkManager/dispatcher.d
 cat > /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan <<'EOF'
 #!/bin/sh
-# WAVE 1 — wifi: maybe-ap. ethernet/VM tap: nginx-bind only (not 0.0.0.0).
+# WAVE 1 — wifi: maybe-ap. ethernet/VM tap: nginx-bind (wildcard listens).
 # WAN mode: maybe-ap → wan-up; ethernet/USB LTE (enx*/cdc_ether) up refreshes NAT.
 IFACE="$1"
 ACTION="$2"
@@ -1389,7 +1398,7 @@ if [ -e "/sys/class/net/$IFACE/wireless" ]; then
     esac
     exit 0
 fi
-# Wired eth0/end0/en* (or VM tap/bridge). Not lo/docker. Bind picker on that IPv4.
+# Wired eth0/end0/en* (or VM tap/bridge). Not lo/docker. Refresh wildcard nginx.
 case "$IFACE" in
     lo|docker*|veth*|br-*|virbr*) exit 0 ;;
 esac
@@ -1443,7 +1452,7 @@ chmod 600 /etc/NetworkManager/system-connections/${ETH_CONN}.nmconnection
 # stock hostapd/dnsmasq units stay off — tesla-linux-wlan starts them on demand
 systemctl disable hostapd dnsmasq >/dev/null 2>&1 || true
 
-# nginx: index.html (pick/save WLAN) + desktop.html / probe.html on AP/station/ethernet IPv4s only (never 0.0.0.0)
+# nginx: index.html (pick/save WLAN) + desktop.html / probe.html on ALL interfaces (wildcard listen, any network)
 install -d /etc/nginx /etc/nginx/certs /etc/nginx/sites-available /etc/nginx/sites-enabled \
            /etc/systemd/system/nginx.service.d
 rm -f /etc/nginx/sites-enabled/default
@@ -1491,12 +1500,18 @@ location /api/lte {
     client_max_body_size 1k;
 }
 EOF
-# Placeholder until tesla-linux-wlan nginx-bind sees an AP/station/ethernet IPv4.
-# No listen 80 / listen 0.0.0.0 — nginx stays down-bind until a WLAN/ethernet address exists.
-echo "# no AP/station IPv4 yet; tesla-linux-wlan nginx-bind will rewrite" > /etc/nginx/tl-http-server.conf
+# Wildcard listen on every interface/network (AP, eth, any station DHCP, IPv6).
+cat > /etc/nginx/tl-http-server.conf <<'EOF'
+server {
+    listen 80;
+    listen [::]:80;
+    server_name _;
+    include /etc/nginx/tl-locations.conf;
+}
+EOF
 echo "# no TLS binds yet" > /etc/nginx/tl-https-server.conf
 cat > /etc/nginx/sites-available/tl <<'EOF'
-# WAVE 1 binds: generated listen IPs in tl-http-server.conf / tl-https-server.conf.
+# WAVE 1: wildcard listens (any interface/network) in tl-http-server.conf / tl-https-server.conf.
 # FLAG-TLS: HTTP on AP/station LAN is acceptable; do not invent a new TLS policy.
 include /etc/nginx/tl-http-server.conf;
 include /etc/nginx/tl-https-server.conf;

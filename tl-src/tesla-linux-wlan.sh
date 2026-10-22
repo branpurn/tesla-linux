@@ -6,10 +6,10 @@
 #
 # NetworkManager owns infrastructure (station) autoconnect.
 # Fallback AP is hostapd + dnsmasq (not nmcli hotspot), SSID TeslaLinux.
-# nginx listen is rewritten to the current AP / station / ethernet IPv4s only
-# (never 0.0.0.0, never loopback-only). teslalinux.local is existing avahi.
-# WAN mode never binds nginx to a DHCP WAN address — operators use 10.42.0.1
-# (AP) and 10.42.1.1 (factory ethernet). Do not guess a station DHCP IP.
+# nginx listens WILDCARD (listen 80; listen [::]:80; 443 ssl likewise) so the
+# GUI answers on ANY interface / network at the Pi's IP (AP 10.42.0.1, eth
+# 10.42.1.1, any station DHCP e.g. Starlink, IPv6). Never per-IP, never
+# source-filtered. wan-verify FAILS on an IP-specific listen.
 #
 # FRONTEND-HOLE (this SHA): pick/save WLAN UI — do not invent a settings maze.
 # HDMI and web capture share XFCE on Xorg :0. AP must not wait on X.
@@ -1009,45 +1009,22 @@ EOF
 }
 
 write_nginx_servers() {
-    local ips="$1" ip tmp
+    # Wildcard listens ONLY: the web GUI must answer on ANY interface / ANY
+    # network at whatever IP the Pi holds (AP 10.42.0.1, factory eth 10.42.1.1,
+    # Starlink/any station DHCP, IPv6). Never bind per-IP; never filter source.
+    # $1 (live IPv4 list) is accepted for compatibility and ignored.
+    local tmp
     mkdir -p "$(dirname "$NGINX_HTTP")"
-    # Neutralize TLS first. A crash while rewriting HTTPS used to truncate
-    # tl-https-server.conf in place; nginx -t then failed and reload aborted,
-    # leaving HTTP dead after a station IP change.
     neutralize_nginx_https
-    if [ -z "$ips" ]; then
-        # No address yet — do not emit a listen (avoids 0.0.0.0 and a dead bind).
-        write_nginx_file "$NGINX_HTTP" <<'EOF'
-# no AP/station IPv4 yet; tesla-linux-wlan nginx-bind will rewrite
-EOF
-        return 0
-    fi
-    tmp="$(mktemp "${NGINX_HTTP}.XXXXXX")"
-    {
-        echo "server {"
-        while IFS= read -r ip; do
-            [ -n "$ip" ] || continue
-            echo "    listen ${ip}:80;"
-        done <<< "$ips"
-        echo "    server_name _;"
-        echo "    include $NGINX_LOCS;"
-        echo "}"
-    } > "$tmp"
-    mv -f "$tmp" "$NGINX_HTTP"
+    printf '%s\n' 'server {' '    listen 80;' '    listen [::]:80;' \
+        '    server_name _;' "    include $NGINX_LOCS;" '}' | write_nginx_file "$NGINX_HTTP"
     if [ -f /etc/nginx/certs/tl.crt ] && [ -f /etc/nginx/certs/tl.key ]; then
         tmp="$(mktemp "${NGINX_HTTPS}.XXXXXX")"
-        {
-            echo "server {"
-            while IFS= read -r ip; do
-                [ -n "$ip" ] || continue
-                echo "    listen ${ip}:443 ssl;"
-            done <<< "$ips"
-            echo "    server_name _;"
-            echo "    ssl_certificate     /etc/nginx/certs/tl.crt;"
-            echo "    ssl_certificate_key /etc/nginx/certs/tl.key;"
-            echo "    include $NGINX_LOCS;"
-            echo "}"
-        } > "$tmp"
+        printf '%s\n' 'server {' '    listen 443 ssl;' '    listen [::]:443 ssl;' \
+            '    server_name _;' \
+            '    ssl_certificate     /etc/nginx/certs/tl.crt;' \
+            '    ssl_certificate_key /etc/nginx/certs/tl.key;' \
+            "    include $NGINX_LOCS;" '}' > "$tmp"
         if nginx_https_include_ok "$tmp"; then
             mv -f "$tmp" "$NGINX_HTTPS"
         else
@@ -1107,7 +1084,7 @@ cmd_nginx_bind() {
     local iface ips
     iface="$(wifi_iface 2>/dev/null || true)"
     # Station/Join: wait for DHCP before collecting binds (fixes http://<dhcp-ip>/ refused).
-    # Never listen 0.0.0.0 — wan-verify fails that; bind the concrete station IPv4 instead.
+    # nginx listens wildcard; waiting only makes the log show the station IPv4.
     if [ -n "$iface" ] && ! wan_mode_on && station_associated "$iface" 2>/dev/null; then
         wait_station_ipv4 "$iface" >/dev/null || true
     fi
@@ -1120,12 +1097,8 @@ cmd_nginx_bind() {
     fi
     ips="$(collect_bind_ips "$iface" || true)"
     write_nginx_servers "$ips"
-    if [ -n "$ips" ]; then
-        log "nginx bind HTTP on: $(echo "$ips" | tr '\n' ' ')"
-        reload_nginx
-    else
-        log "no AP/station/ethernet IPv4 yet; nginx not listening world"
-    fi
+    log "nginx wildcard listen 80/[::]:80 (443 if cert); live IPv4s: $(echo "$ips" | tr '\n' ' ')"
+    reload_nginx
 }
 
 # Fully release wifi from NM/wpa_supplicant so hostapd nl80211 can bind.
@@ -1384,8 +1357,8 @@ cmd_wan_verify() {
         echo "FAIL: AP factory addr is '${AP_ADDR:-unset}', expected 10.42.0.1" >&2
         fail=1
     }
-    if [ -f "$nginx_http" ] && grep -Eq '0\.0\.0\.0|listen[[:space:]]+80;|listen[[:space:]]+\[::\]' "$nginx_http"; then
-        echo "FAIL: nginx listen includes 0.0.0.0 / world bind ($nginx_http)" >&2
+    if [ -f "$nginx_http" ] && grep -Eq 'listen[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:' "$nginx_http"; then
+        echo "FAIL: nginx listen is IP-specific; must be wildcard listen 80 / [::]:80 ($nginx_http)" >&2
         fail=1
     fi
     if [ -f "$helper" ]; then
@@ -1411,8 +1384,9 @@ cmd_wan_verify() {
             || { echo "FAIL: cmd_eth_up missing ipv4.method manual lock" >&2; fail=1; }
         awk '/^cmd_eth_up\(\)/,/^}/' "$helper" | grep -q 'ipv4.never-default yes' \
             || { echo "FAIL: cmd_eth_up missing never-default yes lock" >&2; fail=1; }
-        if awk '/^write_nginx_servers\(\)/,/^}/' "$helper" | grep -Eq 'listen 0\.0\.0\.0|listen 80;|listen \[::\]'; then
-            echo "FAIL: write_nginx_servers would bind nginx to 0.0.0.0" >&2
+        if ! awk '/^write_nginx_servers\(\)/,/^}/' "$helper" | grep -q 'listen \[::\]:80;' \
+           || awk '/^write_nginx_servers\(\)/,/^}/' "$helper" | grep -q 'listen \${ip}'; then
+            echo "FAIL: write_nginx_servers must emit wildcard listens only (no per-IP)" >&2
             fail=1
         fi
     else
@@ -1533,13 +1507,13 @@ cmd_selftest() {
     NGINX_HTTPS="$dir/https.conf"
     NGINX_LOCS="$dir/locs.conf"
     write_nginx_servers $'10.42.0.1\n192.0.2.4'
-    grep -q 'listen 10.42.0.1:80;' "$dir/http.conf" || { echo "FAIL: AP listen"; fail=1; }
-    grep -q 'listen 192.0.2.4:80;' "$dir/http.conf" || { echo "FAIL: station listen"; fail=1; }
-    grep -Eq '0\.0\.0\.0|listen 80;|listen \[::\]' "$dir/http.conf" && { echo "FAIL: world listen"; fail=1; }
+    grep -q 'listen 80;' "$dir/http.conf" || { echo "FAIL: AP listen"; fail=1; }
+    grep -q 'listen 80;' "$dir/http.conf" || { echo "FAIL: station listen"; fail=1; }
+    grep -Eq 'listen[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:' "$dir/http.conf" && { echo "FAIL: world listen"; fail=1; }
     NGINX_HTTP="$dir/http2.conf"
     NGINX_HTTPS="$dir/https2.conf"
     write_nginx_servers ""
-    grep -Eq 'listen ' "$dir/http2.conf" && { echo "FAIL: empty bind still listens"; fail=1; }
+    grep -q 'listen 80;' "$dir/http2.conf" || { echo "FAIL: empty bind must still wildcard-listen"; fail=1; }
 
     HOSTAPD_CONF="$dir/hostapd.conf"
     write_hostapd_conf wlan0
@@ -1625,8 +1599,8 @@ cmd_selftest() {
     NGINX_LOCS="$dir/locs.conf"
     : > "$NGINX_LOCS"
     write_nginx_servers $'10.42.1.1\n192.0.2.59'
-    grep -q 'listen 10.42.1.1:80;' "$NGINX_HTTP" || { echo "FAIL: failsoft write missing eth HTTP"; fail=1; }
-    grep -q 'listen 192.0.2.59:80;' "$NGINX_HTTP" || { echo "FAIL: failsoft write missing station HTTP"; fail=1; }
+    grep -q 'listen 80;' "$NGINX_HTTP" || { echo "FAIL: failsoft write missing eth HTTP"; fail=1; }
+    grep -q 'listen 80;' "$NGINX_HTTP" || { echo "FAIL: failsoft write missing station HTTP"; fail=1; }
     printf '%s\n' 'server {' '    listen 10.42.1.1:443 ssl;' > "$NGINX_HTTPS"
     ng_log="$dir/nginx-failsoft"
     : > "$ng_log"
@@ -1667,8 +1641,8 @@ cmd_selftest() {
         awk 'BEGIN{d=0} {s=$0; sub(/#.*/,"",s); d+=gsub(/{/, "{", s); d-=gsub(/}/, "}", s)} END{exit d!=0}' "$NGINX_HTTPS" \
             || { echo "FAIL: HTTPS still unbalanced after fail-soft"; fail=1; }
     fi
-    grep -q 'listen 10.42.1.1:80;' "$NGINX_HTTP" || { echo "FAIL: HTTP eth bind lost after fail-soft"; fail=1; }
-    grep -q 'listen 192.0.2.59:80;' "$NGINX_HTTP" || { echo "FAIL: HTTP station bind lost after fail-soft"; fail=1; }
+    grep -q 'listen 80;' "$NGINX_HTTP" || { echo "FAIL: HTTP eth bind lost after fail-soft"; fail=1; }
+    grep -q 'listen 80;' "$NGINX_HTTP" || { echo "FAIL: HTTP station bind lost after fail-soft"; fail=1; }
     : > "$NGINX_HTTPS"
     : > "$ng_log"
     reload_nginx || { echo "FAIL: reload_nginx empty HTTPS returned non-zero"; fail=1; }
@@ -1695,8 +1669,8 @@ cmd_selftest() {
     if ! cmd_nginx_bind; then
         echo "FAIL: nginx-bind station-join returned non-zero"; fail=1
     fi
-    grep -q 'listen 10.42.1.1:80;' "$NGINX_HTTP" || { echo "FAIL: nginx-bind missing eth HTTP after station"; fail=1; }
-    grep -q 'listen 192.0.2.59:80;' "$NGINX_HTTP" || { echo "FAIL: nginx-bind missing station HTTP"; fail=1; }
+    grep -q 'listen 80;' "$NGINX_HTTP" || { echo "FAIL: nginx-bind missing eth HTTP after station"; fail=1; }
+    grep -q 'listen 80;' "$NGINX_HTTP" || { echo "FAIL: nginx-bind missing station HTTP"; fail=1; }
     grep -q '10.42.0.1' "$NGINX_HTTP" && { echo "FAIL: nginx-bind kept AP listen in station mode"; fail=1; }
     grep -q -- '-s reload' "$ng_log" || { echo "FAIL: nginx-bind did not reload HTTP after station join"; fail=1; }
     if grep -q 'server {' "$NGINX_HTTPS"; then
@@ -1712,8 +1686,8 @@ cmd_selftest() {
     if ! cmd_maybe_ap; then
         echo "FAIL: maybe-ap station-join returned non-zero"; fail=1
     fi
-    grep -q 'listen 10.42.1.1:80;' "$NGINX_HTTP" || { echo "FAIL: maybe-ap missing eth HTTP"; fail=1; }
-    grep -q 'listen 192.0.2.59:80;' "$NGINX_HTTP" || { echo "FAIL: maybe-ap missing station HTTP"; fail=1; }
+    grep -q 'listen 80;' "$NGINX_HTTP" || { echo "FAIL: maybe-ap missing eth HTTP"; fail=1; }
+    grep -q 'listen 80;' "$NGINX_HTTP" || { echo "FAIL: maybe-ap missing station HTTP"; fail=1; }
     grep -q -- '-s reload' "$ng_log" || { echo "FAIL: maybe-ap did not reload HTTP"; fail=1; }
 
     unset -f systemctl nginx
@@ -1767,8 +1741,8 @@ cmd_selftest() {
     if ! cmd_boot; then
         echo "FAIL: boot with 10.42.1.1 and no wifi must return 0"; fail=1
     fi
-    grep -q 'listen 10.42.1.1:80;' "$dir/boot-eth-http.conf" || { echo "FAIL: nginx-bind missing 10.42.1.1 without AP"; fail=1; }
-    grep -Eq '0\.0\.0\.0|listen 80;|listen \[::\]' "$dir/boot-eth-http.conf" && { echo "FAIL: world listen after eth-only boot"; fail=1; }
+    grep -q 'listen 80;' "$dir/boot-eth-http.conf" || { echo "FAIL: nginx-bind missing 10.42.1.1 without AP"; fail=1; }
+    grep -Eq 'listen[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:' "$dir/boot-eth-http.conf" && { echo "FAIL: world listen after eth-only boot"; fail=1; }
     out="$(collect_bind_ips "")"
     echo "$out" | grep -qx '10.42.1.1' || { echo "FAIL: eth static in collect without AP"; fail=1; }
     echo "$out" | grep -qx '10.42.0.1' && { echo "FAIL: AP ip without hostapd"; fail=1; }
@@ -1782,8 +1756,8 @@ cmd_selftest() {
     NGINX_HTTP="$dir/http.conf"
     NGINX_HTTPS="$dir/https.conf"
     write_nginx_servers "$(printf '%s\n' 10.42.0.1 10.42.1.1)"
-    grep -q 'listen 10.42.1.1:80;' "$dir/http.conf" || { echo "FAIL: eth listen"; fail=1; }
-    grep -Eq '0\.0\.0\.0|listen 80;|listen \[::\]' "$dir/http.conf" && { echo "FAIL: world listen after eth"; fail=1; }
+    grep -q 'listen 80;' "$dir/http.conf" || { echo "FAIL: eth listen"; fail=1; }
+    grep -Eq 'listen[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:' "$dir/http.conf" && { echo "FAIL: world listen after eth"; fail=1; }
 
     # WAN rebroadcast skeleton: factory net, nginx not world, NAT helper, skip station.
     [ "$(ap_client_net)" = "10.42.0.0/24" ] || { echo "FAIL: ap_client_net"; fail=1; }
@@ -1889,8 +1863,8 @@ cmd_selftest() {
     NGINX_HTTP="$dir/wan-http.conf"
     NGINX_HTTPS="$dir/wan-https.conf"
     write_nginx_servers "$(collect_bind_ips wlan0)"
-    grep -q 'listen 10.42.0.1:80;' "$dir/wan-http.conf" || { echo "FAIL: WAN nginx AP listen"; fail=1; }
-    grep -q 'listen 10.42.1.1:80;' "$dir/wan-http.conf" || { echo "FAIL: WAN nginx factory eth listen"; fail=1; }
+    grep -q 'listen 80;' "$dir/wan-http.conf" || { echo "FAIL: WAN nginx AP listen"; fail=1; }
+    grep -q 'listen 80;' "$dir/wan-http.conf" || { echo "FAIL: WAN nginx factory eth listen"; fail=1; }
     # Durable AP product path: after wan-up nginx-bind, conf must listen on factory AP.
     NGINX_HTTP="$dir/wan-up-http.conf"
     NGINX_HTTPS="$dir/wan-up-https.conf"
@@ -1911,16 +1885,16 @@ cmd_selftest() {
     WAN_RUNTIME="$dir/wan-up-runtime"
     : > "$WAN_RUNTIME"
     cmd_nginx_bind || { echo "FAIL: nginx-bind after wan-up returned non-zero"; fail=1; }
-    grep -q 'listen 10.42.0.1:80;' "$NGINX_HTTP" \
+    grep -q 'listen 80;' "$NGINX_HTTP" \
         || { echo "FAIL: after wan-up nginx-bind missing listen 10.42.0.1:80"; fail=1; }
-    grep -q 'listen 10.42.1.1:80;' "$NGINX_HTTP" \
+    grep -q 'listen 80;' "$NGINX_HTTP" \
         || { echo "FAIL: after wan-up nginx-bind missing listen 10.42.1.1:80"; fail=1; }
-    grep -Eq '0\.0\.0\.0|listen 80;|listen \[::\]' "$NGINX_HTTP" \
+    grep -Eq 'listen[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:' "$NGINX_HTTP" \
         && { echo "FAIL: after wan-up world listen"; fail=1; }
     grep -q '^wait_ap_ipv4()' "$0" || { echo "FAIL: wait_ap_ipv4 missing in helper"; fail=1; }
 
     grep -q '203.0.113.8' "$dir/wan-http.conf" && { echo "FAIL: WAN nginx WAN DHCP listen"; fail=1; }
-    grep -Eq '0\.0\.0\.0|listen 80;|listen \[::\]' "$dir/wan-http.conf" && { echo "FAIL: WAN world listen"; fail=1; }
+    grep -Eq 'listen[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:' "$dir/wan-http.conf" && { echo "FAIL: WAN world listen"; fail=1; }
 
     DNSMASQ_CONF="$dir/dnsmasq-wan.conf"
     write_dnsmasq_conf wlan0
@@ -2285,6 +2259,10 @@ EOF
         echo "FAIL: wan-verify accepted 0.0.0.0 listen"; fail=1
     fi
     echo '    listen 10.42.0.1:80;' > "$dir/wan-http.conf"
+    if cmd_wan_verify "$dir/ap.env"; then
+        echo "FAIL: wan-verify accepted IP-specific listen 10.42.0.1:80"; fail=1
+    fi
+    printf '%s\n' '    listen 80;' '    listen [::]:80;' > "$dir/wan-http.conf"
     cat > "$dir/ap.env" <<'EOF'
 AP_SSID=TeslaLinux
 AP_PSK=teslalinux
@@ -2316,7 +2294,7 @@ usage: tesla-linux-wlan <boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan
                     always manual + never-default (wan-ap concurrent with Pop SSH on ${ETH_ADDR})
   ap-up             TeslaLinux hostapd AP + dnsmasq DHCP (never if station is up, unless WAN mode)
   ap-down           stop AP; return iface to NetworkManager
-  nginx-bind        listen on current AP/station/ethernet IPv4s only (WAN: ${AP_ADDR} + ${ETH_ADDR} only)
+  nginx-bind        write wildcard nginx listens (80/[::]:80, 443 ssl) and reload
   maybe-ap          dispatcher: station if possible, else AP (WAN mode: wan-ap, never re-join station)
   save-wlan         BACKEND bounce: save infra SSID/PSK, AP down, NM up (refused while WAN on)
   wan-ap            leave station, keep AP+DHCP, NAT eth or LTE (Backend kick for wan_rebroadcast)
@@ -2324,7 +2302,7 @@ usage: tesla-linux-wlan <boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan
   wan-off           leave WAN mode; back to maybe-ap / station (Backend kick for /api/mode station)
   wan-up            alias of wan-ap
   wan-down          alias of wan-off
-  wan-verify        fail-hard: factory AP addr, no nginx 0.0.0.0, NAT helper when mode selected
+  wan-verify        fail-hard: factory AP addr, nginx wildcard (no IP-specific listen), NAT helper when mode selected
   selftest          address-filter + WAN skeleton checks (no hardware)
 EOF
 }

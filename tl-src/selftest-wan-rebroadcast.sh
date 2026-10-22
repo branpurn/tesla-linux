@@ -72,11 +72,19 @@ awk '/^cmd_eth_up\(\)/,/^}/' "$HELPER" | grep -q 'ipv4.method manual' \
     && awk '/^cmd_eth_up\(\)/,/^}/' "$HELPER" | grep -q 'ipv4.never-default yes' \
     && pass "cmd_eth_up locks factory eth manual + never-default yes" \
     || bad "cmd_eth_up missing manual / never-default yes lock"
-if awk '/^write_nginx_servers\(\)/,/^}/' "$HELPER" | grep -Eq 'listen 0\.0\.0\.0|listen 80;|listen \[::\]'; then
-    bad "write_nginx_servers would bind nginx to 0.0.0.0"
+if awk '/^write_nginx_servers\(\)/,/^}/' "$HELPER" | grep -q 'listen \[::\]:80;' \
+   && awk '/^write_nginx_servers\(\)/,/^}/' "$HELPER" | grep -q 'listen 443 ssl;' \
+   && ! awk '/^write_nginx_servers\(\)/,/^}/' "$HELPER" | grep -q 'listen \${ip}'; then
+    pass "write_nginx_servers emits wildcard listens only"
 else
-    pass "write_nginx_servers never listen 0.0.0.0"
+    bad "write_nginx_servers not wildcard / still per-IP"
 fi
+grep -Eq '^[[:space:]]*listen[[:space:]]+[0-9]+\.' "$INSTALL" \
+    && bad "installer seeds an IP-specific nginx listen" \
+    || pass "installer seeds no IP-specific nginx listen"
+grep -Eiq '^[[:space:]]*ListenAddress' "$INSTALL" \
+    && bad "installer sets sshd ListenAddress" \
+    || pass "installer never sets sshd ListenAddress"
 
 grep -q '^wait_ap_ipv4()' "$HELPER" && pass "helper wait_ap_ipv4 (AP listen race)" \
     || bad "helper missing wait_ap_ipv4"
@@ -119,7 +127,7 @@ AP_ADDR=10.42.0.1
 ETH_ADDR=10.42.1.1
 WAN_REBROADCAST=0
 EOF
-    echo "# no AP/station IPv4 yet; tesla-linux-wlan nginx-bind will rewrite" \
+    printf '%s\n' 'server {' '    listen 80;' '    listen [::]:80;' '}' \
         > "$t/etc/nginx/tl-http-server.conf"
     echo "# no TLS binds yet" > "$t/etc/nginx/tl-https-server.conf"
     cat > "$t/etc/systemd/system/tesla-linux-wlan.service" <<'EOF'
@@ -158,8 +166,25 @@ expect_fail "missing AP factory addr fails gate" "AP factory addr" \
 plant "$TREE"
 
 echo '    listen 0.0.0.0:80;' > "$TREE/etc/nginx/tl-http-server.conf"
-expect_fail "nginx 0.0.0.0 listen fails gate" "0.0.0.0" \
+expect_fail "nginx 0.0.0.0 listen fails gate" "IP-specific" \
     "$INSTALL" --verify-wan "$TREE"
+plant "$TREE"
+
+echo '    listen 192.168.1.100:80;' > "$TREE/etc/nginx/tl-http-server.conf"
+expect_fail "nginx per-IP listen fails gate" "IP-specific" \
+    "$INSTALL" --verify-wan "$TREE"
+plant "$TREE"
+
+echo '    listen 10.42.0.1:443 ssl;' > "$TREE/etc/nginx/tl-https-server.conf"
+expect_fail "nginx per-IP TLS listen fails gate" "IP-specific" \
+    "$INSTALL" --verify-wan "$TREE"
+plant "$TREE"
+
+mkdir -p "$TREE/etc/ssh/sshd_config.d"
+echo 'ListenAddress 10.42.0.1' > "$TREE/etc/ssh/sshd_config.d/10-bad.conf"
+expect_fail "sshd ListenAddress fails gate" "ListenAddress" \
+    "$INSTALL" --verify-wan "$TREE"
+rm -f "$TREE/etc/ssh/sshd_config.d/10-bad.conf"
 plant "$TREE"
 
 echo '{"mode":"wan_rebroadcast"}' > "$TREE/etc/tesla-linux/mode.json"

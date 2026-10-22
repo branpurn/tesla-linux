@@ -4,7 +4,7 @@ Operator-facing primary in-car path is this mode (LTE WAN + TeslaLinux AP at **1
 
 Alternate networking mode vs station-on-same-WLAN. Helper / install / systemd. Backend owns `/api/mode` (`ta_wlan_api.py`) and uplink.kind — this SHA does not edit Backend or `desktop.html`.
 
-SSID **TeslaLinux** stays visible. Operators use documented **10.42.0.1** (AP) and **10.42.1.1** (factory ethernet). Factory **10.42.1.1** stays up during `wan-ap` so Pop SSH and TeslaLinux AP run concurrently — WAN DHCP/default-route is LTE (`enx…` / `cdc_ether` / `wwan*`) or a separate uplink, never by converting `tesla-linux-eth` to `ipv4.method=auto`. Do not guess a DHCP station IP. nginx never listens on `0.0.0.0` or the WAN DHCP address. AP DHCP is dnsmasq (authoritative, option 3+6, range `10.42.0.10`–`10.42.0.200`); `wan-ap` fails if hostapd is up without that lease server.
+SSID **TeslaLinux** stays visible. Operators use documented **10.42.0.1** (AP) and **10.42.1.1** (factory ethernet). Factory **10.42.1.1** stays up during `wan-ap` so Pop SSH and TeslaLinux AP run concurrently — WAN DHCP/default-route is LTE (`enx…` / `cdc_ether` / `wwan*`) or a separate uplink, never by converting `tesla-linux-eth` to `ipv4.method=auto`. Do not guess a DHCP station IP. nginx listens wildcard on all interfaces (see NGINX-WILDCARD-LISTEN.md). AP DHCP is dnsmasq (authoritative, option 3+6, range `10.42.0.10`–`10.42.0.200`); `wan-ap` fails if hostapd is up without that lease server.
 
 **No station+AP dual.** While `wan_rebroadcast` is on, `boot` / `maybe-ap` / `wan-ap` call `leave_station`: disconnect every infra association, disable saved-WLAN autoconnect, and refuse `kick_nm_station` / `wait_station` / `save-wlan` join. Tesla and other **AP clients** stay on TeslaLinux.
 
@@ -147,7 +147,7 @@ nft list table ip tesla-linux-wan
 # or: iptables -t nat -S POSTROUTING | grep tesla-linux-wan
 ```
 
-`wan-verify` / `--verify-wan` fail-hard if the factory AP addr is missing, nginx listen includes `0.0.0.0`, the NAT/masquerade helper is missing when the mode is selected, or LTE (`1286:4e3c` / `LTE_USB_IDS` / `WAN_IFACE` / `cdc_ether` / `leave_station`) helpers are missing.
+`wan-verify` / `--verify-wan` fail-hard if the factory AP addr is missing, nginx listen is IP-specific (non-wildcard), the NAT/masquerade helper is missing when the mode is selected, or LTE (`1286:4e3c` / `LTE_USB_IDS` / `WAN_IFACE` / `cdc_ether` / `leave_station`) helpers are missing.
 
 ## Station mode still works
 
@@ -156,7 +156,7 @@ Default remains station. With `mode.json` absent or `station`, `boot` / `maybe-a
 ## nginx binds
 
 - WAN mode: **10.42.0.1** and factory **10.42.1.1** only (not the WAN DHCP IPv4 on eth or LTE).
-- Station mode: existing AP / station / ethernet bind behavior (never `0.0.0.0`).
+- Station mode: nginx wildcard listen on all interfaces.
 
 ## Health=no_ip after tip image (ensure_lte_dhcp present)
 

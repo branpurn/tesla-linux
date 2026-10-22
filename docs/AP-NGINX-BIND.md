@@ -1,5 +1,8 @@
 # Factory AP: http://10.42.0.1/desktop.html connection refused
 
+> **SUPERSEDED:** nginx now listens wildcard on all interfaces — see [NGINX-WILDCARD-LISTEN.md](NGINX-WILDCARD-LISTEN.md). Per-IP / "never 0.0.0.0" guidance below is historical.
+
+
 ## Symptom (live 2026-09-28)
 
 Tesla on SSID **TeslaLinux** has uplink (DHCP + NAT OK) but
