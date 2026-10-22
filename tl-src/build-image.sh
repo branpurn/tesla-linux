@@ -128,6 +128,7 @@ cp "$SRC"/install-tesla-linux.sh "$SRC"/install-chromium-hwdec.sh "$SRC"/install
    "$SRC"/tesla-linux-wlan-api.service "$SRC"/tesla-linux-pin-api.service "$SRC"/ap.env \
    "$SRC"/49-tesla-linux-networkmanager.rules \
    "$SRC"/99-tesla-linux-lte.rules \
+   "$SRC"/tesla-linux-srcroute.sh "$SRC"/99-tesla-linux-srcroute.conf \
    "$SRC"/tesla-linux-lte-dhcp.service "$SRC"/tesla-linux-lte-dhcp.timer \
    "$SRC"/tesla-linux-alias.service "$SRC"/tesla-linux-alias.nft \
    "$SRC"/tl-screen-guard.sh "$SRC"/tesla-linux-screen-guard.service \
