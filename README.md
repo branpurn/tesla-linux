@@ -12,7 +12,7 @@ Product path is the Tesla-browser web console (`desktop.html`) at a stable known
 | `tl-src/install-chromium-widevine.sh` | Adds the Widevine (arm64 CDM) to every Chromium launch via `/etc/chromium.d/tesla-linux-widevine` (single "Chromium" launcher; `chromium-drm` is a compat shim) |
 | `tl-src/build-image.sh` | Bakes Ubuntu Server arm64 raspi into `tesla-linux-YYYYMMDD-pi.img.xz` |
 | `tl-src/install-tesla-linux.sh` | Installs the XFCE / Xorg / stream / WLAN stack inside the image chroot |
-| `tl-src/desktop.html` | Tesla-browser console (in-car product path) |
+| `tl-src/desktop.html` | Tesla-browser console (in-car product path). Panel has **Fit: Fixed/Stretch** (persisted in localStorage `tl.desktop.fit`; Stretch fills the viewport, e.g. fullscreen-in-park, without changing the 1088×832 X screen) and **Fullscreen** when the API exists |
 | `tl-src/index.html` | Wi-Fi picker: WAN rebroadcast, or join the same Wi-Fi network as the car |
 | `tl-src/probe.html` | Tesla-browser capability probe |
 | `tl-src/tesla-linux-wlan.sh` | LTE/ethernet WAN + TeslaLinux AP; station alternate; ethernet static |
