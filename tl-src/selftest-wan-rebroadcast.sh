@@ -60,8 +60,9 @@ grep -q 'start_hostapd_ap' "$HELPER" && pass "helper start_hostapd_ap (nl80211 s
     || bad "helper missing start_hostapd_ap"
 grep -q 'managed no' "$HELPER" && pass "helper NM managed no before hostapd" \
     || bad "helper missing managed no"
-awk '/^write_hostapd_conf\(\)/,/^}/' "$HELPER" | grep -q '^channel=6$' \
-    && pass "hostapd channel default unchanged (6)" \
+awk '/^write_hostapd_conf\(\)/,/^}/' "$HELPER" | grep -q '^channel=\$ch$' \
+    && grep -q 'AP_CHANNEL="${AP_CHANNEL:-6}"' "$HELPER" \
+    && pass "hostapd channel: station channel when concurrent, solo default unchanged (6)" \
     || bad "hostapd channel default invented/changed"
 if awk '/^cmd_eth_up\(\)/,/^}/' "$HELPER" | grep -Eq 'ipv4_method=auto|ipv4\.method auto|never_default=no'; then
     bad "cmd_eth_up converts factory eth to DHCP auto (wan-ap must keep 10.42.1.1)"

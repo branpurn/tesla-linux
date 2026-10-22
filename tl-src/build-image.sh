@@ -130,6 +130,8 @@ cp "$SRC"/install-tesla-linux.sh "$SRC"/install-chromium-hwdec.sh "$SRC"/install
    "$SRC"/99-tesla-linux-lte.rules \
    "$SRC"/tesla-linux-srcroute.sh "$SRC"/99-tesla-linux-srcroute.conf \
    "$SRC"/tesla-linux-lte-dhcp.service "$SRC"/tesla-linux-lte-dhcp.timer \
+   "$SRC"/tesla-linux-wlan-rejoin.service "$SRC"/tesla-linux-wlan-rejoin.timer \
+   "$SRC"/90-tesla-linux-uap0.conf \
    "$SRC"/tesla-linux-alias.service "$SRC"/tesla-linux-alias.nft \
    "$SRC"/tl-screen-guard.sh "$SRC"/tesla-linux-screen-guard.service \
    "$MNT/tmp/tl-src/" 2>/dev/null || true
@@ -441,12 +443,17 @@ fi
 
 # 198.18.0.1 alias + screen-size guard: files and enable symlinks must be on the image.
 for f in etc/tesla-linux-alias.nft etc/systemd/system/tesla-linux-alias.service \
+         etc/NetworkManager/conf.d/90-tesla-linux-uap0.conf \
+         etc/systemd/system/tesla-linux-wlan-rejoin.service etc/systemd/system/tesla-linux-wlan-rejoin.timer \
          usr/local/sbin/tl-screen-guard etc/systemd/system/tesla-linux-screen-guard.service; do
   [ -f "$MNT/$f" ] || die "missing on image: /$f"
 done
 for u in tesla-linux-alias.service tesla-linux-screen-guard.service; do
   [ -L "$MNT/etc/systemd/system/multi-user.target.wants/$u" ] || die "$u not enabled"
 done
+[ -L "$MNT/etc/systemd/system/timers.target.wants/tesla-linux-wlan-rejoin.timer" ] \
+  || die "tesla-linux-wlan-rejoin.timer not enabled"
+grep -q 'uap0' "$MNT/etc/tesla-linux-alias.nft" || die "198.18 DNAT not on uap0 AP vif"
 
 for stale in \
   "$MNT/usr/local/sbin/tesla-linux-hdmi-banner" \

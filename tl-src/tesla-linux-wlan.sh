@@ -11,6 +11,16 @@
 # 10.42.1.1, any station DHCP e.g. Starlink, IPv6). Never per-IP, never
 # source-filtered. wan-verify FAILS on an IP-specific listen.
 #
+# Concurrent station + AP (AP_CONCURRENT=1, default): the TeslaLinux AP runs on a
+# virtual __ap iface (AP_VIF, default uap0) on the same brcmfmac phy, so the Pi
+# can join a saved Wi-Fi as WAN on wlan0 (NM) while ALWAYS beaconing TeslaLinux.
+# brcmfmac combo is managed<=1, AP<=1, #channels<=1, so hostapd follows the
+# station channel (AP restart on a channel change). With no saved Wi-Fi in range
+# wlan0 is unmanaged + down ("solo": no station, no NM scanning) and the AP runs
+# alone; rejoin-probe (timer) scans every REJOIN_SCAN_SEC and rejoins. NAT
+# 10.42.0.0/24 masquerades out whichever uplink has the route (Wi-Fi WAN
+# preferred via WIFI_WAN_METRIC < LTE 101; LTE stays up as fallback).
+#
 # FRONTEND-HOLE (this SHA): pick/save WLAN UI — do not invent a settings maze.
 # HDMI and web capture share XFCE on Xorg :0. AP must not wait on X.
 set -euo pipefail
@@ -59,6 +69,20 @@ LTE_MODESWITCH="${LTE_MODESWITCH:-1}"
 NET_SYSFS="${NET_SYSFS:-/sys/class/net}"
 USB_SYSFS="${USB_SYSFS:-/sys/bus/usb/devices}"
 
+# Concurrent station + AP on a virtual iface (see header). 0 = legacy wlan0-only.
+AP_CONCURRENT="${AP_CONCURRENT:-1}"
+AP_VIF="${AP_VIF:-uap0}"
+# Solo AP channel when no station is (or was) associated this boot.
+AP_CHANNEL="${AP_CHANNEL:-6}"
+# Prefer station Wi-Fi WAN over LTE (LTE NM metric 101) while associated.
+WIFI_WAN_PREFER="${WIFI_WAN_PREFER:-1}"
+WIFI_WAN_METRIC="${WIFI_WAN_METRIC:-50}"
+# Solo: how often rejoin-probe scans for a saved SSID (timer fires every 30s).
+REJOIN_SCAN_SEC="${REJOIN_SCAN_SEC:-120}"
+STA_STATE="${STA_STATE:-/run/tesla-linux-sta}"
+HOSTAPD_CTRL="${HOSTAPD_CTRL:-/run/hostapd}"
+SRCROUTE_BIN="${SRCROUTE_BIN:-/usr/local/sbin/tesla-linux-srcroute}"
+
 HOSTAPD_CONF="${HOSTAPD_CONF:-/etc/tesla-linux/hostapd.conf}"
 DNSMASQ_CONF="${DNSMASQ_CONF:-/etc/tesla-linux/dnsmasq-ap.conf}"
 HOSTAPD_PID="${HOSTAPD_PID:-/run/tesla-linux-hostapd.pid}"
@@ -82,13 +106,15 @@ wifi_iface() {
         return 0
     fi
     local d n
-    d="$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2=="wifi"{print $1; exit}' || true)"
+    d="$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null \
+        | awk -F: -v v="${AP_VIF:-uap0}" '$2=="wifi" && $1!=v {print $1; exit}' || true)"
     if [ -n "$d" ]; then
         echo "$d"
         return 0
     fi
     for n in /sys/class/net/*/wireless; do
         [ -e "$n" ] || continue
+        [ "$(basename "$(dirname "$n")")" = "${AP_VIF:-uap0}" ] && continue
         basename "$(dirname "$n")"
         return 0
     done
@@ -496,7 +522,12 @@ cmd_lte_dhcp() {
     else
         log "WARN: lte-dhcp Health=no_ip on $n after ${LTE_DHCP_RETRIES:-3} tries — SIM/PIN/APN/carrier? dhclient -v $n; set LTE_APN= if mmcli sees a modem"
     fi
-    apply_wan_nat || true
+    if ! wan_mode_on && concurrent_on && [ "$(hostapd_conf_iface)" = "${AP_VIF:-uap0}" ]; then
+        # Concurrent station+AP: uplink-agnostic NAT (Wi-Fi WAN or LTE); never pin to LTE.
+        apply_ap_nat "${AP_VIF:-uap0}" || true
+    else
+        apply_wan_nat || true
+    fi
     cmd_nginx_bind || true
     [ "$ok" -eq 1 ]
 }
@@ -643,7 +674,8 @@ has_saved_infra() {
 station_associated() {
     local iface="${1:-}"
     [ -n "$iface" ] || return 1
-    if [ -f "$HOSTAPD_PID" ] && kill -0 "$(cat "$HOSTAPD_PID" 2>/dev/null)" 2>/dev/null; then
+    if [ -f "$HOSTAPD_PID" ] && kill -0 "$(cat "$HOSTAPD_PID" 2>/dev/null)" 2>/dev/null \
+        && [ "$(hostapd_conf_iface)" = "$iface" ]; then
         return 1
     fi
     local line state conn
@@ -792,6 +824,11 @@ ensure_ap_dhcp() {
         log "FAIL: no Wi-Fi iface; cannot start AP DHCP"
         return 1
     fi
+    if dnsmasq_running && [ -f "$DNSMASQ_CONF" ] \
+        && ! grep -qx "interface=$iface" "$DNSMASQ_CONF"; then
+        log "AP DHCP moving to $iface; restarting dnsmasq"
+        stop_pidfile "$DNSMASQ_PID" dnsmasq
+    fi
     write_dnsmasq_conf "$iface"
     if dnsmasq_running; then
         kill -HUP "$(cat "$DNSMASQ_PID" 2>/dev/null)" 2>/dev/null || true
@@ -815,15 +852,19 @@ ensure_ap_dhcp() {
 }
 
 write_hostapd_conf() {
-    local iface="$1"
+    local iface="$1" ch="${2:-${AP_CHANNEL:-6}}" mode=g
+    case "$ch" in ''|*[!0-9]*) ch="${AP_CHANNEL:-6}" ;; esac
+    [ "$ch" -gt 14 ] && mode=a
     mkdir -p "$(dirname "$HOSTAPD_CONF")"
     cat > "$HOSTAPD_CONF" <<EOF
 # Generated from $AP_ENV — SSID $AP_SSID (factory PSK in ap.env / docs).
+# channel = station channel when concurrent (brcmfmac #channels<=1), else AP_CHANNEL.
 interface=$iface
 driver=nl80211
+ctrl_interface=$HOSTAPD_CTRL
 ssid=$AP_SSID
-hw_mode=g
-channel=6
+hw_mode=$mode
+channel=$ch
 ieee80211n=1
 wmm_enabled=1
 auth_algs=1
@@ -1093,7 +1134,8 @@ cmd_nginx_bind() {
     # start (or fail-bind) without listen 10.42.0.1:80 → ERR_CONNECTION_REFUSED
     # while TeslaLinux AP + DHCP + NAT still look healthy.
     if hostapd_running && [ -n "$iface" ]; then
-        wait_ap_ipv4 "$iface" >/dev/null || true
+        # Concurrent: the AP addr lives on the hostapd iface (uap0), not the station.
+        wait_ap_ipv4 "$(hostapd_conf_iface 2>/dev/null || echo "$iface")" >/dev/null || true
     fi
     ips="$(collect_bind_ips "$iface" || true)"
     write_nginx_servers "$ips"
@@ -1105,6 +1147,15 @@ cmd_nginx_bind() {
 # Station disconnect race: NM still holds the wiphy → "nl80211 driver initialization failed".
 prepare_wifi_for_ap() {
     local iface="$1" i state
+    if [ "$iface" = "${AP_VIF:-uap0}" ]; then
+        # Virtual AP iface: never touch the station on wlan0.
+        nmcli device set "$iface" managed no 2>/dev/null || true
+        ip link set "$iface" down 2>/dev/null || true
+        ip addr flush dev "$iface" 2>/dev/null || true
+        ip addr add "$AP_ADDR/$AP_PREFIX" dev "$iface" 2>/dev/null || true
+        ip link set "$iface" up 2>/dev/null || true
+        return 0
+    fi
     nmcli device disconnect "$iface" 2>/dev/null || true
     nmcli device set "$iface" managed no 2>/dev/null || true
     i=0
@@ -1145,9 +1196,9 @@ run_hostapd() {
 
 # Start hostapd after NM release. Retry once on nl80211 init fail (station race).
 start_hostapd_ap() {
-    local iface="$1" errf attempt
+    local iface="$1" ch="${2:-}" errf attempt
     errf="$(mktemp)"
-    write_hostapd_conf "$iface"
+    write_hostapd_conf "$iface" "$ch"
     stop_pidfile "$DNSMASQ_PID" dnsmasq
     for attempt in 1 2; do
         prepare_wifi_for_ap "$iface"
@@ -1169,9 +1220,351 @@ start_hostapd_ap() {
     return 1
 }
 
+# ---- Concurrent station + AP (virtual AP iface on the same brcmfmac phy) ----
+concurrent_on() {
+    case "${AP_CONCURRENT:-1}" in
+        1|yes|true|on|ON) return 0 ;;
+    esac
+    return 1
+}
+
+# True when the AP should live on AP_VIF next to the station iface.
+concurrent_ok() {
+    local sta="${1:-}"
+    concurrent_on || return 1
+    [ -n "$sta" ] || return 1
+    [ "$sta" != "${AP_VIF:-uap0}" ] || return 1
+    command -v iw >/dev/null 2>&1 || return 1
+    [ -e "$NET_SYSFS/$AP_VIF" ] && return 0
+    # phy must offer a managed+AP combination (brcmfmac: managed<=1, AP<=1, #channels<=1)
+    iw list 2>/dev/null | grep -q '#{ AP }' || iw list 2>/dev/null | grep -Eq '\{[^}]*AP[^}]*\}'
+}
+
+hostapd_conf_iface() {
+    [ -f "$HOSTAPD_CONF" ] || return 0
+    sed -n 's/^interface=//p' "$HOSTAPD_CONF" | head -n1
+}
+
+# Locally-administered MAC for the AP vif (distinct from wlan0 and p2p-dev).
+ap_vif_mac() {
+    local sta="$1" mac o1 rest
+    mac="$(cat "$NET_SYSFS/$sta/address" 2>/dev/null || true)"
+    [ -n "$mac" ] || return 1
+    o1="${mac%%:*}"
+    rest="${mac#*:}"
+    printf '%02x:%s\n' $(( (0x$o1 | 0x02) ^ 0x08 )) "$rest"
+}
+
+ensure_ap_vif() {
+    local sta="$1" mac
+    if [ ! -e "$NET_SYSFS/$AP_VIF" ]; then
+        iw dev "$sta" interface add "$AP_VIF" type __ap 2>/dev/null || return 1
+        if mac="$(ap_vif_mac "$sta")"; then
+            ip link set "$AP_VIF" address "$mac" 2>/dev/null || true
+        fi
+        log "created AP vif $AP_VIF on $sta's phy (${mac:-same mac})"
+    fi
+    nmcli device set "$AP_VIF" managed no 2>/dev/null || true
+    return 0
+}
+
+freq_to_chan() {
+    local f="${1%%.*}"
+    case "$f" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$f" = 2484 ]; then echo 14
+    elif [ "$f" -ge 2412 ] && [ "$f" -le 2472 ]; then echo $(( (f - 2407) / 5 ))
+    elif [ "$f" -ge 5160 ] && [ "$f" -le 5885 ]; then echo $(( (f - 5000) / 5 ))
+    else return 1
+    fi
+}
+
+station_channel() {
+    iw dev "$1" info 2>/dev/null | awk '$1=="channel" {print $2; exit}'
+}
+
+ap_running_channel() {
+    local c
+    # Kernel (nl80211) is truth: brcmfmac hostapd_cli status can report a stale
+    # hw default (seen: channel=165 while the vif beacons on 11).
+    c="$(station_channel "$AP_VIF")"
+    [ -n "$c" ] || c="$(hostapd_cli -p "$HOSTAPD_CTRL" -i "$AP_VIF" status 2>/dev/null | sed -n 's/^channel=//p' | head -n1 || true)"
+    printf '%s\n' "$c"
+}
+
+# NAT AP clients out ANY uplink (LTE or Wi-Fi WAN — whichever holds the route), so a
+# default-route failover needs no rule rewrite. Table name kept for wan-verify / docs.
+apply_ap_nat() {
+    local apif="${1:-$AP_VIF}" net
+    net="$(ap_client_net)"
+    set_ip_forward
+    if have_nft; then
+        if nft list table ip tesla-linux-wan 2>/dev/null | grep -q "oifname != \"$apif\" masquerade"; then
+            return 0
+        fi
+        nft delete table ip tesla-linux-wan >/dev/null 2>&1 || true
+        nft -f - <<EOF
+table ip tesla-linux-wan {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        ip saddr $net oifname != "$apif" masquerade
+    }
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        iifname "$apif" ip saddr $net accept
+        oifname "$apif" ip daddr $net ct state related,established accept
+    }
+}
+EOF
+        log "nft tesla-linux-wan masquerade $net -> any uplink (not $apif)"
+        return 0
+    fi
+    if have_iptables; then
+        iptables -t nat -C POSTROUTING -s "$net" ! -o "$apif" -m comment --comment tesla-linux-wan -j MASQUERADE 2>/dev/null \
+            || iptables -t nat -A POSTROUTING -s "$net" ! -o "$apif" -m comment --comment tesla-linux-wan -j MASQUERADE
+        return 0
+    fi
+    log "nft/iptables missing; cannot NAT $net"
+    return 1
+}
+
+# Prefer station Wi-Fi WAN over LTE (metric 101). LTE is never touched.
+wifi_wan_prefer() {
+    local sta="$1" n cur conn changed=0
+    case "${WIFI_WAN_PREFER:-1}" in 1|yes|true|on|ON) ;; *) return 0 ;; esac
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        cur="$(nmcli -g ipv4.route-metric connection show "$n" 2>/dev/null || true)"
+        [ "$cur" = "$WIFI_WAN_METRIC" ] && continue
+        nmcli connection modify "$n" ipv4.route-metric "$WIFI_WAN_METRIC" \
+            ipv6.route-metric "$WIFI_WAN_METRIC" 2>/dev/null || continue
+        log "Wi-Fi WAN $n route-metric $WIFI_WAN_METRIC (preferred over LTE)"
+        changed=1
+    done < <(saved_infra_names)
+    [ "$changed" = 1 ] || return 0
+    conn="$(nmcli -t -f GENERAL.CONNECTION device show "$sta" 2>/dev/null | cut -d: -f2- || true)"
+    if [ -n "$conn" ] && ! is_ap_conn "$conn"; then
+        nmcli device reapply "$sta" >/dev/null 2>&1 || true
+        [ -x "$SRCROUTE_BIN" ] && "$SRCROUTE_BIN" sync >/dev/null 2>&1 || true
+    fi
+}
+
+# Solo: no station iface activity (no NM scanning) — AP alone, full airtime.
+go_solo() {
+    local sta="$1"
+    mkdir -p "$STA_STATE"
+    if [ ! -f "$STA_STATE/solo" ]; then
+        log "no saved Wi-Fi associated; AP solo (station $sta unmanaged+down, rejoin-probe scans every ${REJOIN_SCAN_SEC}s)"
+    fi
+    : > "$STA_STATE/solo"
+    date +%s > "$STA_STATE/last_scan"
+    nmcli device disconnect "$sta" >/dev/null 2>&1 || true
+    nmcli device set "$sta" managed no 2>/dev/null || true
+    ip addr flush dev "$sta" 2>/dev/null || true
+    ip link set "$sta" down 2>/dev/null || true
+}
+
+# One-shot scan from the (idle) station iface: "freq<TAB>signal<TAB>ssid", strongest first.
+scan_bss() {
+    local sta="$1" was_down=0
+    if ! ip link show "$sta" 2>/dev/null | grep -q '[<,]UP[,>]'; then
+        was_down=1
+        ip link set "$sta" up 2>/dev/null || true
+    fi
+    iw dev "$sta" scan 2>/dev/null | awk '
+        /^BSS / { f = ""; s = "-100" }
+        $1 == "freq:" { f = $2 }
+        $1 == "signal:" { s = $2 }
+        /^\tSSID: / { sub(/^\tSSID: /, ""); if (f != "") printf "%s\t%s\t%s\n", f, s, $0 }
+    ' | sort -t "$(printf '\t')" -k2,2 -gr
+    if [ "$was_down" = 1 ] && [ -f "$STA_STATE/solo" ]; then
+        ip link set "$sta" down 2>/dev/null || true
+    fi
+}
+
+profile_ssid() {
+    nmcli -g 802-11-wireless.ssid connection show "$1" 2>/dev/null || true
+}
+
+scan_saved_freq() {
+    local sta="$1" name="$2" ssid
+    ssid="$(profile_ssid "$name")"
+    [ -n "$ssid" ] || ssid="$name"
+    scan_bss "$sta" | awk -F '\t' -v s="$ssid" '$3 == s {print $1; exit}'
+}
+
+# Join a saved profile. If the BSS channel differs from the running AP, stop hostapd
+# first (#channels<=1); cmd_ap_sync restarts it on the station channel.
+sta_join() {
+    local sta="$1" name="$2" freq="${3:-}" ch cur i state
+    ch="$(freq_to_chan "$freq" 2>/dev/null || true)"
+    cur=""
+    hostapd_running && cur="$(ap_running_channel)"
+    if [ -n "$ch" ] && [ -n "$cur" ] && [ "$ch" != "$cur" ]; then
+        log "station $name on ch$ch, AP on ch$cur: AP restarts on ch$ch after join"
+        stop_pidfile "$HOSTAPD_PID" hostapd
+    fi
+    rm -f "$STA_STATE/solo"
+    nmcli device set "$sta" managed yes 2>/dev/null || true
+    ip link set "$sta" up 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 15 ]; do
+        state="$(nmcli -t -f DEVICE,STATE device status 2>/dev/null | awk -F: -v d="$sta" '$1==d {print $2; exit}')"
+        case "$state" in unmanaged|unavailable|'') sleep 1 ;; *) break ;; esac
+        i=$((i + 1))
+    done
+    nmcli connection modify "$name" connection.autoconnect yes 2>/dev/null || true
+    log "joining saved Wi-Fi '$name' on $sta${ch:+ (ch$ch)}"
+    if nmcli --wait 45 connection up "$name" ifname "$sta" >/dev/null 2>&1 \
+        && station_associated "$sta"; then
+        wait_station_ipv4 "$sta" >/dev/null || true
+        return 0
+    fi
+    log "join '$name' failed; back to AP solo"
+    go_solo "$sta"
+    return 1
+}
+
+# Keep TeslaLinux on AP_VIF, channel = station channel when associated.
+cmd_ap_sync() {
+    local sta want="" cur="" assoc=0 last
+    sta="$(wifi_iface)" || { log "no Wi-Fi iface; cannot start AP"; return 1; }
+    if ! ensure_ap_vif "$sta"; then
+        log "WARN: cannot create AP vif $AP_VIF on $sta; legacy wlan0-only AP"
+        AP_CONCURRENT=0
+        cmd_ap_up
+        return $?
+    fi
+    mkdir -p "$STA_STATE"
+    if station_associated "$sta"; then
+        assoc=1
+        want="$(station_channel "$sta")"
+    fi
+    if hostapd_running && [ "$(hostapd_conf_iface)" = "$AP_VIF" ]; then
+        cur="$(ap_running_channel)"
+    fi
+    if [ -z "$want" ]; then
+        last="$(cat "$STA_STATE/last_channel" 2>/dev/null || true)"
+        want="${cur:-${last:-${AP_CHANNEL:-6}}}"
+    fi
+    if [ -z "$cur" ] || [ "$cur" != "$want" ]; then
+        if hostapd_running && [ "$(hostapd_conf_iface)" != "$AP_VIF" ]; then
+            log "moving TeslaLinux AP from $(hostapd_conf_iface) to $AP_VIF"
+            stop_pidfile "$HOSTAPD_PID" hostapd
+            ip addr del "$AP_ADDR/$AP_PREFIX" dev "$sta" 2>/dev/null || true
+        fi
+        if [ -n "$cur" ]; then
+            log "AP channel $cur -> $want (follow station; brcmfmac #channels<=1)"
+        else
+            log "starting hostapd AP SSID=$AP_SSID on $AP_VIF ch$want addr=$AP_ADDR (station $sta assoc=$assoc)"
+        fi
+        if ! start_hostapd_ap "$AP_VIF" "$want"; then
+            if [ "$assoc" = 1 ]; then
+                log "FAIL: AP cannot run on station ch$want; dropping station so TeslaLinux stays up"
+                go_solo "$sta"
+                want="${AP_CHANNEL:-6}"
+                start_hostapd_ap "$AP_VIF" "$want" || { log "FAIL: hostapd on $AP_VIF"; return 1; }
+            else
+                log "FAIL: hostapd did not start TeslaLinux AP on $AP_VIF"
+                return 1
+            fi
+        fi
+        echo "$want" > "$STA_STATE/last_channel"
+    fi
+    ensure_ap_dhcp "$AP_VIF" || return 1
+    if wan_mode_on; then
+        apply_wan_nat || true
+    else
+        apply_ap_nat "$AP_VIF" || true
+    fi
+    [ "$assoc" = 1 ] && wifi_wan_prefer "$sta"
+    cmd_nginx_bind
+}
+
+# Solo: throttled scan; join the strongest saved SSID in range.
+maybe_rejoin_scan() {
+    local sta="$1" now last line freq ssid n
+    now="$(date +%s)"
+    last="$(cat "$STA_STATE/last_scan" 2>/dev/null || echo 0)"
+    [ $((now - last)) -ge "${REJOIN_SCAN_SEC:-120}" ] || return 0
+    echo "$now" > "$STA_STATE/last_scan"
+    has_saved_infra || return 0
+    local bss
+    bss="$(scan_bss "$sta")"
+    [ -n "$bss" ] || return 0
+    while IFS=$'\t' read -r freq _ ssid; do
+        [ -n "$ssid" ] || continue
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            if [ "$(profile_ssid "$n")" = "$ssid" ] || [ "$n" = "$ssid" ]; then
+                log "saved Wi-Fi '$n' in range ($freq MHz); rejoining"
+                sta_join "$sta" "$n" "$freq" || true
+                return 0
+            fi
+        done < <(saved_infra_names)
+    done <<< "$bss"
+}
+
+# Dispatcher / timer reconcile: station if associated, else AP solo; AP always up.
+cmd_sta_reconcile() {
+    local sta
+    sta="$(wifi_iface 2>/dev/null || true)"
+    [ -n "$sta" ] || return 0
+    if station_associated "$sta"; then
+        rm -f "$STA_STATE/solo"
+        cmd_ap_sync
+        return $?
+    fi
+    cmd_ap_sync || true
+    if [ -f "$STA_STATE/solo" ]; then
+        maybe_rejoin_scan "$sta"
+        station_associated "$sta" && cmd_ap_sync
+        return 0
+    fi
+    # Station just dropped (or NM is retrying): give NM WAIT_SEC, then go solo.
+    if has_saved_infra && wait_station "$sta"; then
+        wait_station_ipv4 "$sta" >/dev/null || true
+        cmd_ap_sync
+        return $?
+    fi
+    go_solo "$sta"
+    hostapd_running
+}
+
+cmd_rejoin_probe() {
+    local sta
+    wan_mode_on && return 0
+    sta="$(wifi_iface 2>/dev/null || true)"
+    [ -n "$sta" ] || return 0
+    concurrent_ok "$sta" || return 0
+    cmd_sta_reconcile
+}
+
+save_wlan_profile() {
+    local ssid="$1" psk="${2:-}"
+    if nmcli -t -f NAME connection show 2>/dev/null | grep -Fxq "$ssid"; then
+        nmcli connection modify "$ssid" 802-11-wireless.ssid "$ssid" \
+            802-11-wireless.mode infrastructure connection.autoconnect yes \
+            connection.autoconnect-priority 10
+    else
+        nmcli connection add type wifi con-name "$ssid" ifname "*" ssid "$ssid" \
+            802-11-wireless.mode infrastructure connection.autoconnect yes \
+            connection.autoconnect-priority 10
+    fi
+    if [ -n "$psk" ]; then
+        nmcli connection modify "$ssid" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$psk"
+    else
+        nmcli connection modify "$ssid" wifi-sec.key-mgmt none 2>/dev/null || true
+    fi
+}
+
 cmd_ap_up() {
     local iface
     iface="$(wifi_iface)" || { log "no Wi-Fi iface; cannot start AP"; return 1; }
+    if concurrent_ok "$iface"; then
+        wan_mode_on && leave_station
+        cmd_ap_sync
+        return $?
+    fi
     if station_associated "$iface" && ! wan_mode_on; then
         log "station associated; not starting AP"
         cmd_nginx_bind
@@ -1200,6 +1593,11 @@ cmd_ap_down() {
     local iface
     stop_pidfile "$HOSTAPD_PID" hostapd
     stop_pidfile "$DNSMASQ_PID" dnsmasq
+    if [ -e "$NET_SYSFS/${AP_VIF:-uap0}" ]; then
+        ip addr flush dev "$AP_VIF" 2>/dev/null || true
+        ip link set "$AP_VIF" down 2>/dev/null || true
+    fi
+    rm -f "$STA_STATE/solo"
     iface="$(wifi_iface 2>/dev/null || true)"
     if [ -n "$iface" ]; then
         ip addr flush dev "$iface" 2>/dev/null || true
@@ -1217,6 +1615,14 @@ cmd_save_wlan() {
         return 0
     fi
     iface="$(wifi_iface 2>/dev/null || true)"
+    if [ -n "$iface" ] && concurrent_ok "$iface"; then
+        save_wlan_profile "$ssid" "$psk"
+        rm -f "$STA_STATE/solo"
+        sta_join "$iface" "$ssid" "$(scan_saved_freq "$iface" "$ssid" || true)" \
+            || log "save-wlan: $ssid did not join; TeslaLinux AP stays up"
+        cmd_ap_sync || true
+        return 0
+    fi
     cmd_ap_down
     if nmcli -t -f NAME connection show 2>/dev/null | grep -Fxq "$ssid"; then
         nmcli connection modify "$ssid" \
@@ -1429,6 +1835,17 @@ cmd_boot() {
         return 1
     fi
     # station (or absent mode.json): drop leftover NAT from a previous wan_rebroadcast.
+    if iface="$(wait_wifi_iface)" && concurrent_ok "$iface"; then
+        rm -f "$STA_STATE/solo"
+        if has_saved_infra && wait_station "$iface"; then
+            ip="$(wait_station_ipv4 "$iface" || true)"
+            log "station up on $iface ${ip:-} + TeslaLinux AP on $AP_VIF (concurrent)"
+        else
+            go_solo "$iface"
+        fi
+        cmd_ap_sync || log "AP did not start on $AP_VIF"
+        hostapd_running && return 0
+    fi
     remove_wan_nat
     if iface="$(wait_wifi_iface)"; then
         if has_saved_infra; then
@@ -1465,6 +1882,11 @@ cmd_maybe_ap() {
     local iface
     if wan_mode_on; then
         cmd_wan_up
+        return $?
+    fi
+    iface="$(wifi_iface 2>/dev/null || true)"
+    if [ -n "$iface" ] && concurrent_ok "$iface"; then
+        cmd_sta_reconcile
         return $?
     fi
     remove_wan_nat
@@ -1949,7 +2371,8 @@ cmd_selftest() {
     grep -q '^prepare_wifi_for_ap()' "$helper_src" || { echo "FAIL: prepare_wifi_for_ap missing"; fail=1; }
     grep -q '^run_hostapd()' "$helper_src" || { echo "FAIL: run_hostapd missing"; fail=1; }
     grep -q 'managed no' "$helper_src" || { echo "FAIL: hostapd path missing NM managed no"; fail=1; }
-    awk '/^write_hostapd_conf\(\)/,/^}/' "$helper_src" | grep -q '^channel=6$' \
+    awk '/^write_hostapd_conf\(\)/,/^}/' "$helper_src" | grep -q '^channel=$ch$' \
+        && grep -q 'AP_CHANNEL="${AP_CHANNEL:-6}"' "$helper_src" \
         || { echo "FAIL: hostapd channel default changed (do not invent channel)"; fail=1; }
     _fn_body cmd_eth_up | grep -Eq 'ipv4_method=auto|ipv4\.method auto|never_default=no' \
         && { echo "FAIL: cmd_eth_up converts factory eth to auto (wan-ap must keep 10.42.1.1)"; fail=1; }
@@ -2294,6 +2717,8 @@ usage: tesla-linux-wlan <boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan
                     always manual + never-default (wan-ap concurrent with Pop SSH on ${ETH_ADDR})
   ap-up             TeslaLinux hostapd AP + dnsmasq DHCP (never if station is up, unless WAN mode)
   ap-down           stop AP; return iface to NetworkManager
+  ap-sync           concurrent: TeslaLinux AP on ${AP_VIF}, channel = station channel (restart on change)
+  rejoin-probe      timer: re-align AP channel; solo → scan every ${REJOIN_SCAN_SEC}s, rejoin saved Wi-Fi
   nginx-bind        write wildcard nginx listens (80/[::]:80, 443 ssl) and reload
   maybe-ap          dispatcher: station if possible, else AP (WAN mode: wan-ap, never re-join station)
   save-wlan         BACKEND bounce: save infra SSID/PSK, AP down, NM up (refused while WAN on)
@@ -2311,7 +2736,7 @@ main() {
     local cmd="${1:-}"
     shift || true
     case "$cmd" in
-        boot|eth-up|ap-up|ap-down|nginx-bind|maybe-ap|save-wlan|wan-ap|wan-rebroadcast|wan-up|wan-off|wan-down)
+        boot|eth-up|ap-up|ap-down|ap-sync|rejoin-probe|nginx-bind|maybe-ap|save-wlan|wan-ap|wan-rebroadcast|wan-up|wan-off|wan-down)
             with_lock
             ;;
     esac
@@ -2320,6 +2745,8 @@ main() {
         eth-up) cmd_eth_up ;;
         ap-up) cmd_ap_up ;;
         ap-down) cmd_ap_down ;;
+        ap-sync) cmd_ap_sync ;;
+        rejoin-probe) cmd_rejoin_probe ;;
         nginx-bind) cmd_nginx_bind ;;
         maybe-ap) cmd_maybe_ap ;;
         save-wlan) cmd_save_wlan "${1:-}" "${2:-}" ;;

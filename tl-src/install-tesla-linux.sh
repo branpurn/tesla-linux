@@ -951,8 +951,12 @@ verify_wan_rebroadcast() {
         || { echo "ERROR: tesla-linux-wlan missing start_hostapd_ap (nl80211 settle)" >&2; exit 1; }
     grep -q 'managed no' "$wlan_bin" \
         || { echo "ERROR: tesla-linux-wlan missing NM managed no before hostapd" >&2; exit 1; }
-    awk '/^write_hostapd_conf\(\)/,/^}/' "$wlan_bin" | grep -q '^channel=6$' \
-        || { echo "ERROR: hostapd channel default must stay 6 (do not invent channel)" >&2; exit 1; }
+    awk '/^write_hostapd_conf\(\)/,/^}/' "$wlan_bin" | grep -q '^channel=\$ch$' \
+        || { echo "ERROR: hostapd channel must be templated (station channel / AP_CHANNEL)" >&2; exit 1; }
+    grep -q 'AP_CHANNEL="${AP_CHANNEL:-6}"' "$wlan_bin" \
+        || { echo "ERROR: hostapd solo channel default must stay 6 (do not invent channel)" >&2; exit 1; }
+    grep -q 'cmd_ap_sync' "$wlan_bin" \
+        || { echo "ERROR: tesla-linux-wlan missing concurrent station+AP (cmd_ap_sync)" >&2; exit 1; }
     if awk '/^cmd_eth_up\(\)/,/^}/' "$wlan_bin" | grep -Eq 'ipv4_method=auto|ipv4\.method auto|never_default=no'; then
         echo "ERROR: cmd_eth_up converts factory eth to DHCP auto (wan-ap must keep 10.42.1.1)" >&2
         exit 1
@@ -1400,7 +1404,8 @@ install -m644 "$HERE/99-tesla-linux-lte.rules" /etc/udev/rules.d/99-tesla-linux-
 install -m644 "$HERE/tesla-linux-lte-dhcp.service" /etc/systemd/system/tesla-linux-lte-dhcp.service
 install -m644 "$HERE/tesla-linux-lte-dhcp.timer" /etc/systemd/system/tesla-linux-lte-dhcp.timer
 
-# 198.18.0.1 alias: the Tesla browser refuses 10.42.0.1, so DNAT 198.18.0.1:80 -> 10.42.0.1:80 on wlan0.
+# 198.18.0.1 alias: the Tesla browser refuses 10.42.0.1, so DNAT 198.18.0.1:80 -> 10.42.0.1:80 on the
+# AP iface (uap0 concurrent vif, or wlan0 legacy/solo-legacy).
 install -m644 "$HERE/tesla-linux-alias.nft" /etc/tesla-linux-alias.nft
 install -m644 "$HERE/tesla-linux-alias.service" /etc/systemd/system/tesla-linux-alias.service
 
@@ -1418,10 +1423,14 @@ cat > /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan <<'EOF'
 # WAN mode: maybe-ap → wan-up; ethernet/USB LTE (enx*/cdc_ether) up refreshes NAT.
 IFACE="$1"
 ACTION="$2"
+# uap0 = TeslaLinux AP vif (hostapd, NM-unmanaged) — never a station event.
+[ "$IFACE" = uap0 ] && exit 0
 if [ -e "/sys/class/net/$IFACE/wireless" ]; then
     case "$ACTION" in
         up|connectivity-change|down)
-            /usr/local/sbin/tesla-linux-wlan maybe-ap
+            # Background: reconcile may wait for NM retries (never block the dispatcher).
+            setsid sh -c '/usr/local/sbin/tesla-linux-wlan maybe-ap 2>&1 | logger -t tesla-linux-wlan' \
+                </dev/null >/dev/null 2>&1 &
             ;;
     esac
     exit 0
@@ -1444,6 +1453,11 @@ esac
 exit 0
 EOF
 chmod 755 /etc/NetworkManager/dispatcher.d/99-tesla-linux-wlan
+
+# Concurrent station + AP: TeslaLinux AP on virtual uap0 (hostapd), never NM-managed.
+install -m644 "$HERE/90-tesla-linux-uap0.conf" /etc/NetworkManager/conf.d/90-tesla-linux-uap0.conf
+install -m644 "$HERE/tesla-linux-wlan-rejoin.service" /etc/systemd/system/tesla-linux-wlan-rejoin.service
+install -m644 "$HERE/tesla-linux-wlan-rejoin.timer" /etc/systemd/system/tesla-linux-wlan-rejoin.timer
 
 # Source policy routing: replies from each address leave the interface that owns
 # it (LTE + Starlink Wi-Fi on the same 192.168.1.0/24). Runs before 99-*-wlan.
@@ -1835,7 +1849,7 @@ mkdir -p /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-us
 
 enable_wlan_nginx() {
     systemctl enable tesla-linux-wlan.service tesla-linux-wlan-api.service tesla-linux-pin-api.service nginx.service \
-                     tesla-linux-lte-dhcp.timer tesla-linux-alias.service >/dev/null 2>&1 || true
+                     tesla-linux-lte-dhcp.timer tesla-linux-wlan-rejoin.timer tesla-linux-alias.service >/dev/null 2>&1 || true
     ln -sfn /etc/systemd/system/tesla-linux-alias.service \
        /etc/systemd/system/multi-user.target.wants/tesla-linux-alias.service
     ln -sfn /etc/systemd/system/tesla-linux-screen-guard.service \

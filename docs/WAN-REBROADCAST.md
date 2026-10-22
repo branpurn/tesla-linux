@@ -8,6 +8,8 @@ SSID **TeslaLinux** stays visible. Operators use documented **10.42.0.1** (AP) a
 
 **No station+AP dual.** While `wan_rebroadcast` is on, `boot` / `maybe-ap` / `wan-ap` call `leave_station`: disconnect every infra association, disable saved-WLAN autoconnect, and refuse `kick_nm_station` / `wait_station` / `save-wlan` join. Tesla and other **AP clients** stay on TeslaLinux.
 
+> Default (non-WAN) mode is now **concurrent station + AP** — see [STA-AP-CONCURRENT.md](STA-AP-CONCURRENT.md). The "no dual" rule above applies only while `wan_rebroadcast` is on.
+
 ## Modes
 
 | Mode | How selected | Helper path |
