@@ -19,10 +19,12 @@ canvas{max-width:100%;max-height:100%;display:block;pointer-events:none}
 #bar button:disabled{opacity:.5;cursor:default}
 #bar .hint{opacity:.85}
 body.chrome-off #hud,body.chrome-off #bar{display:none}
+/* Stretch: canvas fills the viewport, aspect NOT preserved (X screen stays 1088x832). */
+body.fit-stretch #stage canvas{width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;object-fit:fill}
 </style>
 <div id="hud">starting…</div>
 <div id="wrap"><div id="stage"><canvas id="c" width="1280" height="720"></canvas><div id="feed"></div></div></div>
-<div id="bar"><button type="button" id="reboot">Reboot</button><button type="button" id="hide">Hide</button><span class="hint">Next boot joins that WLAN.</span></div>
+<div id="bar"><button type="button" id="reboot">Reboot</button><button type="button" id="fit">Fit: Fixed</button><button type="button" id="fs" hidden>Fullscreen</button><button type="button" id="hide">Hide</button><span class="hint">Next boot joins that WLAN.</span></div>
 <script>
 const hud=document.getElementById('hud');
 let canvas=document.getElementById('c'), ctx=null;
@@ -198,6 +200,39 @@ document.getElementById('reboot').addEventListener('click', async ()=>{
     await fetch('/api/reboot',{method:'POST',credentials:'same-origin',cache:'no-store'});
   }catch(e){}
 });
+/* ---------- Stretch / Fixed toggle ----------
+   Fixed = native aspect, letterboxed. Stretch = canvas CSS box is 100vw x 100vh.
+   Touch mapping uses canvas.getBoundingClientRect() with independent x/y
+   normalisation, so it is correct in both modes (canvas bitmap fills its box). */
+const FIT_KEY='tl.desktop.fit';
+let fitMode='fixed';
+try{ if(localStorage.getItem(FIT_KEY)==='stretch') fitMode='stretch'; }catch(e){}
+const fitBtn=document.getElementById('fit');
+function applyFit(){
+  document.body.classList.toggle('fit-stretch', fitMode==='stretch');
+  fitBtn.textContent='Fit: '+(fitMode==='stretch'?'Stretch':'Fixed');
+  fitBtn.setAttribute('aria-pressed', String(fitMode==='stretch'));
+}
+fitBtn.addEventListener('click',()=>{
+  fitMode=fitMode==='stretch'?'fixed':'stretch';
+  try{ localStorage.setItem(FIT_KEY,fitMode); }catch(e){}
+  applyFit();
+});
+['resize','orientationchange','fullscreenchange','webkitfullscreenchange'].forEach(t=>addEventListener(t,applyFit));
+document.addEventListener('fullscreenchange',applyFit);
+applyFit();
+const fsBtn=document.getElementById('fs'), de=document.documentElement;
+const reqFs=de.requestFullscreen||de.webkitRequestFullscreen;
+if(reqFs){
+  fsBtn.hidden=false;
+  fsBtn.addEventListener('click',()=>{
+    const cur=document.fullscreenElement||document.webkitFullscreenElement;
+    try{
+      if(cur) (document.exitFullscreen||document.webkitExitFullscreen).call(document);
+      else { const r=reqFs.call(de); if(r&&r.catch) r.catch(()=>{}); }
+    }catch(e){}
+  });
+}
 document.getElementById('hide').addEventListener('click',()=>{
   document.body.classList.add('chrome-off');
 });
