@@ -88,6 +88,11 @@ plant() {
         > "$TREE/etc/systemd/system/tesla-linux-desktop.service.d/xubuntu-defaults.conf"
     printf 'Package: chromium\nStatus: install ok installed\n\nPackage: xubuntu-desktop\nStatus: install ok installed\n' \
         > "$TREE/var/lib/dpkg/status"
+    mkdir -p "$TREE/etc/systemd/user" "$TREE/etc/xdg/autostart"
+    ln -s /dev/null "$TREE/etc/systemd/user/gnome-keyring-daemon.service"
+    ln -s /dev/null "$TREE/etc/systemd/user/gnome-keyring-daemon.socket"
+    printf '[Desktop Entry]\nExec=/usr/bin/gnome-keyring-daemon --start --components=secrets\n' \
+        > "$TREE/etc/xdg/autostart/tl-gnome-keyring-secrets.desktop"
 }
 plant
 expect_ok "verify-xubuntu good tree" "$INSTALL" --verify-xubuntu "$TREE"
@@ -118,6 +123,14 @@ expect_ok "removed (config-files) thunderbird is fine" "$INSTALL" --verify-xubun
 plant
 mkdir -p "$TREE/var/lib/snapd/snaps"; : > "$TREE/var/lib/snapd/snaps/firefox_1.snap"
 expect_fail "firefox snap fails" "snap present" "$INSTALL" --verify-xubuntu "$TREE"
+plant
+rm "$TREE/etc/systemd/user/gnome-keyring-daemon.socket"
+expect_fail "unmasked user keyring socket fails" "not masked" "$INSTALL" --verify-xubuntu "$TREE"
+plant
+rm "$TREE/etc/xdg/autostart/tl-gnome-keyring-secrets.desktop"
+expect_fail "missing keyring autostart fails" "keyring secrets autostart" "$INSTALL" --verify-xubuntu "$TREE"
+grep -q 'display-name=Login' "$INSTALL" && grep -q "printf 'login' > \"\$d/default\"" "$INSTALL" \
+    && pass "autologin seeds an empty-password default login keyring" || bad "login keyring seed missing"
 
 echo
 echo "selftest-xubuntu-desktop: $n_pass passed, $n_fail failed"

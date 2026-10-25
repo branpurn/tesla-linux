@@ -1098,6 +1098,7 @@ PINEOF
 
 # Services xubuntu-desktop enables that an HDMI-appliance does not need.
 # lightdm is MASKED: tesla-linux-xorg/tesla-linux-desktop own :0 (autologin).
+TL_KEYRING_AUTOSTART=/etc/xdg/autostart/tl-gnome-keyring-secrets.desktop
 TL_XUBUNTU_MASK="lightdm.service bluetooth.service blueman-mechanism.service \
 anacron.service anacron.timer lpd.service lm-sensors.service plocate-updatedb.timer"
 # System autostarts hidden per user (skel + teslalinux); xfce4-power-manager,
@@ -1137,6 +1138,44 @@ CONF
         for n in $TL_XUBUNTU_HIDE_AUTOSTART; do
             printf '[Desktop Entry]\nType=Application\nHidden=true\n' > "$d/$n.desktop"
         done
+    done
+    # Secret Service on the XFCE session bus. tesla-linux-desktop runs
+    # xfce4-session under dbus-launch (its own bus), while the systemd --user
+    # gnome-keyring-daemon claims the control socket on the *other* bus, so on
+    # the session bus org.freedesktop.secrets only "activates" a second daemon
+    # that bails ("already initialized") and every Secret Service call times
+    # out. Electron apps (safeStorage) then cannot keep their login and ask to
+    # sign in on every launch. Mask the systemd --user units and start the
+    # secrets component from XFCE autostart instead (the stock entry is
+    # OnlyShowIn=GNOME;Unity;MATE).
+    install -d /etc/systemd/user
+    for u in gnome-keyring-daemon.service gnome-keyring-daemon.socket; do
+        ln -sfn /dev/null "/etc/systemd/user/$u"
+    done
+    install -d /etc/xdg/autostart
+    cat > "$TL_KEYRING_AUTOSTART" <<'DESK'
+[Desktop Entry]
+Type=Application
+Name=GNOME Keyring: Secret Service (XFCE session bus)
+Exec=/usr/bin/gnome-keyring-daemon --start --components=secrets
+OnlyShowIn=XFCE;
+NoDisplay=true
+X-XFCE-Autostart-Override=true
+DESK
+    # Autologin has no password to unlock a "login" keyring, so seed an
+    # empty-password one (stored unencrypted, like other kiosk autologins; the
+    # device itself is PIN-gated). Only where no keyring exists yet.
+    for home in /etc/skel /home/teslalinux; do
+        [ "$home" = /etc/skel ] || [ -d "$home" ] || continue
+        d="$home/.local/share/keyrings"
+        compgen -G "$d/*.keyring" >/dev/null && continue
+        install -d -m700 "$d"
+        printf '[keyring]\ndisplay-name=Login\nctime=0\nmtime=0\nlock-on-idle=false\nlock-after=false\n' > "$d/login.keyring"
+        printf 'login' > "$d/default"
+        chmod 600 "$d/login.keyring" "$d/default"
+        if [ "$home" != /etc/skel ] && id teslalinux >/dev/null 2>&1; then
+            chown -R teslalinux:teslalinux "$home/.local"
+        fi
     done
     # Theme/DPI defaults for NEW homes only (never clobber a live user's xfconf).
     d=/etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml
@@ -1189,6 +1228,12 @@ verify_xubuntu_de() {
         { [ ! -e "$r/etc/systemd/system/$u" ] && [ ! -L "$r/etc/systemd/system/$u" ]; } \
             || { echo "ERROR: $u exists (a display manager would fight tesla-linux-xorg)" >&2; exit 1; }
     done
+    for u in gnome-keyring-daemon.service gnome-keyring-daemon.socket; do
+        [ "$(readlink "$r/etc/systemd/user/$u" 2>/dev/null)" = /dev/null ] \
+            || { echo "ERROR: user $u not masked (keyring would sit on the wrong D-Bus)" >&2; exit 1; }
+    done
+    grep -q '^Exec=/usr/bin/gnome-keyring-daemon --start --components=secrets$' "$r$TL_KEYRING_AUTOSTART" 2>/dev/null \
+        || { echo "ERROR: missing XFCE keyring secrets autostart" >&2; exit 1; }
     grep -q '^Environment=XDG_CONFIG_DIRS=/etc/xdg/xdg-xubuntu:/etc/xdg$' \
         "$r/etc/systemd/system/tesla-linux-desktop.service.d/xubuntu-defaults.conf" 2>/dev/null \
         || { echo "ERROR: missing xubuntu-defaults.conf drop-in" >&2; exit 1; }
