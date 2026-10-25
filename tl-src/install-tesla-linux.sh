@@ -1884,6 +1884,9 @@ EnvironmentFile=/etc/tesla-linux/tesla-linux.env
 # wait for pipewire-pulse and make the virtual sink the default
 ExecStartPre=/bin/sh -c 'for i in \$(seq 1 30); do pactl info >/dev/null 2>&1 && break; sleep 1; done; pactl set-default-sink tesla 2>/dev/null || true'
 ExecStart=/usr/bin/python3 $PREFIX/ta_audio_backend.py
+# audio is tiny but latency-critical: win CPU over Chromium decode + display encode
+Nice=-10
+IOSchedulingClass=realtime
 Restart=always
 RestartSec=3
 
