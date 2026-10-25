@@ -8,7 +8,7 @@ Product path is the Tesla-browser web console (`desktop.html`) at a stable known
 
 | File | Description |
     10|| ------------------------- | ---------------------------------------------------------------------------- |
-| `tl-src/install-chromium-hwdec.sh` | Installs Chromium with V4L2 HW H.264 decode (+ policies, flags, launcher) |
+| `tl-src/install-chromium-hwdec.sh` | Installs Chromium with V4L2 HW H.264 decode (+ policies, flags, launcher; compact non-touch top chrome, optional `TL_CHROMIUM_UI_SCALE`) |
 | `tl-src/install-chromium-widevine.sh` | Adds the Widevine (arm64 CDM) to every Chromium launch via `/etc/chromium.d/tesla-linux-widevine` (single "Chromium" launcher; `chromium-drm` is a compat shim) |
 | `tl-src/build-image.sh` | Bakes Ubuntu Server arm64 raspi into `tesla-linux-YYYYMMDD-pi.img.xz` |
 | `tl-src/install-tesla-linux.sh` | Installs the XFCE / Xorg / stream / WLAN stack inside the image chroot |

@@ -14,7 +14,9 @@
 #   install-chromium-hwdec.sh --print-packages
 #   install-chromium-hwdec.sh --verify [ROOT] host-side / post-install gates
 #
-# Env: TL_USER (default teslalinux), TL_SKIP_CHROMIUM=1 to do nothing.
+# Env: TL_USER (default teslalinux), TL_SKIP_CHROMIUM=1 to do nothing,
+#      TL_CHROMIUM_UI_SCALE (default unset) = --force-device-scale-factor for a
+#      smaller top chrome, e.g. 1 (pages shrink too; see docs/CHROMIUM-HWDEC.md).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -126,9 +128,19 @@ EOF
     chmod 0644 "$r/etc/chromium/policies/managed/tesla-linux.json"
 }
 
+# TL_CHROMIUM_UI_SCALE: a plain decimal in [0.5, 3] (e.g. 1, 1.15) or unset.
+ui_scale_ok() {
+    printf '%s' "$1" | grep -Eq '^[0-9](\.[0-9]{1,3})?$' || return 1
+    awk -v s="$1" 'BEGIN { exit !(s >= 0.5 && s <= 3) }'
+}
+
 # Sourced by /usr/bin/chromium (Debian wrapper) from /etc/chromium.d/*.
 write_flags() {
-    local r="${1:-}"
+    local r="${1:-}" scale="${TL_CHROMIUM_UI_SCALE:-}"
+    if [ -n "$scale" ] && ! ui_scale_ok "$scale"; then
+        echo "ERROR: TL_CHROMIUM_UI_SCALE='$scale' is not a decimal in [0.5, 3] (e.g. 1 or 1.15)" >&2
+        exit 1
+    fi
     install -d -m0755 "$r/etc/chromium.d"
     cat > "$r/etc/chromium.d/tesla-linux" <<'EOF'
 # Tesla Linux — Chromium on the Pi 4 XFCE/Xorg :0 session (managed file).
@@ -143,7 +155,56 @@ export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --ozone-platform=x11 --start-maximized"
 export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --disable-frame-rate-limit"
 export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-first-run --password-store=basic"
 export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --disable-session-crashed-bubble --hide-crash-restore-bubble"
+# Compact top chrome: pin the normal (non-touch) tab strip/toolbar instead of
+# the "auto" default, so the car's uinput touchscreen can never switch Chromium
+# to the taller touch layout. (A chrome://flags "Touch UI Layout" choice is
+# appended later and would still win — leave it on Default.)
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --top-chrome-touch-ui=disabled"
+# Unified title bar: Chromium defaults to the xfwm4 title bar *plus* its own
+# tab strip on XFCE (ui::GetCustomFramePrefDefault() is false for xfwm4).
+# Set browser.custom_chrome_frame=true (Settings > Appearance > "Use system
+# title bar and borders" off) so tabs + window buttons share one strip.
+# Only touched when no Chromium owns the profile (a running one would
+# overwrite Preferences). Opt out per launch: TL_CHROMIUM_SYSTEM_FRAME=1.
+if [ "${TL_CHROMIUM_SYSTEM_FRAME:-0}" != 1 ] && command -v python3 >/dev/null 2>&1; then
+    tl_prof="${CHROME_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}}/chromium"
+    for tl_a in "$@"; do
+        case "$tl_a" in --user-data-dir=*) tl_prof="${tl_a#--user-data-dir=}" ;; esac
+    done
+    tl_lock="$(readlink "$tl_prof/SingletonLock" 2>/dev/null || true)"
+    if [ -z "$tl_lock" ] || ! kill -0 "${tl_lock##*-}" 2>/dev/null; then
+        python3 - "$tl_prof/Default/Preferences" <<'PYEOF' || true
+import json, os, sys
+p = sys.argv[1]
+try:
+    with open(p) as f:
+        d = json.load(f)
+except FileNotFoundError:
+    d = {}
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+except Exception:
+    sys.exit(0)
+b = d.setdefault("browser", {})
+if b.get("custom_chrome_frame") is True:
+    sys.exit(0)
+b["custom_chrome_frame"] = True
+t = p + ".tl-tmp"
+with open(t, "w") as f:
+    json.dump(d, f, separators=(",", ":"))
+os.replace(t, p)
+PYEOF
+    fi
+    unset tl_prof tl_a tl_lock
+fi
 EOF
+    if [ -n "$scale" ]; then
+        cat >> "$r/etc/chromium.d/tesla-linux" <<EOF
+# TL_CHROMIUM_UI_SCALE=$scale: overrides the X11 scale Chromium derives from
+# Xft/DPI (130/96 = 1.35). Shrinks web pages too — raise Settings > Appearance >
+# Page zoom to compensate.
+export CHROMIUM_FLAGS="\$CHROMIUM_FLAGS --force-device-scale-factor=$scale"
+EOF
+    fi
     chmod 0644 "$r/etc/chromium.d/tesla-linux"
 }
 
@@ -309,6 +370,24 @@ verify_chromium() {
     if grep -Eq -- '--disable-accelerated-video-decode|--disable-gpu([[:space:]"]|$)|--force-renderer-accessibility' "$flags"; then
         echo "ERROR: flags file disables HW decode / GPU" >&2
         exit 1
+    fi
+    local live
+    live="$(grep -v '^[[:space:]]*#' "$flags" || true)"
+    grep -Eq -- '--top-chrome-touch-ui=disabled([[:space:]"]|$)' <<<"$live" \
+        || { echo "ERROR: flags file does not set --top-chrome-touch-ui=disabled (compact top chrome)" >&2; exit 1; }
+    if grep -Eq -- '--top-chrome-touch-ui=(enabled|auto)|--top-chrome-touch-ui([[:space:]"]|$)' <<<"$live"; then
+        echo "ERROR: flags file enables the touch-optimized (taller) top chrome" >&2; exit 1
+    fi
+    grep -q '"custom_chrome_frame"' "$flags" \
+        || { echo "ERROR: flags file does not seed browser.custom_chrome_frame (unified title bar)" >&2; exit 1; }
+    local dsf n_dsf
+    n_dsf="$({ grep -Eo -- '--force-device-scale-factor(=[^[:space:]"]*)?' <<<"$live" || true; } | wc -l)"
+    if [ "$n_dsf" -gt 1 ]; then
+        echo "ERROR: flags file sets --force-device-scale-factor more than once" >&2; exit 1
+    elif [ "$n_dsf" -eq 1 ]; then
+        dsf="$(grep -Eo -- '--force-device-scale-factor(=[^[:space:]"]*)?' <<<"$live" | sed 's/^[^=]*=\{0,1\}//')"
+        ui_scale_ok "$dsf" \
+            || { echo "ERROR: --force-device-scale-factor='$dsf' is not a decimal in [0.5, 3]" >&2; exit 1; }
     fi
 
     ext="$r$EXT_DST"
