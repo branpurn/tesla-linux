@@ -38,11 +38,12 @@ stats = {"chunks": 0, "sent": 0, "dropped": 0}
 
 
 def build_pipeline():
-    src = "pulsesrc" + (" device=%s" % SRC if SRC else "")
+    src = ("pulsesrc buffer-time=200000 latency-time=20000"
+           + (" device=%s" % SRC if SRC else ""))
     return (
         "%s ! queue max-size-time=100000000 ! audioconvert ! audioresample ! "
         "audio/x-raw,format=S16LE,rate=%d,channels=%d,layout=interleaved ! "
-        "appsink name=asink emit-signals=true max-buffers=8 drop=true sync=false"
+        "appsink name=asink emit-signals=true max-buffers=16 drop=true sync=false"
         % (src, RATE, CHANNELS)
     )
 

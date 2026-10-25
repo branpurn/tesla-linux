@@ -283,23 +283,32 @@ document.getElementById('hide').addEventListener('click',()=>{
    Starts automatically on load. Some browsers' autoplay policy opens the
    AudioContext "suspended"; any later gesture resumes it, so a click is a
    fallback, not a requirement. */
-const RATE=48000, CH=2, MAX_AHEAD=0.15;
-let actx=null, playAt=0, aws=null, abytes=0, audioOn=false;
+const RATE=48000, CH=2;
+// Jitter buffer: aim TARGET s ahead of the audio clock. Small drift/jitter is
+// absorbed by a tiny (±1%, inaudible) playbackRate nudge instead of snapping,
+// and only a large backlog (> HARD_MAX) drops chunks to catch up. Snapping on a
+// small window (old 150 ms) made regular audible glitches from clock drift and
+// network bursts.
+const TARGET=0.20, MAX_AHEAD=0.30, HARD_MAX=0.60, LOW=0.12;
+let actx=null, playAt=0, aws=null, abytes=0, audioOn=false, aUnder=0, aDrop=0;
 function snapPlayAt(pad){
   if(!actx) return;
-  playAt=actx.currentTime+(pad==null?0.08:pad);
+  playAt=actx.currentTime+(pad==null?TARGET:pad);
 }
 function schedulePcm(buf){
-  const s=actx.createBufferSource(); s.buffer=buf; s.connect(actx.destination);
-  // Behind → catch up. Ahead beyond MAX_AHEAD → snap (no suspend backlog).
-  if(playAt<actx.currentTime) playAt=actx.currentTime+0.05;
-  else if(playAt-actx.currentTime>MAX_AHEAD) snapPlayAt(0.05);
-  s.start(playAt); playAt+=buf.duration;
+  const now=actx.currentTime;
+  if(playAt<now+0.005){ aUnder++; playAt=now+TARGET; }   // underrun: refill to target
+  let ahead=playAt-now;
+  if(ahead>HARD_MAX){ aDrop++; return; }                  // big backlog: drop chunk
+  const s=actx.createBufferSource(); s.buffer=buf;
+  const rate=ahead>MAX_AHEAD?1.01:(ahead<LOW?0.99:1);
+  s.playbackRate.value=rate; s.connect(actx.destination);
+  s.start(playAt); playAt+=buf.duration/rate;
 }
 function startAudio(){
   if(actx) return;
   actx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:RATE});
-  snapPlayAt(0.08);                             // small jitter buffer
+  snapPlayAt(TARGET);                            // jitter buffer
   aws=new WebSocket(base+'/sockets/audio');
   aws.binaryType='arraybuffer';
   aws.onmessage=ev=>{
@@ -322,10 +331,10 @@ const resumeAudio=()=>{                         // fallback: any gesture un-susp
   if(!actx) startAudio();
   if(actx && actx.state==='suspended'){
     const p=actx.resume();
-    if(p&&typeof p.then==='function') p.then(()=>snapPlayAt(0.08)).catch(()=>{});
-    else snapPlayAt(0.08);
+    if(p&&typeof p.then==='function') p.then(()=>snapPlayAt(TARGET)).catch(()=>{});
+    else snapPlayAt(TARGET);
   }else if(actx && actx.state==='running'){
-    if(playAt-actx.currentTime>MAX_AHEAD) snapPlayAt(0.08);
+    if(playAt-actx.currentTime>HARD_MAX) snapPlayAt(TARGET);
   }
 };
 ['pointerdown','keydown','touchstart'].forEach(t=>addEventListener(t,resumeAudio,{passive:true}));
