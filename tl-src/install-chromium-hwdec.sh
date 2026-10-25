@@ -160,6 +160,42 @@ export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --disable-session-crashed-bubble --hide-c
 # to the taller touch layout. (A chrome://flags "Touch UI Layout" choice is
 # appended later and would still win — leave it on Default.)
 export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --top-chrome-touch-ui=disabled"
+# Unified title bar: Chromium defaults to the xfwm4 title bar *plus* its own
+# tab strip on XFCE (ui::GetCustomFramePrefDefault() is false for xfwm4).
+# Set browser.custom_chrome_frame=true (Settings > Appearance > "Use system
+# title bar and borders" off) so tabs + window buttons share one strip.
+# Only touched when no Chromium owns the profile (a running one would
+# overwrite Preferences). Opt out per launch: TL_CHROMIUM_SYSTEM_FRAME=1.
+if [ "${TL_CHROMIUM_SYSTEM_FRAME:-0}" != 1 ] && command -v python3 >/dev/null 2>&1; then
+    tl_prof="${CHROME_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}}/chromium"
+    for tl_a in "$@"; do
+        case "$tl_a" in --user-data-dir=*) tl_prof="${tl_a#--user-data-dir=}" ;; esac
+    done
+    tl_lock="$(readlink "$tl_prof/SingletonLock" 2>/dev/null || true)"
+    if [ -z "$tl_lock" ] || ! kill -0 "${tl_lock##*-}" 2>/dev/null; then
+        python3 - "$tl_prof/Default/Preferences" <<'PYEOF' || true
+import json, os, sys
+p = sys.argv[1]
+try:
+    with open(p) as f:
+        d = json.load(f)
+except FileNotFoundError:
+    d = {}
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+except Exception:
+    sys.exit(0)
+b = d.setdefault("browser", {})
+if b.get("custom_chrome_frame") is True:
+    sys.exit(0)
+b["custom_chrome_frame"] = True
+t = p + ".tl-tmp"
+with open(t, "w") as f:
+    json.dump(d, f, separators=(",", ":"))
+os.replace(t, p)
+PYEOF
+    fi
+    unset tl_prof tl_a tl_lock
+fi
 EOF
     if [ -n "$scale" ]; then
         cat >> "$r/etc/chromium.d/tesla-linux" <<EOF
@@ -342,6 +378,8 @@ verify_chromium() {
     if grep -Eq -- '--top-chrome-touch-ui=(enabled|auto)|--top-chrome-touch-ui([[:space:]"]|$)' <<<"$live"; then
         echo "ERROR: flags file enables the touch-optimized (taller) top chrome" >&2; exit 1
     fi
+    grep -q '"custom_chrome_frame"' "$flags" \
+        || { echo "ERROR: flags file does not seed browser.custom_chrome_frame (unified title bar)" >&2; exit 1; }
     local dsf n_dsf
     n_dsf="$({ grep -Eo -- '--force-device-scale-factor(=[^[:space:]"]*)?' <<<"$live" || true; } | wc -l)"
     if [ "$n_dsf" -gt 1 ]; then

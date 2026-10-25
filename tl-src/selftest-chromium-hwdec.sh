@@ -298,6 +298,28 @@ case " $f " in
     *) bad "default flags lost existing flags ($f)" ;;
 esac
 
+# --- unified title bar: custom_chrome_frame seeded at launch ---------------
+CH="$(mktemp -d)"
+cf() { bash -c 'CHROMIUM_FLAGS=""; HOME="$2"; XDG_CONFIG_HOME=""; CHROME_CONFIG_HOME=""; shift 2; . "$0"; true' "$FL" x "$CH" "$@"; }
+mkdir -p "$CH/.config/chromium/Default"
+echo '{"browser":{"custom_chrome_frame":false,"x":1},"k":2}' > "$CH/.config/chromium/Default/Preferences"
+cf
+if python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(not(d["browser"]["custom_chrome_frame"] is True and d["browser"]["x"]==1 and d["k"]==2))' "$CH/.config/chromium/Default/Preferences"; then
+    pass "launch seeds browser.custom_chrome_frame=true, keeps other prefs"
+else bad "custom_chrome_frame not seeded"; fi
+mkdir -p "$CH/p2"; cf --user-data-dir="$CH/p2"
+grep -q '"custom_chrome_frame":true' "$CH/p2/Default/Preferences" 2>/dev/null \
+    && pass "custom_chrome_frame honours --user-data-dir" || bad "--user-data-dir profile not seeded"
+echo '{"browser":{"custom_chrome_frame":false}}' > "$CH/.config/chromium/Default/Preferences"
+ln -sf "host-$$" "$CH/.config/chromium/SingletonLock"; cf
+grep -q '"custom_chrome_frame":false' "$CH/.config/chromium/Default/Preferences" \
+    && pass "running Chromium's Preferences left alone" || bad "Preferences edited while Chromium running"
+rm -f "$CH/.config/chromium/SingletonLock"
+TL_CHROMIUM_SYSTEM_FRAME=1 cf
+grep -q '"custom_chrome_frame":false' "$CH/.config/chromium/Default/Preferences" \
+    && pass "TL_CHROMIUM_SYSTEM_FRAME=1 opts out" || bad "opt-out ignored"
+rm -rf "$CH"
+
 sed -i '/top-chrome-touch-ui=disabled/d' "$FL"
 expect_fail "flags without --top-chrome-touch-ui=disabled fail gate" "top-chrome-touch-ui=disabled" "$INST" --verify "$TREE"
 plant "$TREE"

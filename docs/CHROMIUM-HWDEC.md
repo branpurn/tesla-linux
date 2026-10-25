@@ -233,8 +233,18 @@ file only while Chromium is closed).
 Things that do *not* help: the GTK vs Classic theme choice (Settings →
 Appearance) changes colors and window-button style, not the tab strip /
 toolbar layout constants or the scale; lowering Xft DPI would shrink the whole
-XFCE desktop, not just Chromium. "Use system title bar and borders" *adds*
-an xfwm title bar above the tabs; keep it off.
+XFCE desktop, not just Chromium.
+
+**Unified title bar.** On xfwm4 Chromium defaults "Use system title bar and
+borders" to *on* (`ui::GetCustomFramePrefDefault()` is false for xfwm4), so
+an xfwm title bar sits above a separate tab strip. The flags file sets
+`browser.custom_chrome_frame=true` in the profile's `Default/Preferences`
+(`~/.config/chromium` or `--user-data-dir`) at each launch while no Chromium
+owns that profile (a running one would overwrite the file), so tabs and the
+window buttons share one strip like Chrome on Windows/macOS. Effective from
+the next cold start. `TL_CHROMIUM_SYSTEM_FRAME=1` in the launch environment
+skips it; turning the setting back on in the UI lasts only until the next
+launch.
 
 ## Known limits
 
