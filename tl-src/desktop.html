@@ -183,10 +183,13 @@ async function onVideo(ev){
 connectVideo();
 
 /* ---------- input ---------- */
-const tws=new WebSocket(base+'/sockets/touchscreen');
-let inputReady=false;
-tws.onopen =()=>{inputReady=true;};
-tws.onclose=()=>{inputReady=false;};
+let tws=null, inputReady=false, tBack=1000;
+function connectTouch(){                         // auto-reconnect, backoff 1s→10s
+  tws=new WebSocket(base+'/sockets/touchscreen');
+  tws.onopen =()=>{inputReady=true; tBack=1000;};
+  tws.onclose=()=>{inputReady=false; setTimeout(connectTouch,tBack); tBack=Math.min(tBack*2,10000);};
+}
+connectTouch();
 function send(type, ev){
   if(!inputReady) return;
   const r=canvas.getBoundingClientRect();
@@ -305,10 +308,8 @@ function schedulePcm(buf){
   s.playbackRate.value=rate; s.connect(actx.destination);
   s.start(playAt); playAt+=buf.duration/rate;
 }
-function startAudio(){
-  if(actx) return;
-  actx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:RATE});
-  snapPlayAt(TARGET);                            // jitter buffer
+let aBack=1000;
+function connectAudio(){                         // auto-reconnect, backoff 1s→10s
   aws=new WebSocket(base+'/sockets/audio');
   aws.binaryType='arraybuffer';
   aws.onmessage=ev=>{
@@ -322,8 +323,14 @@ function startAudio(){
     }
     schedulePcm(buf);
   };
-  aws.onopen =()=>{ audioOn=true; };
-  aws.onclose=()=>{ audioOn=false; };
+  aws.onopen =()=>{ audioOn=true; aBack=1000; snapPlayAt(TARGET); };   // refill jitter buffer
+  aws.onclose=()=>{ audioOn=false; setTimeout(connectAudio,aBack); aBack=Math.min(aBack*2,10000); };
+}
+function startAudio(){
+  if(actx) return;
+  actx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:RATE});
+  snapPlayAt(TARGET);                            // jitter buffer
+  connectAudio();
   if(actx.state==='suspended') actx.resume();
 }
 startAudio();                                   // no click required where policy allows
